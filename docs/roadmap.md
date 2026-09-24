@@ -46,6 +46,17 @@ PERF1 is a measurement track, not a guarantee or V1 completion gate. See [the me
 - [ ] Evaluate the default .NET build against NativeAOT and compare reference-record/value-type lowering under equal semantics. Track compatibility warnings/errors and unsupported adapters; NativeAOT remains GC-managed.
 - [ ] Optionally compare with directly authored C# or later Rust only for equivalent workloads; make no parity claim or numerical target before data.
 
+## ABI1 - C ABI interop proof (not started)
+
+Specify one foreign-boundary contract shared by .NET adapters and C ABI calls. ABI1 is an isolated proof, not production syntax, package support, effect/capability enforcement, or a second backend. See [the foreign interop plan](foreign-interop.md).
+
+- [ ] Demonstrate a contract containing signature identity, pinned library hash, library/symbol identity, target OS/architecture ABI and calling convention, ownership/lifetime, error mapping, declared effects, required capabilities, and separately marked trusted claims. Define buffer length/encoding and callback lifetimes as future contract areas, outside the scalar proof.
+- [ ] Build a tiny C library from source with an `int32_t` identity function; demonstrate a checked language call through typed foreign IR and reject unsupported or mismatched scalar signatures.
+- [ ] Export a pure checked language `i32` transform from a NativeAOT shared library with status plus a caller-owned synchronous `int32_t` out-parameter. Demonstrate that runtime overflow becomes an error status and no exception crosses the ABI. The out-parameter is valid only for the call and is never retained; no user-defined pointer ownership is supported.
+- [ ] Call the exported language function from C and Python hosts. After control flow is supported, separately demonstrate a meaningful pure language validation library callable from those hosts; the scalar transform alone is not that demonstration.
+- [ ] Pin SDK/toolchain, OS/architecture ABI, inputs and host versions; record raw call timings, artifacts/sizes, build cost, and deployment limits on Windows and Linux. This is bounded evidence, not completion of PERF1 or a backend switch.
+- [ ] Keep normal `lang` commands closed to foreign imports. Gate richer effect/capability behavior on M2 and resource-lifetime semantics on MS1.
+
 ## SH1 - staged compiler self-hosting (not started)
 
 SH1 is a follow-on after the M1 reusable-library path, M3 useful CLI, and MS1, once M2 effect/capability support is available. PERF1 results should inform representation and deployment choices. It may proceed alongside M4 and M5; it must not delay or replace their V1 acceptance. Prerequisites include usable control flow, `Text` and collections, generics, modules, diagnostics, and capability-controlled filesystem/process access. SH1 does not complete V1.

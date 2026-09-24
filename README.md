@@ -20,6 +20,8 @@ dotnet run --project tests/Lang.IntegrationTests --configuration Release
 
 `lang check FILE` checks the source and returns 1 for invalid programs. `lang check FILE --json` prints stable diagnostic codes, source ranges, and severity, including an empty diagnostics array on success. `lang test` checks the active fixtures against their exact expected diagnostic-code lists.
 
+Foreign interop is not implemented in normal `lang` commands. A planned, not-started roadmap gate covers a narrow C ABI proof and shared boundary contract; see [docs/foreign-interop.md](docs/foreign-interop.md).
+
 `lang build FILE` compiles a program with a supported `main() -> i32|bool|Text` as an executable. If that entrypoint is absent, it builds a library DLL. Artifacts are stored in a unique `out/<source-name>-<id>/` directory beside the input file. `lang run FILE` requires the supported entrypoint, prints its returned value and a newline, and exits 0 on success. Checked i32 arithmetic overflow reports a generic runtime fault and exits 70.
 
 The CLI build/run/test commands work for the implemented source subset. Language-level CLI and web declarations remain incomplete; fixtures 14–19 are still pending and are not counted as passing checks.
