@@ -62,7 +62,7 @@ internal static class Emitter
             _source.AppendLine("    {");
             foreach (var variant in union.Variants)
             {
-                _source.Append("        ").Append(accessibility).Append(" sealed record Variant_")
+                _source.Append("        public sealed record Variant_")
                     .Append(union.Id).Append('_').Append(variant.Id).Append('(');
                 for (var i = 0; i < variant.Fields.Count; i++)
                 {

@@ -44,6 +44,7 @@ internal static class IntegrationTests
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
             ("duplicate and reserved struct names are rejected", TestStructDeclarationNames),
+            ("contextual keywords are identifiers only in their grammar contexts", TestContextualIdentifiers),
             ("public APIs reject nested private struct types", TestStructVisibility),
             ("deep field chains produce a structured diagnostic", TestDeepStructFieldChain),
             ("type mismatches fail before generated code", TestTypeMismatchContexts),
@@ -426,6 +427,53 @@ internal static class IntegrationTests
         }
     }
 
+    private static async Task TestContextualIdentifiers(Harness harness)
+    {
+        const string source = """
+            module true.false.null.match.if.await.with.route.command.effects.return.fn;
+            struct effects { route: i32, return: i32, if: i32, true: i32, null: i32 }
+            union Choice { return(null: i32) }
+
+            fn route(command: i32) -> i32 effects {} {
+                let return: i32 = command;
+                return return;
+            }
+
+            fn make_choice(value: effects) -> Choice effects {} {
+                return Choice.return(value.route + value.return + value.if + value.true + value.null);
+            }
+
+            pub fn main() -> i32 effects {} {
+                let value: effects = effects { route: 1, return: 2, if: 3, true: 4, null: 5 };
+                let choice: Choice = make_choice(value);
+                return match choice {
+                    Choice.return(payload) => route(payload),
+                };
+            }
+            """;
+
+        var result = await harness.InvokeAsync("contextual-identifiers", "run", source);
+        AssertRunOutput("15" + Environment.NewLine, result);
+
+        const string hardKeywordSource = """
+            module harness.hard_keyword_identifier;
+            fn main() -> i32 effects {} {
+                let if: i32 = 1;
+                return 0;
+            }
+            """;
+        var hardKeywordDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "hard-keyword-identifier", hardKeywordSource, "E_SYNTAX");
+        AssertEqual("E_SYNTAX", hardKeywordDiagnostics.Single().Code,
+            "A hard expression keyword must remain unavailable as a bare binding.");
+
+        const string standaloneRouteSource = """
+            module harness.standalone_route;
+            route
+            """;
+        await ExpectDiagnosticsAsync(harness, "standalone-route-declaration", standaloneRouteSource, "E_UNSUPPORTED");
+    }
+
     private static async Task TestStructDeclarationNames(Harness harness)
     {
         var cases = new (string Name, string Source, string ExpectedCode)[]
@@ -456,10 +504,6 @@ internal static class IntegrationTests
                 pub struct Option {}
                 pub struct Result {}
                 """, "E_NAME_DUPLICATE"),
-            ("reserved-struct-field-name", """
-                module harness.reserved_struct_field_name;
-                pub struct Item { return: i32 }
-                """, "E_SYNTAX")
         };
 
         foreach (var (name, source, expectedCode) in cases)

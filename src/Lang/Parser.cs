@@ -202,11 +202,9 @@ internal sealed class Parser
 {
     private const int MaximumNestingDepth = 256;
 
-    private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> BareExpressionKeywords = new(StringComparer.Ordinal)
     {
-        "as", "async", "await", "command", "effects", "else", "fn", "for", "if", "impl", "import",
-        "let", "match", "module", "null", "pub", "return", "route", "struct", "trait", "true", "false",
-        "union", "var", "with"
+        "await", "false", "if", "match", "null", "true", "with"
     };
 
     private readonly IReadOnlyList<Token> _tokens;
@@ -242,7 +240,9 @@ internal sealed class Parser
     }
 
     private bool Is(string text) => Current.Text == text;
-    private static bool IsIdentifier(Token token) => token.Kind == "id" && !Keywords.Contains(token.Text);
+    private static bool IsLexicalIdentifier(Token token) => token.Kind == "id";
+    private static bool IsBareIdentifier(Token token) =>
+        IsLexicalIdentifier(token) && !BareExpressionKeywords.Contains(token.Text);
 
     private Token Expect(string text)
     {
@@ -251,9 +251,23 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private Token ExpectIdentifier()
+    private Token ExpectBareIdentifier()
     {
-        if (IsIdentifier(Current)) return Take();
+        if (IsBareIdentifier(Current)) return Take();
+        Fail(Current, "E_SYNTAX", "Expected identifier");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectMemberIdentifier()
+    {
+        if (IsLexicalIdentifier(Current)) return Take();
+        Fail(Current, "E_SYNTAX", "Expected identifier");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectModuleSegment()
+    {
+        if (IsLexicalIdentifier(Current)) return Take();
         Fail(Current, "E_SYNTAX", "Expected identifier");
         throw new ParseFailure();
     }
@@ -315,11 +329,11 @@ internal sealed class Parser
 
     private string ParseQualifiedName()
     {
-        var name = ExpectIdentifier().Text;
+        var name = ExpectModuleSegment().Text;
         while (Is("."))
         {
             Take();
-            name += "." + ExpectIdentifier().Text;
+            name += "." + ExpectModuleSegment().Text;
         }
         return name;
     }
@@ -329,7 +343,7 @@ internal sealed class Parser
         if (Is("async"))
             Fail(Current, "E_UNSUPPORTED", "Async functions are not implemented yet");
         Expect("fn");
-        var name = ExpectIdentifier();
+        var name = ExpectBareIdentifier();
         if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic functions are not implemented yet");
 
         Expect("(");
@@ -337,7 +351,7 @@ internal sealed class Parser
         while (!Is(")"))
         {
             if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed parameter list");
-            var parameter = ExpectIdentifier();
+            var parameter = ExpectBareIdentifier();
             Expect(":");
             var type = ParseType();
             parameters.Add(new ParameterDecl(parameter.Text, type, parameter));
@@ -365,7 +379,7 @@ internal sealed class Parser
             if (Is("let"))
             {
                 var at = Take();
-                var local = ExpectIdentifier();
+                var local = ExpectBareIdentifier();
                 Expect(":");
                 var type = ParseType();
                 Expect("=");
@@ -417,7 +431,7 @@ internal sealed class Parser
     private UnionDecl ParseUnion(bool isPublic)
     {
         Expect("union");
-        var name = ExpectIdentifier();
+        var name = ExpectBareIdentifier();
         if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic unions are not implemented yet");
         Expect("{");
 
@@ -425,7 +439,7 @@ internal sealed class Parser
         while (!Is("}"))
         {
             if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed union declaration");
-            var variantAt = ExpectIdentifier();
+            var variantAt = ExpectMemberIdentifier();
             var fields = new List<VariantFieldDecl>();
             if (Is("("))
             {
@@ -438,7 +452,7 @@ internal sealed class Parser
                     string? fieldName;
                     TypeSyntax fieldType;
                     Token fieldAt;
-                    if (IsIdentifier(Current) && LookAhead().Text == ":")
+                    if (IsLexicalIdentifier(Current) && LookAhead().Text == ":")
                     {
                         fieldAt = Take();
                         fieldName = fieldAt.Text;
@@ -491,7 +505,7 @@ internal sealed class Parser
     private StructDecl ParseStruct(bool isPublic)
     {
         Expect("struct");
-        var name = ExpectIdentifier();
+        var name = ExpectBareIdentifier();
         if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic structs are not implemented yet");
         Expect("{");
 
@@ -499,7 +513,7 @@ internal sealed class Parser
         while (!Is("}"))
         {
             if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed struct declaration");
-            var fieldAt = ExpectIdentifier();
+            var fieldAt = ExpectMemberIdentifier();
             Expect(":");
             var fieldType = ParseType();
             fields.Add(new StructFieldDecl(fieldAt.Text, fieldType, fieldAt));
@@ -523,12 +537,12 @@ internal sealed class Parser
         EnterNesting(Current, "Type nesting is too deep");
         try
         {
-            var at = ExpectIdentifier();
+            var at = ExpectBareIdentifier();
             var name = at.Text;
             while (Is("."))
             {
                 Take();
-                name += "." + ExpectIdentifier().Text;
+                name += "." + ExpectMemberIdentifier().Text;
             }
 
             var arguments = new List<TypeSyntax>();
@@ -641,7 +655,7 @@ internal sealed class Parser
                 return ParsePostfix(ParseMatch(Take()));
             if (Is("await") || Is("if") || Is("with"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
-            if (!IsIdentifier(token))
+            if (!IsBareIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");
 
             Take();
@@ -682,7 +696,7 @@ internal sealed class Parser
         while (!Is("}"))
         {
             if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed struct construction");
-            var fieldAt = ExpectIdentifier();
+            var fieldAt = ExpectMemberIdentifier();
             Expect(":");
             var value = ParseExpr();
             fields.Add(new StructFieldValue(fieldAt.Text, value, fieldAt));
@@ -706,7 +720,7 @@ internal sealed class Parser
         while (Is("."))
         {
             Take();
-            var fieldAt = ExpectIdentifier();
+            var fieldAt = ExpectMemberIdentifier();
             if (Is("("))
             {
                 if (expression is not NameExpr typeName)
@@ -804,7 +818,7 @@ internal sealed class Parser
         }
         if (Is("null"))
             Fail(at, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
-        if (!IsIdentifier(at))
+        if (!IsBareIdentifier(at))
         {
             Fail(at, "E_SYNTAX", "Expected match pattern");
         }
@@ -816,7 +830,7 @@ internal sealed class Parser
         {
             Take();
             unionName = variantName;
-            variantName = ExpectIdentifier().Text;
+            variantName = ExpectMemberIdentifier().Text;
         }
 
         var bindings = new List<string>();
@@ -826,7 +840,7 @@ internal sealed class Parser
             while (!Is(")"))
             {
                 if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed pattern payload");
-                bindings.Add(ExpectIdentifier().Text);
+                bindings.Add(ExpectBareIdentifier().Text);
                 if (Is(","))
                 {
                     Take();
