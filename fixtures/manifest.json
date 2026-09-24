@@ -51,17 +51,17 @@
   },
   {
     "file": "11-union-match.al",
-    "status": "pending",
+    "status": "active",
     "expectedCode": null
   },
   {
     "file": "12-match-missing-arm.al",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_MATCH_NONEXHAUSTIVE"
   },
   {
     "file": "13-option-mismatch.al",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
@@ -96,7 +96,12 @@
   },
   {
     "file": "20-null-rejected.al",
-    "status": "pending",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "21-payload-mismatch.al",
+    "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   }
 ]

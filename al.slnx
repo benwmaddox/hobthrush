@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="src/Al/Al.csproj" />
+  <Project Path="tests/Al.IntegrationTests/Al.IntegrationTests.csproj" />
 </Solution>

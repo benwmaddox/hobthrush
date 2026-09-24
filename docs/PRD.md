@@ -88,6 +88,13 @@ pub fn normalize(input: Text) -> Result<Text, NormalizeError>
 }
 ```
 
+### Current implementation slice and syntax decisions
+
+The current parser implements the pure subset described in [docs/grammar.md](grammar.md): i32, bool, Text, declared non-generic unions, Option<T>, Result<T, E>, local let declarations, returns, calls, checked arithmetic, and exhaustive match expressions. It does not implement the generic functions and types, imports, effects, capabilities, structs, traits, CLI declarations, or routes required for V1.
+
+Union variants use either named fields, for example TooLong(max: i32), or positional fields, for example Value(i32); a variant cannot mix them. Construct declared variants with Choice.Yes or Choice.Value(3). Built-in Option and Result constructors are Some(value), None, Ok(value), and Err(error), and their type comes from an expected annotation, return type, or parameter. Match arms are comma-separated and use =>. Patterns name union variants, bind payloads positionally, or use the explicit wildcard _. Text literals support escaped quote, backslash, newline, carriage return, tab, and NUL characters. The exact productions and unsupported syntax are maintained in docs/grammar.md.
+
+For the current command-line runner, main must take no arguments and return i32, bool, or Text. al run prints the returned value followed by a newline and exits 0; checked i32 arithmetic overflow reports a generic runtime fault and exits 70. al build creates an executable when that supported entrypoint exists and otherwise creates a library DLL. This sample output behavior is separate from the eventual typed CLI exit-code mapping in this PRD.
 ### 4.2 Effects and capabilities
 
 - Define a closed V1 effect vocabulary: `fs.read`, `fs.write`, `process.spawn`, `net.client`, `net.listen`, `db.read`, `db.write`, `env.read`, `clock.read`, `log.write`, and `secret.reveal`. Add a new effect only with a documented adapter and conformance tests.
@@ -135,6 +142,9 @@ V1 commands:
 
 All commands use the same compiler and diagnostic codes. No editor integration or daemon is required. Successful `al build` emits the executable plus the manifest and receipt described below.
 
+#### Current command implementation
+
+The current compiler accepts al check FILE [--json], al build FILE, al run FILE, and al test. JSON output is supported on check and includes the schema version and ordered diagnostics. al test compares active fixture diagnostic codes exactly; it does not yet discover language-level tests. Build artifacts are copied into a unique out/<source-name>-<id>/ directory beside the source file. Fixtures for effects, capabilities, resource scopes, language CLI commands, and routes remain pending.
 ### 5.2 Package format and foreign boundary
 
 `al.toml` declares package name, version, entry kind (`lib`, `cli`, `web`), supported target, dependencies, and application capabilities. `al.lock` records resolved dependency identity and content hash. Builds fail if pinned content differs from the lockfile. Workspace path dependencies are content-hashed for the receipt but remain editable during local development. Test a clean offline rebuild with a populated cache.

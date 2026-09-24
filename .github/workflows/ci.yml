@@ -17,4 +17,6 @@ jobs:
           global-json-file: global.json
       - run: dotnet build al.slnx --configuration Release --nologo
       - run: dotnet run --project src/Al --configuration Release -- test
-      - run: dotnet run --project src/Al --configuration Release -- run examples/pure/src/main.al
+      - run: dotnet run --project tests/Al.IntegrationTests --configuration Release --no-build
+      - run: dotnet run --project src/Al --configuration Release --no-build -- run examples/pure/src/main.al
+      - run: dotnet run --project src/Al --configuration Release --no-build -- run examples/types/src/main.al

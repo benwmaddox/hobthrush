@@ -1,23 +1,27 @@
 # Roadmap and current claims
 
-The source PRD lives outside this repository. The package and executable names here are `al`, and source files use `.al`.
+The source PRD lives in [PRD.md](PRD.md). The executable is `al`, and source files use `.al`.
 
-## M0
+## M0 — repository and toolchain
 
-- [x] Pin .NET 10 LTS and create a buildable C# repository.
-- [x] Draft grammar, diagnostic registry, and 20 canonical source fixtures.
-- [ ] Make all fixtures executable compiler checks. The first parser slice only covers pure functions; pending fixtures are explicit in `fixtures/manifest.json`.
-- [ ] Add Windows and Linux CI.
+- [x] Pin .NET 10 and create a buildable C# repository.
+- [x] Record the grammar decisions and canonical source fixtures.
+- [x] Configure Windows and Linux CI for Release builds, active compiler fixtures, the integration harness, and runnable examples.
 
-## M1
+## M1 — pure typed values
 
-- [x] Parse, check, and run a small pure function slice through generated C#.
-- [ ] Modules and package imports; generic APIs and minimal static traits.
-- [ ] Structs, tagged unions, exhaustive `match`, `Option` and `Result`.
-- [ ] Typed semantic IR independent of C# and full source mapping.
+- [x] Parse, check, build, and run pure functions with checked `i32` arithmetic.
+- [x] Check `bool`, `Text`, declared tagged unions, `Option<T>`, and `Result<T, E>`.
+- [x] Type-check union construction and payloads, reject `null`, and check exhaustive matches.
+- [x] Lower the supported source into typed semantic IR and emit deterministic C#.
+- [x] Build a library DLL when no supported executable entrypoint is present.
+- [ ] Add package manifests, imports, and multi-file module resolution.
+- [ ] Add user-defined generics, traits, structs, and the remaining core types.
 
-Subsequent gates are effect inference/audit, capabilities, CLI and packages, web, and SQLite. The current compiler does not claim these checks.
+The M0 all-fixtures acceptance remains incomplete: fixtures 14–19 are still pending. M1 is also incomplete; package imports, user-defined generics, traits, and the maintained library/CLI/web project set remain future work.
 
-## Initial syntax decisions
+The active compiler-fixture set covers fixtures 01–13 and 20–21. A module header names one source file; it does not enable imports or package resolution.
 
-The tool and extension are `al` and `.al`. A module header uses `module dotted.name;`. A package root is `al.toml`. Function effects follow the return type (`effects { ... }`). Values are immutable by default. The initial integer slice uses `i32`; arithmetic uses checked operations.
+## Later gates
+
+Effect inference and capability checks, scoped resources, typed CLI and web declarations, package locking, SQLite, and the maintained V1 library/CLI/web example projects remain future work. The V1 promise in the PRD is not complete.
