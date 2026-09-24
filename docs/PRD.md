@@ -38,7 +38,7 @@ All three must share the same language, module/package format, compiler, standar
 
 | Area | V1 decision | Reason |
 | --- | --- | --- |
-| Implementation | Compiler, build tool, and first-party runtime written in C#; pin a supported .NET LTS SDK in the repository. | Fast bootstrap and direct access to mature CLI/web/runtime facilities. |
+| Implementation | Keep the bootstrap compiler and build tool in C# and pin a supported .NET LTS SDK. SH1 may add a lang-authored compiler; the first-party runtime may remain in C#. | A reliable bootstrap and mature runtime facilities coexist with staged compiler self-hosting. |
 | Backend | Type-check and lower into a typed internal IR, then emit C# and compile with the pinned SDK. One backend only. | Ship runnable applications before designing a native or Wasm backend. |
 | Memory | Managed allocation for ordinary values. Scoped resource handles for files, transactions, and response bodies. | Application ergonomics with deterministic cleanup where it matters. |
 | Null/error | No implicit nullable values; `Option<T>` and `Result<T,E>`. No exceptions for expected failures in language APIs. | Make absent values and routine errors visible in types. |
@@ -246,8 +246,17 @@ Keep the repository buildable after every milestone. Each milestone adds a worki
 | M3 — CLI and packages | Build/run/test/fmt/new/add, lockfile, scoped resources, first-party filesystem/process/config/log adapters. | The example CLI runs, prints help, handles a bad path, reports effects, and builds offline from the cache. |
 | M4 — Web foundation | Async/await, HTTP server/client, JSON codecs, typed routes, response checking, OpenAPI, HTML builder. | The example returns a valid JSON response, rejects malformed input, catches an unexpected fault, escapes HTML text, and shuts down cleanly. |
 | M5 — Persistence and release | SQLite adapter, transactions, web example, remaining audit fields, Windows/Linux CI and packaging. | All three examples and acceptance tests pass from a clean checkout on both OSes. |
+| SH1 — Self-hosted compiler (parallel follow-on after M3) | Port the compiler in stages while preserving the C# bootstrap and C# output backend. | On Windows and Linux, stage 0 builds stage 1 and stage 1 rebuilds stage 2; stages 1 and 2 produce deterministic matching C# and equivalent behavior/diagnostics on a pinned conformance corpus. SH1 does not block M4/M5 or complete V1. |
 
 An agent implementing a gate must submit: working code, added positive and negative fixtures, updated generated schema/receipt examples, a short list of claims the compiler actually checks, and unresolved limitations. A gate cannot be called complete on an illustrative parser or mocked backend.
+
+### SH1: staged compiler self-hosting (not started)
+
+SH1 may start after M1's reusable-library path and M3's useful CLI are complete, with M2 effect and capability support available. It is a parallel follow-on after M3: it must not delay or replace M4/M5, and passing SH1 does not redefine V1 completion. Before the port, the language needs usable control flow, `Text` and collection APIs, generics, modules, diagnostics, and capability-controlled filesystem/process access.
+
+Port in three steps: build a useful formatter or source tool in lang; port the lexer and parser with differential checks against the C# bootstrap; then port the checker, typed IR, and C# emitter. Stage 0 is the maintained C# bootstrap that builds compiler stage 1 from lang-authored compiler sources; stage 1 rebuilds those same sources as stage 2. The compiler continues to emit C# and use the pinned .NET SDK/runtime, and the first-party runtime may remain C#.
+
+Acceptance pins the bootstrap/compiler sources, toolchain, dependencies, and conformance corpus. On Windows and Linux, run the existing independent positive and negative constraint gates against both compiler stages; compare stage 1 and stage 2 generated C# deterministically for the same compiler source and corpus, and compare behavior and diagnostics. Normalize paths or line endings only when needed, without hiding semantic differences. Keep the known-good C# bootstrap available for recovery until replacement is separately justified. This gate makes no claim of identical binaries or a trust proof and does not require a native backend or a rewritten runtime.
 
 ## 8. Acceptance tests
 
