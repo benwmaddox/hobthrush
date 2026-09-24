@@ -32,15 +32,15 @@ V1 is complete only when **three maintained example projects** build and run fro
 
 All three must share the same language, module/package format, compiler, standard library conventions, build command, and diagnostic schema. A collection of unrelated demos is not a V1.
 
-**Operational target:** A developer who already has the pinned .NET SDK can clone the repository, run the documented bootstrap, execute `lang test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. No performance, formal-security, or binary-size claim is a V1 acceptance criterion.
+**Operational target:** A developer who already has the pinned .NET SDK can clone the repository, run the documented bootstrap, execute `lang test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. V1 makes no numerical speed or binary-size guarantee, and performance is not a completion gate; PERF1 still requires reproducible measurements before performance or representation claims are made. No formal-security claim is a V1 acceptance criterion.
 
 ## 3. Decisions fixed for V1
 
 | Area | V1 decision | Reason |
 | --- | --- | --- |
-| Implementation | Keep the bootstrap compiler and build tool in C# and pin a supported .NET LTS SDK. SH1 may add a lang-authored compiler; the first-party runtime may remain in C#. | A reliable bootstrap and mature runtime facilities coexist with staged compiler self-hosting. |
+| Implementation | Keep the C# bootstrap compiler and build tool, emit C#, and pin a supported .NET LTS SDK/runtime for V1. SH1 may add a lang-authored compiler; the first-party runtime may remain in C#. | A reliable bootstrap and mature runtime facilities coexist with staged compiler self-hosting. |
 | Backend | Type-check and lower into a typed internal IR, then emit C# and compile with the pinned SDK. One backend only. | Ship runnable applications before designing a native or Wasm backend. |
-| Memory | Managed allocation for ordinary values. Scoped resource handles for files, transactions, and response bodies. | Application ergonomics with deterministic cleanup where it matters. |
+| Memory | Use the .NET GC-managed runtime for allocations; ordinary source values may lower to references or inline/value types. Use scoped handles for files, transactions, and response bodies. Define portable sharing/resource semantics in MS1; C# layout is a lowering choice. | Application ergonomics with explicit resource cleanup and semantics independent of emitted representation. |
 | Null/error | No implicit nullable values; `Option<T>` and `Result<T,E>`. No exceptions for expected failures in language APIs. | Make absent values and routine errors visible in types. |
 | Generic code | Generic functions/types and minimal static traits with compile-time dispatch. | Real libraries without runtime reflection. |
 | Side effects | Compiler-known effects plus explicit capability values; public APIs declare effects. | Audit the call graph and keep ambient I/O out of ordinary source code. |
@@ -90,7 +90,7 @@ pub fn normalize(input: Text) -> Result<Text, NormalizeError>
 
 ### Current implementation slice and syntax decisions
 
-The current parser implements the pure subset described in [docs/grammar.md](grammar.md): i32, bool, Text, immutable non-generic nominal structs, declared non-generic unions, Option<T>, Result<T, E>, local let declarations, returns, calls, checked arithmetic, field construction and reads, and exhaustive match expressions. Struct construction uses named fields and requires each declared field exactly once; initializer expressions are evaluated in source order. Direct cycles through bare struct fields are rejected, while recursive paths through Option, Result, or a tagged union are allowed. User-defined generic functions and types, imports, effects, capabilities, traits, CLI declarations, and routes remain unimplemented requirements for V1.
+The current parser implements the pure subset described in [docs/grammar.md](grammar.md): i32, bool, Text, immutable non-generic nominal structs, declared non-generic unions, Option<T>, Result<T, E>, local let declarations, returns, calls, checked arithmetic, field construction and reads, and exhaustive match expressions. Struct construction uses named fields and requires each declared field exactly once; initializer expressions are evaluated in source order. Direct cycles through bare struct fields are rejected, while recursive paths through Option, Result, or a tagged union are allowed. Generated heap-allocated C# records are a prototype lowering, not a source-level allocation, identity, or layout promise. User-defined generic functions and types, imports, effects, capabilities, traits, CLI declarations, and routes remain unimplemented requirements for V1.
 
 Union variants use either named fields, for example TooLong(max: i32), or positional fields, for example Value(i32); a variant cannot mix them. Construct declared variants with Choice.Yes or Choice.Value(3). Built-in Option and Result constructors are Some(value), None, Ok(value), and Err(error), and their type comes from an expected annotation, return type, or parameter. Match arms are comma-separated and use =>. Patterns name union variants, bind payloads positionally, or use the explicit wildcard _. Text literals support escaped quote, backslash, newline, carriage return, tab, and NUL characters. The exact productions and unsupported syntax are maintained in docs/grammar.md. Identifier names are contextual: module path segments and unambiguous member positions accept any identifier token, including words used as grammar keywords elsewhere. Bare declaration, type-root, binding, and unqualified pattern names exclude only true, false, null, match, if, await, and with; these retain their literal, match, or unsupported-expression behavior. Keyword-like words such as route are ordinary identifiers when the grammar expects a name, while route declarations are not implemented.
 
@@ -224,7 +224,7 @@ source + locked packages
   -> executable + schemas + audit receipt
 ```
 
-A backend must consume only a successfully checked program snapshot. Keep the typed IR independent of C# syntax so checks and a future backend do not depend on emitted source. Emit reproducible source and preserve diagnostics mapping back to original `.lang` spans.
+A backend must consume only a successfully checked program snapshot. Keep the typed IR and portable language semantics independent of C# syntax and object layout; checks must not depend on emitted source. Emit reproducible source and preserve diagnostics mapping back to original `.lang` spans. See [the memory and performance contract](memory-and-performance.md) for MS1 and PERF1.
 
 **Diagnostic JSON:** Stable `code`, `severity`, `message`, file/range, symbol ID when available, and related locations/call path. Human messages may improve without changing the code. Examples: `E_MATCH_NONEXHAUSTIVE`, `E_EFFECT_EXCEEDED`, `E_CAPABILITY_MISSING`, `E_ROUTE_RESPONSE_MISSING`, `E_RESOURCE_ESCAPE`, `E_TYPE_MISMATCH`. Bad source must never produce a stack trace as the primary compiler diagnostic.
 
@@ -246,13 +246,23 @@ Keep the repository buildable after every milestone. Each milestone adds a worki
 | M3 — CLI and packages | Build/run/test/fmt/new/add, lockfile, scoped resources, first-party filesystem/process/config/log adapters. | The example CLI runs, prints help, handles a bad path, reports effects, and builds offline from the cache. |
 | M4 — Web foundation | Async/await, HTTP server/client, JSON codecs, typed routes, response checking, OpenAPI, HTML builder. | The example returns a valid JSON response, rejects malformed input, catches an unexpected fault, escapes HTML text, and shuts down cleanly. |
 | M5 — Persistence and release | SQLite adapter, transactions, web example, remaining audit fields, Windows/Linux CI and packaging. | All three examples and acceptance tests pass from a clean checkout on both OSes. |
-| SH1 — Self-hosted compiler (parallel follow-on after M3) | Port the compiler in stages while preserving the C# bootstrap and C# output backend. | On Windows and Linux, stage 0 builds stage 1 and stage 1 rebuilds stage 2; stages 1 and 2 produce deterministic matching C# and equivalent behavior/diagnostics on a pinned conformance corpus. SH1 does not block M4/M5 or complete V1. |
+| MS1 — Memory-semantics design (not started) | Specify source-level value, sharing, mutation, and scoped-resource behavior before representation changes lock semantics. | Publish a decision matrix and positive/negative conformance programs; use focused prototypes to compare representations without requiring two full production lowerings. Scope resource ownership decisions to lexical handles. MS1 is a prerequisite for SH1. |
+| PERF1 — Performance evaluation (not started) | Measure representative library/compiler, CLI, and later web/SQLite workloads; evaluate default .NET deployment, NativeAOT, and value-type lowering. | Publish reproducible raw measurements and compatibility limits; no numerical performance target is imposed. See [the measurement contract](memory-and-performance.md). |
+| SH1 — Self-hosted compiler (parallel follow-on after M3 and MS1) | Port the compiler in stages while preserving the C# bootstrap and C# output backend. | On Windows and Linux, stage 0 builds stage 1 and stage 1 rebuilds stage 2; stages 1 and 2 produce deterministic matching C# and equivalent behavior/diagnostics on a pinned conformance corpus. SH1 does not block M4/M5 or complete V1. |
 
 An agent implementing a gate must submit: working code, added positive and negative fixtures, updated generated schema/receipt examples, a short list of claims the compiler actually checks, and unresolved limitations. A gate cannot be called complete on an illustrative parser or mocked backend.
 
+### MS1: memory-semantics design (not started)
+
+MS1 is a design gate, not a claim that a borrow checker or ownership model is implemented. It must precede SH1 and any new mutable-sharing or resource-lifetime semantics that would commit source behavior. Resolve the design questions and required conformance programs in [the memory contract](memory-and-performance.md); list unresolved decisions explicitly.
+
+### PERF1: performance evaluation (not started)
+
+PERF1 is a reproducible evaluation track, not a performance promise or V1 completion gate. Its workload, measurement, and comparison rules are in [the measurement contract](memory-and-performance.md). Use evidence to inform representation and deployment choices; record unsupported NativeAOT adapters and compatibility warnings/errors.
+
 ### SH1: staged compiler self-hosting (not started)
 
-SH1 may start after M1's reusable-library path and M3's useful CLI are complete, with M2 effect and capability support available. It is a parallel follow-on after M3: it must not delay or replace M4/M5, and passing SH1 does not redefine V1 completion. Before the port, the language needs usable control flow, `Text` and collection APIs, generics, modules, diagnostics, and capability-controlled filesystem/process access.
+SH1 may start after M1's reusable-library path, M3's useful CLI, and MS1 are complete, with M2 effect and capability support available. PERF1 results should inform its representation and deployment choices. It is a parallel follow-on after M3: it must not delay or replace M4/M5, and passing SH1 does not redefine V1 completion. Before the port, the language needs usable control flow, `Text` and collection APIs, generics, modules, diagnostics, and capability-controlled filesystem/process access.
 
 Port in three steps: build a useful formatter or source tool in lang; port the lexer and parser with differential checks against the C# bootstrap; then port the checker, typed IR, and C# emitter. Stage 0 is the maintained C# bootstrap that builds compiler stage 1 from lang-authored compiler sources; stage 1 rebuilds those same sources as stage 2. The compiler continues to emit C# and use the pinned .NET SDK/runtime, and the first-party runtime may remain C#.
 
