@@ -1,0 +1,3 @@
+module fixture.arity;
+fn id(x: i32) -> i32 effects {} { return x; }
+pub fn main() -> i32 effects {} { return id(); }

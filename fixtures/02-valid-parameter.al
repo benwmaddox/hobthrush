@@ -1,0 +1,3 @@
+module fixture.parameter;
+pub fn identity(value: i32) -> i32 effects {} { return value; }
+pub fn main() -> i32 effects {} { return identity(4); }

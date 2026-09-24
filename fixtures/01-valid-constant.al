@@ -1,0 +1,2 @@
+module fixture.constant;
+pub fn main() -> i32 effects {} { return 1; }

@@ -1,0 +1,2 @@
+module fixture.semicolon;
+pub fn main() -> i32 effects {} { return 1 }

@@ -1,0 +1,10 @@
+module example.pure;
+
+pub fn square(value: i32) -> i32 effects {} {
+    return value * value;
+}
+
+pub fn main() -> i32 effects {} {
+    let base: i32 = 7;
+    return square(base) + 1;
+}

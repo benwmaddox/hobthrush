@@ -1,0 +1,2 @@
+module fixture.option;
+pub fn bad(x: Option<i32>) -> i32 effects {} { return x; }

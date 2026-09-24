@@ -1,0 +1,2 @@
+module fixture.resource;
+pub fn bad(db: DbWrite) -> Transaction effects { db.write } { with db.begin() as tx { return tx; } }

@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet build al.slnx --configuration Release --nologo
+      - run: dotnet run --project src/Al --configuration Release -- test
+      - run: dotnet run --project src/Al --configuration Release -- run examples/pure/src/main.al

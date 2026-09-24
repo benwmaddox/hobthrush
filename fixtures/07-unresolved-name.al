@@ -1,0 +1,2 @@
+module fixture.unresolved;
+pub fn main() -> i32 effects {} { return missing; }

@@ -1,0 +1,102 @@
+[
+  {
+    "file": "01-valid-constant.al",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "02-valid-parameter.al",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "03-valid-local.al",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "04-missing-module.al",
+    "status": "active",
+    "expectedCode": "E_SYNTAX"
+  },
+  {
+    "file": "05-missing-semicolon.al",
+    "status": "active",
+    "expectedCode": "E_SYNTAX"
+  },
+  {
+    "file": "06-duplicate-function.al",
+    "status": "active",
+    "expectedCode": "E_NAME_DUPLICATE"
+  },
+  {
+    "file": "07-unresolved-name.al",
+    "status": "active",
+    "expectedCode": "E_NAME_UNRESOLVED"
+  },
+  {
+    "file": "08-wrong-arity.al",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "09-literal-overflow.al",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "10-missing-return.al",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "11-union-match.al",
+    "status": "pending",
+    "expectedCode": null
+  },
+  {
+    "file": "12-match-missing-arm.al",
+    "status": "pending",
+    "expectedCode": "E_MATCH_NONEXHAUSTIVE"
+  },
+  {
+    "file": "13-option-mismatch.al",
+    "status": "pending",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "14-effect-transitive.al",
+    "status": "pending",
+    "expectedCode": "E_EFFECT_EXCEEDED"
+  },
+  {
+    "file": "15-capability-missing.al",
+    "status": "pending",
+    "expectedCode": "E_CAPABILITY_MISSING"
+  },
+  {
+    "file": "16-resource-escape.al",
+    "status": "pending",
+    "expectedCode": "E_RESOURCE_ESCAPE"
+  },
+  {
+    "file": "17-cli-command.al",
+    "status": "pending",
+    "expectedCode": null
+  },
+  {
+    "file": "18-route-mapping.al",
+    "status": "pending",
+    "expectedCode": null
+  },
+  {
+    "file": "19-route-missing-mapping.al",
+    "status": "pending",
+    "expectedCode": "E_ROUTE_RESPONSE_MISSING"
+  },
+  {
+    "file": "20-null-rejected.al",
+    "status": "pending",
+    "expectedCode": "E_TYPE_MISMATCH"
+  }
+]

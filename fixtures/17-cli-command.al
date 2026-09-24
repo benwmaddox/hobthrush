@@ -1,0 +1,2 @@
+module fixture.cli;
+command scan { argument input: FilePath; flag recursive; handler: scan_files; }

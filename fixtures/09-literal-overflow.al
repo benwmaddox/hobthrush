@@ -1,0 +1,2 @@
+module fixture.overflow;
+pub fn main() -> i32 effects {} { return 2147483648; }

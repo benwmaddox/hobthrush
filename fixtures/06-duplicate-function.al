@@ -1,0 +1,3 @@
+module fixture.duplicate;
+fn a() -> i32 effects {} { return 1; }
+fn a() -> i32 effects {} { return 2; }
