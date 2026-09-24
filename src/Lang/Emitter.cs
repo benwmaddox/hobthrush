@@ -30,6 +30,7 @@ internal static class Emitter
 
             EmitBuiltinTypes();
             foreach (var union in program.Unions) EmitUnion(union);
+            foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in program.Functions) EmitFunction(function);
             EmitArithmeticHelpers();
             if (executable) EmitEntryPoint(entry!);
@@ -71,6 +72,21 @@ internal static class Emitter
                 _source.Append(") : Union_").Append(union.Id).AppendLine(";");
             }
             _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitStruct(CheckedStruct structure)
+        {
+            _source.Append("    ").Append(structure.Public ? "public" : "private")
+                .Append(" sealed record Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture)).Append('(');
+            for (var i = 0; i < structure.Fields.Count; i++)
+            {
+                if (i != 0) _source.Append(", ");
+                var field = structure.Fields[i];
+                _source.Append(EmitType(field.Type)).Append(" Field_")
+                    .Append(field.Index.ToString(CultureInfo.InvariantCulture));
+            }
+            _source.AppendLine(");");
             _source.AppendLine();
         }
 
@@ -120,6 +136,9 @@ internal static class Emitter
                 "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")",
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
+            TypedStructConstructExpr structure => EmitStructConstruct(structure),
+            TypedFieldAccessExpr field => "(" + EmitExpr(field.Target) + ").Field_" +
+                field.FieldIndex.ToString(CultureInfo.InvariantCulture),
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
@@ -155,6 +174,11 @@ internal static class Emitter
             expression.UnionId.ToString(CultureInfo.InvariantCulture) + "_" +
             expression.VariantId.ToString(CultureInfo.InvariantCulture) + "(" +
             string.Join(", ", expression.Arguments.Select(EmitExpr)) + ")";
+
+        private string EmitStructConstruct(TypedStructConstructExpr expression) =>
+            "new Struct_" + expression.StructId.ToString(CultureInfo.InvariantCulture) + "(" +
+            string.Join(", ", expression.Fields.Select(field =>
+                "Field_" + field.FieldIndex.ToString(CultureInfo.InvariantCulture) + ": " + EmitExpr(field.Value))) + ")";
 
         private string EmitMatch(TypedMatchExpr expression)
         {
@@ -238,6 +262,7 @@ internal static class Emitter
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
+            LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
             _ => throw new InvalidOperationException("Error type reached emitter")

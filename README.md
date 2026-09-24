@@ -2,7 +2,7 @@
 
 `lang` is a temporary working name for an agent-first general-purpose language under construction; the permanent name is pending. The executable is `lang` and source files use `.lang`. This repository is independent of Stasis.
 
-The implemented pure-language slice supports `i32`, `bool`, `Text`, declared tagged unions, `Option<T>`, `Result<T, E>`, payload type checks, and exhaustive `match`. Effects must be declared as `effects {}`. The current parser and constructor decisions are described in [docs/grammar.md](docs/grammar.md).
+The implemented pure-language slice supports `i32`, `bool`, `Text`, immutable non-generic nominal structs, declared tagged unions, `Option<T>`, `Result<T, E>`, payload and field checks, and exhaustive `match`. Effects must be declared as `effects {}`. The current parser and constructor decisions are described in [docs/grammar.md](docs/grammar.md).
 
 ## Bootstrap
 
@@ -13,6 +13,7 @@ dotnet build lang.slnx --configuration Release
 dotnet run --project src/Lang --configuration Release -- check examples/pure/src/main.lang --json
 dotnet run --project src/Lang --configuration Release -- run examples/pure/src/main.lang
 dotnet run --project src/Lang --configuration Release -- run examples/types/src/main.lang
+dotnet run --project src/Lang --configuration Release -- run examples/structs/src/main.lang
 dotnet run --project src/Lang --configuration Release -- test
 dotnet run --project tests/Lang.IntegrationTests --configuration Release
 ```

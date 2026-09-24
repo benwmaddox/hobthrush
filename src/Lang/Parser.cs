@@ -274,6 +274,7 @@ internal sealed class Parser
 
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
+            var structs = new List<StructDecl>();
             while (Current.Kind != "eof")
             {
                 var isPublic = false;
@@ -291,6 +292,10 @@ internal sealed class Parser
                 {
                     unions.Add(ParseUnion(isPublic));
                 }
+                else if (Is("struct"))
+                {
+                    structs.Add(ParseStruct(isPublic));
+                }
                 else
                 {
                     var declaration = Current;
@@ -300,7 +305,7 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, unions, functions);
+            return new ParsedProgram(module, unions, functions, structs);
         }
         catch (ParseFailure)
         {
@@ -483,6 +488,36 @@ internal sealed class Parser
         return new UnionDecl(name.Text, isPublic, variants, name);
     }
 
+    private StructDecl ParseStruct(bool isPublic)
+    {
+        Expect("struct");
+        var name = ExpectIdentifier();
+        if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic structs are not implemented yet");
+        Expect("{");
+
+        var fields = new List<StructFieldDecl>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed struct declaration");
+            var fieldAt = ExpectIdentifier();
+            Expect(":");
+            var fieldType = ParseType();
+            fields.Add(new StructFieldDecl(fieldAt.Text, fieldType, fieldAt));
+            if (Is(","))
+            {
+                Take();
+                if (Is("}")) break;
+            }
+            else if (!Is("}"))
+            {
+                Expect(",");
+            }
+        }
+
+        Expect("}");
+        return new StructDecl(name.Text, isPublic, fields, name);
+    }
+
     private TypeSyntax ParseType()
     {
         EnterNesting(Current, "Type nesting is too deep");
@@ -522,12 +557,12 @@ internal sealed class Parser
         }
     }
 
-    private Expr ParseExpr(int minPrecedence = 0)
+    private Expr ParseExpr(int minPrecedence = 0, bool allowStructConstruction = true)
     {
         EnterNesting(Current, "Expression nesting is too deep");
         try
         {
-            var left = ParsePrimary();
+            var left = ParsePrimary(allowStructConstruction);
             var leftDepth = ExpressionDepth(left);
             while (true)
             {
@@ -540,7 +575,7 @@ internal sealed class Parser
                 if (precedence == 0 || precedence < minPrecedence) break;
 
                 var op = Take();
-                var right = ParseExpr(precedence + 1);
+                var right = ParseExpr(precedence + 1, allowStructConstruction);
                 var depth = Math.Max(leftDepth, ExpressionDepth(right)) + 1;
                 if (depth > MaximumNestingDepth)
                     Fail(op, "E_SYNTAX", "Expression nesting is too deep");
@@ -555,7 +590,7 @@ internal sealed class Parser
         }
     }
 
-    private Expr ParsePrimary()
+    private Expr ParsePrimary(bool allowStructConstruction)
     {
         var token = Current;
         if (token.Kind == "number")
@@ -563,7 +598,7 @@ internal sealed class Parser
             Take();
             if (!int.TryParse(token.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var value))
                 Fail(token, "E_TYPE_MISMATCH", "Integer literal is outside i32 range");
-            return RegisterExpression(new NumberExpr(token, value));
+            return ParsePostfix(RegisterExpression(new NumberExpr(token, value)));
         }
         if (Is("-"))
         {
@@ -577,63 +612,123 @@ internal sealed class Parser
                     Fail(magnitudeToken, "E_TYPE_MISMATCH", "Integer literal is outside i32 range");
                 }
                 var value = magnitude == 2147483648u ? int.MinValue : -(int)magnitude;
-                return RegisterExpression(new NumberExpr(minus, value));
+                return ParsePostfix(RegisterExpression(new NumberExpr(minus, value)));
             }
 
-            var operand = ParseExpr(3);
+            var operand = ParseExpr(3, allowStructConstruction);
             var zero = RegisterExpression(new NumberExpr(minus, 0));
             var depth = Math.Max(ExpressionDepth(zero), ExpressionDepth(operand)) + 1;
             if (depth > MaximumNestingDepth)
                 Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
-            return RegisterExpression(new BinaryExpr(minus, "-", zero, operand), depth);
+            var negated = RegisterExpression(new BinaryExpr(minus, "-", zero, operand), depth);
+            return ParsePostfix(negated);
         }
         if (token.Kind == "text")
         {
             Take();
-            return RegisterExpression(new TextExpr(token, DecodeText(token)));
+            return ParsePostfix(RegisterExpression(new TextExpr(token, DecodeText(token))));
         }
         if (token.Kind == "id")
         {
             if (Is("true") || Is("false"))
             {
                 Take();
-                return RegisterExpression(new BoolExpr(token, token.Text == "true"));
+                return ParsePostfix(RegisterExpression(new BoolExpr(token, token.Text == "true")));
             }
             if (Is("null"))
                 Fail(token, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
-            if (Is("match")) return ParseMatch(Take());
+            if (Is("match"))
+                return ParsePostfix(ParseMatch(Take()));
             if (Is("await") || Is("if") || Is("with"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
             if (!IsIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");
 
             Take();
-            if (Is("."))
+            Expr expression;
+            if (allowStructConstruction && Is("{"))
             {
-                Take();
-                var variant = ExpectIdentifier();
-                var arguments = Is("(") ? ParseArguments() : [];
-                return RegisterExpression(new VariantExpr(token, token.Text, variant.Text, arguments),
-                    1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
+                expression = ParseStructConstruction(token);
             }
-            if (Is("("))
+            else if (Is("("))
             {
                 var arguments = ParseArguments();
-                return RegisterExpression(new CallExpr(token, token.Text, arguments),
+                expression = RegisterExpression(new CallExpr(token, token.Text, arguments),
                     1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
             }
-            return RegisterExpression(new NameExpr(token, token.Text));
+            else
+            {
+                expression = RegisterExpression(new NameExpr(token, token.Text));
+            }
+            return ParsePostfix(expression);
         }
         if (Is("("))
         {
             Take();
+            // Parentheses make a struct construction unambiguous as a match scrutinee.
             var expression = ParseExpr();
             Expect(")");
-            return expression;
+            return ParsePostfix(expression);
         }
 
         Fail(token, "E_SYNTAX", $"Expected expression, found '{token.Text}'");
         throw new ParseFailure();
+    }
+
+    private Expr ParseStructConstruction(Token typeName)
+    {
+        Expect("{");
+        var fields = new List<StructFieldValue>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed struct construction");
+            var fieldAt = ExpectIdentifier();
+            Expect(":");
+            var value = ParseExpr();
+            fields.Add(new StructFieldValue(fieldAt.Text, value, fieldAt));
+            if (Is(","))
+            {
+                Take();
+                if (Is("}")) break;
+            }
+            else if (!Is("}"))
+            {
+                Expect(",");
+            }
+        }
+        Expect("}");
+        var depth = 1 + fields.Select(field => ExpressionDepth(field.Value)).DefaultIfEmpty(0).Max();
+        return RegisterExpression(new StructConstructExpr(typeName, typeName.Text, fields), depth);
+    }
+
+    private Expr ParsePostfix(Expr expression)
+    {
+        while (Is("."))
+        {
+            Take();
+            var fieldAt = ExpectIdentifier();
+            if (Is("("))
+            {
+                if (expression is not NameExpr typeName)
+                {
+                    Fail(fieldAt, "E_UNSUPPORTED", "Method calls are not implemented yet");
+                    throw new ParseFailure();
+                }
+
+                var arguments = ParseArguments();
+                var depth = 1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max();
+                expression = RegisterExpression(
+                    new VariantExpr(typeName.At, typeName.Name, fieldAt.Text, arguments), depth);
+                continue;
+            }
+
+            var fieldDepth = ExpressionDepth(expression) + 1;
+            if (fieldDepth > MaximumNestingDepth)
+                Fail(fieldAt, "E_SYNTAX", "Expression nesting is too deep");
+            expression = RegisterExpression(new FieldAccessExpr(fieldAt, expression, fieldAt.Text), fieldDepth);
+        }
+
+        return expression;
     }
 
     private int ExpressionDepth(Expr expression) =>
@@ -671,7 +766,8 @@ internal sealed class Parser
 
     private Expr ParseMatch(Token at)
     {
-        var value = ParseExpr();
+        // The following brace begins the match arms unless construction is explicitly grouped.
+        var value = ParseExpr(allowStructConstruction: false);
         Expect("{");
         var arms = new List<MatchArm>();
         while (!Is("}"))

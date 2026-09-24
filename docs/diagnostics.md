@@ -9,7 +9,10 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_NAME_UNRESOLVED | Name is not declared in scope | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, or return type mismatch | Implemented for the pure type slice |
-| E_TYPE_VISIBILITY | A public type signature exposes a private union | Implemented |
+| E_TYPE_VISIBILITY | A public type signature exposes a private union or struct | Implemented |
+| E_FIELD_UNKNOWN | A struct initializer or field read names an unknown field | Implemented |
+| E_FIELD_MISSING | A struct construction omits a declared field | Implemented |
+| E_FIELD_DUPLICATE | A struct construction initializes a field more than once | Implemented |
 | E_MATCH_NONEXHAUSTIVE | One or more union variants are missing from a match | Implemented |
 | E_MATCH_ARM_DUPLICATE | A match arm is duplicated or follows a wildcard | Implemented |
 | E_ENTRYPOINT | `lang run` has no supported zero-argument `main` function | Implemented |

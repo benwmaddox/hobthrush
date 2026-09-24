@@ -15,6 +15,8 @@ internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
 internal sealed record VariantDecl(string Name, IReadOnlyList<VariantFieldDecl> Fields, Token At);
 internal sealed record UnionDecl(string Name, bool Public, IReadOnlyList<VariantDecl> Variants, Token At);
+internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
+internal sealed record StructDecl(string Name, bool Public, IReadOnlyList<StructFieldDecl> Fields, Token At);
 internal sealed record FunctionDecl(
     string Name,
     bool Public,
@@ -25,7 +27,8 @@ internal sealed record FunctionDecl(
 internal sealed record ParsedProgram(
     string Module,
     IReadOnlyList<UnionDecl> Unions,
-    IReadOnlyList<FunctionDecl> Functions);
+    IReadOnlyList<FunctionDecl> Functions,
+    IReadOnlyList<StructDecl> Structs);
 
 internal abstract record Expr(Token At);
 internal sealed record NumberExpr(Token At, int Value) : Expr(At);
@@ -39,6 +42,9 @@ internal sealed record VariantExpr(
     string UnionName,
     string VariantName,
     IReadOnlyList<Expr> Arguments) : Expr(At);
+internal sealed record StructFieldValue(string Name, Expr Value, Token At);
+internal sealed record StructConstructExpr(Token At, string Name, IReadOnlyList<StructFieldValue> Fields) : Expr(At);
+internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
 internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
 

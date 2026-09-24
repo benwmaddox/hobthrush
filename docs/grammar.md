@@ -1,10 +1,10 @@
 # Grammar
 
-The parser accepts the core pure-language slice below. The wider V1 syntax in [the PRD](PRD.md) remains a design target; unsupported declarations and statements fail with a diagnostic.
+The parser accepts the implemented pure-language slice below. The wider V1 syntax in [the PRD](PRD.md) remains a design target; unsupported declarations and statements fail with a diagnostic.
 
 ```ebnf
 module          = "module", qualified_name, ";", { declaration } ;
-declaration     = [ "pub" ], ( function | union ) ;
+declaration     = [ "pub" ], ( function | union | struct ) ;
 
 function        = "fn", identifier, "(", [ parameters ], ")",
                   "->", type, "effects", "{", "}", block ;
@@ -20,6 +20,10 @@ named_fields    = named_field, { ",", named_field }, [ "," ] ;
 named_field     = identifier, ":", type ;
 positional_fields = type, { ",", type }, [ "," ] ;
 
+struct          = "struct", identifier, "{", [ struct_fields ], "}" ;
+struct_fields   = struct_field, { ",", struct_field }, [ "," ] ;
+struct_field    = identifier, ":", type ;
+
 block           = "{", { statement }, "}" ;
 statement       = "let", identifier, ":", type, "=", expression, ";"
                 | "return", expression, ";" ;
@@ -27,12 +31,18 @@ statement       = "let", identifier, ":", type, "=", expression, ";"
 expression      = match_expression | additive ;
 additive        = multiplicative, { ("+" | "-"), multiplicative } ;
 multiplicative  = unary, { "*", unary } ;
-unary           = [ "-" ], primary ;
+unary           = [ "-" ], postfix ;
+postfix         = primary, { ".", identifier } ;
 primary         = integer | boolean | text | identifier | call
-                | variant_construction | "(", expression, ")" ;
+                | variant_construction | struct_construction
+                | "(", expression, ")" ;
 call            = identifier, "(", [ arguments ], ")" ;
 variant_construction
                 = identifier, ".", identifier, [ "(", [ arguments ], ")" ] ;
+struct_construction
+                = identifier, "{", [ field_values ], "}" ;
+field_values    = field_value, { ",", field_value }, [ "," ] ;
+field_value     = identifier, ":", expression ;
 arguments       = expression, { ",", expression }, [ "," ] ;
 
 match_expression = "match", expression, "{", match_arm, { ",", match_arm }, [ "," ], "}" ;
@@ -51,7 +61,23 @@ identifier      = letter | "_", { letter | digit | "_" } ;
 
 A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. User-defined generic unions and functions are not supported. `Option<T>` and `Result<T, E>` are compiler-provided generic types; their type arguments must be supported types.
 
-The implemented value types are `i32`, `bool`, `Text`, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above.
+Structs are immutable, non-generic, nominal value types. Empty structs are legal. A struct declares named fields, and a construction must initialize every field exactly once by name. For example:
+
+```lang
+pub struct User { name: Text, age: i32 }
+let user: User = User { age: 37, name: "Ada" };
+return user.name;
+```
+
+Initializer expressions are evaluated in source order, including when that order differs from the declaration order. Duplicate initializers report `E_FIELD_DUPLICATE`, omitted fields report `E_FIELD_MISSING`, unknown initializers or reads report `E_FIELD_UNKNOWN`, and a value with the wrong field type reports `E_TYPE_MISMATCH`. Duplicate field declarations report `E_NAME_DUPLICATE`.
+
+Field reads can be chained from a local, call, parenthesized value, or struct construction, for example `user.address.city`, `make_user().name`, `(user).name`, and `User { name: "Ada", age: 37 }.name`. Method calls are not implemented. A dotted no-call form such as `Choice.Empty` is resolved as a zero-payload union variant only when the left name is not shadowed by a local. A local name shadows a type name in dotted access and dotted-call syntax.
+
+A struct may contain itself through `Option`, `Result`, or a tagged union. Cycles made only of direct struct fields are rejected with `E_TYPE_MISMATCH`; a bare recursive field such as `struct Node { next: Node }` is invalid.
+
+A struct construction at the top level of a match scrutinee is ambiguous with the match-arm brace and is disabled there. Write `match (Box { value: Choice.Yes }).value { Choice.Yes => 1, Choice.No => 0 }` to use a struct construction within a union-valued scrutinee. Existing forms such as `match value { Some(x) => x, None => 0 }` continue to use the brace for match arms.
+
+The implemented value types are `i32`, `bool`, `Text`, immutable non-generic structs, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above.
 
 Use `Choice.Yes` or `Choice.Value(3)` to construct a declared union. Built-in constructors use `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. `None`, `Some`, `Ok`, and `Err` need an expected type from a local annotation, return type, or function parameter. A same-named user function takes precedence. Fully qualified `Option<T>.Some` and `Result<T, E>.Ok` construction is deferred.
 

@@ -1,0 +1,7 @@
+module fixture.struct_field_type_mismatch;
+
+pub struct Pair { left: i32, right: i32 }
+
+pub fn invalid() -> Pair effects {} {
+    return Pair { left: "wrong", right: 2 };
+}

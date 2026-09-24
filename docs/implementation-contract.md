@@ -30,11 +30,14 @@ internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
 internal sealed record VariantDecl(string Name, IReadOnlyList<VariantFieldDecl> Fields, Token At);
 internal sealed record UnionDecl(string Name, bool Public, IReadOnlyList<VariantDecl> Variants, Token At);
+internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
+internal sealed record StructDecl(string Name, bool Public, IReadOnlyList<StructFieldDecl> Fields, Token At);
 internal sealed record FunctionDecl(
     string Name, bool Public, IReadOnlyList<ParameterDecl> Parameters,
     TypeSyntax ReturnType, IReadOnlyList<Stmt> Body, Token At);
 internal sealed record ParsedProgram(
-    string Module, IReadOnlyList<UnionDecl> Unions, IReadOnlyList<FunctionDecl> Functions);
+    string Module, IReadOnlyList<UnionDecl> Unions, IReadOnlyList<FunctionDecl> Functions,
+    IReadOnlyList<StructDecl> Structs);
 
 internal abstract record Expr(Token At);
 internal sealed record NumberExpr(Token At, int Value) : Expr(At);
@@ -45,6 +48,10 @@ internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : 
 internal sealed record CallExpr(Token At, string Name, IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record VariantExpr(
     Token At, string UnionName, string VariantName, IReadOnlyList<Expr> Arguments) : Expr(At);
+internal sealed record StructFieldValue(string Name, Expr Value, Token At);
+internal sealed record StructConstructExpr(
+    Token At, string Name, IReadOnlyList<StructFieldValue> Fields) : Expr(At);
+internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(
     Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
 internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
@@ -61,13 +68,13 @@ internal sealed record ReturnStmt(Token At, Expr Value) : Stmt(At);
 
 Keep `Lexer.Scan(string source, string file, List<Diagnostic> diagnostics)` and `new Parser(tokens, file, diagnostics).Parse()` returning `ParsedProgram?`. The parser reports syntax failures as diagnostics, not exceptions to the driver. It accepts the already implemented subset plus `bool` literals, quoted `Text` literals, nested types (`Option<i32>`, `Result<Text, E>`), union declarations with zero, positional (`Value(i32)`), or named (`TooLong(max: i32)`) payload fields, variant construction, and match expressions with `=>` arms. A variant may not mix positional and named fields. It continues to require explicit `effects {}` on functions. No user generic declarations or nonempty effects in this stage.
 
-Parse `Choice.Yes` as `VariantExpr(..., "Choice", "Yes", [])` and `Choice.Value(3)` as `VariantExpr(..., "Choice", "Value", [NumberExpr])`. Parse `Some(3)`, `Ok(3)`, and `Err(x)` as `CallExpr`; parse bare `None` as `NameExpr`. The semantic checker may resolve these short forms as builtin constructors only when an expected `Option<T>` or `Result<T,E>` type is available from an explicit local annotation, return type, or call parameter. A function with the same name takes precedence; ambiguous or context-free construction is a diagnostic. Syntax `Option<i32>.Some` and `Result<T,E>.Ok` is deferred. A match arm accepts `Choice.Yes`, `Choice.Value(value)`, `Some(value)`, `None`, `Ok(value)`, `Err(error)`, or `_`; the parser emits `VariantPattern` with null `UnionName` for short builtin names. Pattern bindings are identifiers; payload field names belong to the union declaration and need not match bindings.
+Parse `Choice.Value(3)` as `VariantExpr(..., "Choice", "Value", [NumberExpr])`. A no-call dotted expression such as `Choice.Yes` is `FieldAccessExpr(..., NameExpr("Choice"), "Yes")`; the semantic checker resolves it as a zero-payload union variant when the left name is not shadowed by a local. Parse `Some(3)`, `Ok(3)`, and `Err(x)` as `CallExpr`; parse bare `None` as `NameExpr`. The semantic checker may resolve these short forms as builtin constructors only when an expected `Option<T>` or `Result<T,E>` type is available from an explicit local annotation, return type, or call parameter. A function with the same name takes precedence; ambiguous or context-free construction is a diagnostic. Syntax `Option<i32>.Some` and `Result<T,E>.Ok` is deferred. A match arm accepts `Choice.Yes`, `Choice.Value(value)`, `Some(value)`, `None`, `Ok(value)`, `Err(error)`, or `_`; the parser emits `VariantPattern` with null `UnionName` for short builtin names. Pattern bindings are identifiers; payload field names belong to the union declaration and need not match bindings.
 
 ## Checker and backend handoff
 
-Keep Compiler.Check(string file, string source) -> CheckResult, CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics), and Emitter.Emit(CheckedProgram program, bool executable = true) -> string. On any diagnostic, Program is null. CheckedProgram contains Module, Functions, and Unions; its function collection contains CheckedFunction values. CheckedFunction exposes Name, Parameters, and ReturnType where ReturnType is a resolved semantic type with DisplayName (for example i32 or Option<i32>) and IsI32, IsBool, and IsText. The driver recognizes an executable entrypoint by name main, zero parameters, and a return type whose resolved semantic type reports IsI32, IsBool, or IsText. The emitter consumes only typed IR, never Expr, Stmt, or TypeSyntax source nodes. Every typed expression carries its resolved type and source token; typed variant and match nodes carry resolved union/variant identities and bound payload locals.
+Keep Compiler.Check(string file, string source) -> CheckResult, CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics), and Emitter.Emit(CheckedProgram program, bool executable = true) -> string. On any diagnostic, Program is null. CheckedProgram contains Module, Functions, Unions, and Structs; its function collection contains CheckedFunction values. CheckedFunction exposes Name, Parameters, and ReturnType where ReturnType is a resolved semantic type with DisplayName (for example i32 or Option<i32>) and IsI32, IsBool, and IsText. The driver recognizes an executable entrypoint by name main, zero parameters, and a return type whose resolved semantic type reports IsI32, IsBool, or IsText. The emitter consumes only typed IR, never Expr, Stmt, or TypeSyntax source nodes. Every typed expression carries its resolved type and source token; typed variant and match nodes carry resolved union/variant identities and bound payload locals.
 
-The checker supports `i32`, `bool`, `Text`, declared non-generic unions, and compiler-known `Option<T>` and `Result<T,E>` instantiated with supported types. It checks exact assignment/return/argument types, arity, payload types, match scrutinee type, duplicate or invalid variants, arm result type agreement, and exhaustiveness. A source wildcard covers remaining variants only when explicitly written. Arithmetic `+`, `-`, `*` accepts only `i32` and emitted arithmetic remains checked. `null` yields `E_TYPE_MISMATCH`; unknown types or names fail compilation. `E_MATCH_NONEXHAUSTIVE` identifies each omitted variant at the match span. Type errors use `E_TYPE_MISMATCH` with expected and actual type names. The backend emits deterministic C# from resolved semantic types and does not infer types from source spelling.
+The checker supports `i32`, `bool`, `Text`, immutable non-generic nominal structs, declared non-generic unions, and compiler-known `Option<T>` and `Result<T,E>` instantiated with supported types. It checks exact assignment/return/argument types, arity, payload types, match scrutinee type, duplicate or invalid variants, arm result type agreement, and exhaustiveness. A source wildcard covers remaining variants only when explicitly written. Arithmetic `+`, `-`, `*` accepts only `i32` and emitted arithmetic remains checked. `null` yields `E_TYPE_MISMATCH`; unknown types or names fail compilation. `E_MATCH_NONEXHAUSTIVE` identifies each omitted variant at the match span. Type errors use `E_TYPE_MISMATCH` with expected and actual type names. The backend emits deterministic C# from resolved semantic types and does not infer types from source spelling.
 
 ## Driver contract
 
@@ -78,4 +85,29 @@ lang build FILE emits an executable if the checked program contains a supported 
 lang run FILE requires the supported main signature. The generated host writes one line containing the returned i32, lowercase bool, or Text value and exits 0. Checked i32 arithmetic overflow prints a generic runtime-fault message to stderr and exits 70. Diagnostics include E_ENTRYPOINT, E_IO, E_PROCESS, E_BUILD, E_TYPE_VISIBILITY, and E_MATCH_ARM_DUPLICATE.
 ## Acceptance for this slice
 
-Activate fixtures 11–13 and 20, preserving 01–10; keep fixtures 14–19 pending. Add an active wrong-payload-type fixture. Add a runnable positive example using a union payload, bool, Text, Option, Result, and match where each implemented construct is exercised. Verify exact active fixture diagnostic lists, JSON diagnostics for type and match failures, a library build without a supported main, and both runnable examples, including generated C# build and execution. User generic functions, imports/modules, traits, effects, packages, and the complete M1 library acceptance follow in separate stages.
+Preserve active fixtures 01-13 and 20-25; fixtures 14-19 remain pending. The active set includes struct field type and initializer diagnostics, direct recursion rejection, and a valid recursive wrapper case. Keep the union/value examples runnable and verify exact active fixture diagnostic lists, JSON diagnostics for type and match failures, a library build without a supported main, and generated C# build and execution for the runnable examples. User generic functions, imports/modules, traits, effects, packages, and the complete M1 library acceptance follow in separate stages.
+
+## Struct values contract addendum
+
+This addendum extends and supersedes the `ParsedProgram` handoff shape above: its final constructor parameter is `IReadOnlyList<StructDecl> Structs`, after `Functions`. The rest of the existing parser and checker contracts remain in force.
+
+The exact additional source AST records are:
+
+```csharp
+internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
+internal sealed record StructDecl(string Name, bool Public, IReadOnlyList<StructFieldDecl> Fields, Token At);
+internal sealed record StructFieldValue(string Name, Expr Value, Token At);
+internal sealed record StructConstructExpr(
+    Token At, string Name, IReadOnlyList<StructFieldValue> Fields) : Expr(At);
+internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
+```
+
+Structs are immutable, nominal, and non-generic. Empty declarations and constructions are legal. Field declarations have unique names. Each construction names every declared field exactly once; extra or repeated initializers are rejected. The checker reports `E_FIELD_UNKNOWN` for an undeclared initializer or read, `E_FIELD_DUPLICATE` for a repeated initializer, `E_FIELD_MISSING` for an omitted field, and `E_TYPE_MISMATCH` for an incompatible field value. Initializer expressions are evaluated in source order, independent of declaration layout. Public structs and their public field types obey the existing public-type visibility checks.
+
+A field read may follow a local, call result, parenthesized expression, or struct construction and may chain through nested structs. Methods are unsupported. A no-call dotted expression whose target is an unshadowed union type name remains the zero-payload union constructor form. Locals shadow type names in dotted field access and dotted-call syntax; local member calls are unsupported rather than treated as variant construction.
+
+The parser does not consume a struct construction as an unparenthesized top-level match scrutinee, because the next `{` begins match arms. Parenthesize the construction explicitly; for example, `match (Box { value: Choice.Yes }).value { Choice.Yes => 1, Choice.No => 0 }`. Other match scrutinees retain their existing grammar.
+
+Direct cycles made only of struct fields are rejected with `E_TYPE_MISMATCH`. A recursive path passing through `Option`, `Result`, or a tagged union is allowed. This is a direct-layout rule, not a general recursive-type or ownership system.
+
+The acceptance set adds active fixtures 22-25 for recursive wrapper values, field type mismatch, duplicate/unknown/missing initializers, and bare recursion. The runnable `examples/structs` program exercises nested and reordered initializers, `Option`, a tagged union, and chained field reads. This slice does not complete M1 or the V1 promise; package resolution, user-defined generics, traits, effects, capabilities, CLI/web features, and the maintained application examples remain separate work.
