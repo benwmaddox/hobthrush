@@ -1,0 +1,7 @@
+module fixture.struct_direct_recursion;
+
+struct Node { next: Node }
+
+pub fn value() -> i32 effects {} {
+    return 0;
+}

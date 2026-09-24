@@ -7,6 +7,7 @@ internal enum LangTypeKind
     Bool,
     Text,
     Union,
+    Struct,
     Option,
     Result
 }
@@ -15,11 +16,17 @@ internal sealed class LangType : IEquatable<LangType>
 {
     private readonly ReadOnlyCollection<LangType> _arguments;
 
-    private LangType(LangTypeKind kind, string displayName, int unionId = -1, IEnumerable<LangType>? arguments = null)
+    private LangType(
+        LangTypeKind kind,
+        string displayName,
+        int unionId = -1,
+        int structId = -1,
+        IEnumerable<LangType>? arguments = null)
     {
         Kind = kind;
         DisplayName = displayName;
         UnionId = unionId;
+        StructId = structId;
         _arguments = Array.AsReadOnly((arguments ?? []).ToArray());
     }
 
@@ -30,6 +37,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
     internal int UnionId { get; }
+    internal int StructId { get; }
     internal bool IsError => Kind == LangTypeKind.Error;
 
     internal static LangType Error { get; } = new(LangTypeKind.Error, "<error>");
@@ -38,6 +46,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
 
     internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId);
+    internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
     internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
     internal static LangType Result(LangType ok, LangType error) => new(LangTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
 
@@ -46,6 +55,7 @@ internal sealed class LangType : IEquatable<LangType>
         if (ReferenceEquals(this, other)) return true;
         if (other is null || Kind != other.Kind) return false;
         if (Kind == LangTypeKind.Union) return UnionId == other.UnionId;
+        if (Kind == LangTypeKind.Struct) return StructId == other.StructId;
         if (_arguments.Count != other._arguments.Count) return false;
         for (var i = 0; i < _arguments.Count; i++)
             if (!_arguments[i].Equals(other._arguments[i])) return false;
@@ -62,6 +72,10 @@ internal sealed class LangType : IEquatable<LangType>
         {
             hash.Add(UnionId);
         }
+        else if (Kind == LangTypeKind.Struct)
+        {
+            hash.Add(StructId);
+        }
         else
         {
             foreach (var argument in _arguments) hash.Add(argument);
@@ -76,6 +90,8 @@ internal sealed class LangType : IEquatable<LangType>
 internal sealed record CheckedVariantField(string? Name, LangType Type, int Index, Token At);
 internal sealed record CheckedVariant(int Id, string Name, IReadOnlyList<CheckedVariantField> Fields, Token At);
 internal sealed record CheckedUnion(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
+internal sealed record CheckedStructField(string Name, LangType Type, int Index, Token At);
+internal sealed record CheckedStruct(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 
 internal abstract record TypedExpr(LangType Type, Token At);
@@ -105,6 +121,18 @@ internal sealed record TypedUnionConstructExpr(
     int UnionId,
     int VariantId,
     IReadOnlyList<TypedExpr> Arguments,
+    Token At) : TypedExpr(Type, At);
+
+internal sealed record TypedStructFieldValue(int FieldIndex, TypedExpr Value);
+internal sealed record TypedStructConstructExpr(
+    LangType Type,
+    int StructId,
+    IReadOnlyList<TypedStructFieldValue> Fields,
+    Token At) : TypedExpr(Type, At);
+internal sealed record TypedFieldAccessExpr(
+    LangType Type,
+    TypedExpr Target,
+    int FieldIndex,
     Token At) : TypedExpr(Type, At);
 
 internal abstract record TypedPattern(Token At);
@@ -158,16 +186,22 @@ internal sealed class CheckedFunction
 
 internal sealed class CheckedProgram
 {
-    internal CheckedProgram(string module, IEnumerable<CheckedFunction> functions, IEnumerable<CheckedUnion> unions)
+    internal CheckedProgram(
+        string module,
+        IEnumerable<CheckedFunction> functions,
+        IEnumerable<CheckedUnion> unions,
+        IEnumerable<CheckedStruct> structs)
     {
         Module = module;
         Functions = Array.AsReadOnly(functions.ToArray());
         Unions = Array.AsReadOnly(unions.ToArray());
+        Structs = Array.AsReadOnly(structs.ToArray());
     }
 
     public string Module { get; }
     public IReadOnlyList<CheckedFunction> Functions { get; }
     public IReadOnlyList<CheckedUnion> Unions { get; }
+    public IReadOnlyList<CheckedStruct> Structs { get; }
 }
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
@@ -200,6 +234,9 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
     private const int MaximumSemanticDepth = 192;
     private readonly Dictionary<string, UnionSymbol> _unionsByName = new(StringComparer.Ordinal);
     private readonly List<UnionSymbol> _unions = [];
+    private readonly Dictionary<string, StructSymbol> _structsByName = new(StringComparer.Ordinal);
+    private readonly List<StructSymbol> _structs = [];
+    private readonly HashSet<string> _typeNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FunctionSymbol> _functionsByName = new(StringComparer.Ordinal);
     private readonly List<FunctionSymbol> _functions = [];
     private bool _semanticDepthReported;
@@ -207,7 +244,10 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
     public CheckResult Check(ParsedProgram program)
     {
         RegisterUnionHeaders(program.Unions);
+        RegisterStructHeaders(program.Structs);
         PopulateUnionVariants(program.Unions);
+        PopulateStructFields(program.Structs);
+        ValidateStructRecursion();
         RegisterFunctions(program.Functions);
         ValidatePublicSignatures();
 
@@ -226,7 +266,14 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             ReadOnly(symbol.Variants),
             symbol.Declaration.At));
         var functions = _functions.Select(symbol => symbol.CheckedFunction!);
-        return new CheckResult(new CheckedProgram(program.Module, functions, unions), diagnostics);
+        var structs = _structs.Select(symbol => new CheckedStruct(
+            symbol.Id,
+            symbol.Declaration.Name,
+            symbol.Declaration.Public,
+            symbol.Type,
+            ReadOnly(symbol.Fields),
+            symbol.Declaration.At));
+        return new CheckResult(new CheckedProgram(program.Module, functions, unions, structs), diagnostics);
     }
 
     private void RegisterUnionHeaders(IReadOnlyList<UnionDecl> declarations)
@@ -239,15 +286,39 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                 continue;
             }
 
-            if (_unionsByName.ContainsKey(declaration.Name))
+            if (_typeNames.Contains(declaration.Name))
             {
-                Add("E_NAME_DUPLICATE", $"Union '{declaration.Name}' is already declared", declaration.At);
+                Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is already declared", declaration.At);
                 continue;
             }
 
+            _typeNames.Add(declaration.Name);
             var symbol = new UnionSymbol(_unions.Count, declaration, LangType.ForUnion(_unions.Count, declaration.Name));
             _unions.Add(symbol);
             _unionsByName.Add(declaration.Name, symbol);
+        }
+    }
+
+    private void RegisterStructHeaders(IReadOnlyList<StructDecl> declarations)
+    {
+        foreach (var declaration in declarations)
+        {
+            if (declaration.Name is "i32" or "bool" or "Text" or "Option" or "Result")
+            {
+                Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is reserved", declaration.At);
+                continue;
+            }
+
+            if (_typeNames.Contains(declaration.Name))
+            {
+                Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is already declared", declaration.At);
+                continue;
+            }
+
+            _typeNames.Add(declaration.Name);
+            var symbol = new StructSymbol(_structs.Count, declaration, LangType.ForStruct(_structs.Count, declaration.Name));
+            _structs.Add(symbol);
+            _structsByName.Add(declaration.Name, symbol);
         }
     }
 
@@ -285,6 +356,72 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                     variant.Name,
                     ReadOnly(fields),
                     variant.At));
+            }
+        }
+    }
+
+    private void PopulateStructFields(IReadOnlyList<StructDecl> declarations)
+    {
+        foreach (var declaration in declarations)
+        {
+            if (!_structsByName.TryGetValue(declaration.Name, out var symbol) || symbol.Declaration != declaration)
+                continue;
+
+            var fieldNames = new HashSet<string>(StringComparer.Ordinal);
+            for (var fieldIndex = 0; fieldIndex < declaration.Fields.Count; fieldIndex++)
+            {
+                var field = declaration.Fields[fieldIndex];
+                if (!fieldNames.Add(field.Name))
+                    Add("E_NAME_DUPLICATE", $"Field '{field.Name}' is already declared on struct '{declaration.Name}'", field.At);
+
+                symbol.Fields.Add(new CheckedStructField(
+                    field.Name,
+                    ResolveType(field.Type, 0),
+                    fieldIndex,
+                    field.At));
+            }
+        }
+    }
+
+    private void ValidateStructRecursion()
+    {
+        var state = new byte[_structs.Count];
+        var reported = false;
+
+        foreach (var root in _structs)
+        {
+            if (state[root.Id] != 0) continue;
+            var stack = new Stack<(StructSymbol Symbol, int NextField)>();
+            state[root.Id] = 1;
+            stack.Push((root, 0));
+
+            while (stack.Count != 0)
+            {
+                var frame = stack.Pop();
+                if (frame.NextField >= frame.Symbol.Fields.Count)
+                {
+                    state[frame.Symbol.Id] = 2;
+                    continue;
+                }
+
+                stack.Push((frame.Symbol, frame.NextField + 1));
+                var field = frame.Symbol.Fields[frame.NextField];
+                if (field.Type.Kind != LangTypeKind.Struct) continue;
+
+                var target = _structs[field.Type.StructId];
+                if (state[target.Id] == 1)
+                {
+                    if (!reported)
+                    {
+                        Add("E_TYPE_MISMATCH", "Structs cannot form cycles through only direct struct fields; use Option, Result, or a tagged union to break the cycle", field.At);
+                        reported = true;
+                    }
+                }
+                else if (state[target.Id] == 0)
+                {
+                    state[target.Id] = 1;
+                    stack.Push((target, 0));
+                }
             }
         }
     }
@@ -336,6 +473,13 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             foreach (var field in variant.Fields)
                 CheckPublicTypeVisibility(field.Type, union.Declaration.Name, field.At);
         }
+
+        foreach (var structure in _structs)
+        {
+            if (!structure.Declaration.Public) continue;
+            foreach (var field in structure.Fields)
+                CheckPublicTypeVisibility(field.Type, structure.Declaration.Name, field.At);
+        }
     }
 
     private void CheckPublicTypeVisibility(LangType type, string owner, Token at)
@@ -343,6 +487,12 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         if (type.IsError) return;
         if (type.Kind == LangTypeKind.Union &&
             _unions[type.UnionId].Declaration.Public == false)
+        {
+            Add("E_TYPE_VISIBILITY", $"Public declaration '{owner}' exposes private type '{type.DisplayName}'", at);
+            return;
+        }
+        if (type.Kind == LangTypeKind.Struct &&
+            _structs[type.StructId].Declaration.Public == false)
         {
             Add("E_TYPE_VISIBILITY", $"Public declaration '{owner}' exposes private type '{type.DisplayName}'", at);
             return;
@@ -433,6 +583,8 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1),
             VariantExpr variant => CheckVariantConstruction(variant, locals, depth + 1),
+            StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
+            FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
             _ => UnsupportedExpr(expression)
         };
@@ -471,6 +623,83 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
         Add("E_NAME_UNRESOLVED", $"Name '{expression.Name}' is not in scope", expression.At);
         return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckStructConstruction(
+        StructConstructExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (!_structsByName.TryGetValue(expression.Name, out var structure))
+        {
+            foreach (var value in expression.Fields)
+                _ = CheckExpr(value.Value, null, locals, depth);
+
+            if (_unionsByName.ContainsKey(expression.Name))
+                Add("E_TYPE_MISMATCH", $"Type '{expression.Name}' is a union, not a struct", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Struct '{expression.Name}' is not declared", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var values = new List<TypedStructFieldValue>();
+        var supplied = new HashSet<int>();
+        foreach (var initializer in expression.Fields)
+        {
+            var field = structure.Fields.FirstOrDefault(item => item.Name == initializer.Name);
+            if (field is null)
+            {
+                _ = CheckExpr(initializer.Value, null, locals, depth);
+                Add("E_FIELD_UNKNOWN", $"Struct '{structure.Declaration.Name}' has no field '{initializer.Name}'", initializer.At);
+                continue;
+            }
+
+            var value = CheckExpr(initializer.Value, field.Type, locals, depth);
+            if (!supplied.Add(field.Index))
+                Add("E_FIELD_DUPLICATE", $"Field '{initializer.Name}' is initialized more than once", initializer.At);
+            values.Add(new TypedStructFieldValue(field.Index, value));
+        }
+
+        foreach (var field in structure.Fields)
+        {
+            if (!supplied.Contains(field.Index))
+                Add("E_FIELD_MISSING", $"Field '{field.Name}' is missing from construction of '{structure.Declaration.Name}'", expression.At);
+        }
+
+        return new TypedStructConstructExpr(structure.Type, structure.Id, ReadOnly(values), expression.At);
+    }
+
+    private TypedExpr CheckFieldAccess(
+        FieldAccessExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (expression.Target is NameExpr typeName &&
+            !locals.ContainsKey(typeName.Name) &&
+            _unionsByName.ContainsKey(typeName.Name))
+        {
+            return CheckVariantConstruction(
+                new VariantExpr(expression.At, typeName.Name, expression.Field, []),
+                locals,
+                depth);
+        }
+
+        var target = CheckExpr(expression.Target, null, locals, depth);
+        if (target.Type.IsError) return new TypedErrorExpr(expression.At);
+        if (target.Type.Kind != LangTypeKind.Struct)
+        {
+            Add("E_TYPE_MISMATCH", $"Field access requires a struct value, found '{target.Type.DisplayName}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var structure = _structs[target.Type.StructId];
+        var field = structure.Fields.FirstOrDefault(item => item.Name == expression.Field);
+        if (field is null)
+        {
+            Add("E_FIELD_UNKNOWN", $"Struct '{structure.Declaration.Name}' has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+        return new TypedFieldAccessExpr(field.Type, target, field.Index, expression.At);
     }
 
     private TypedExpr CheckBinary(BinaryExpr expression, Dictionary<string, LocalSymbol> locals, int depth)
@@ -581,6 +810,14 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
+        if (locals.ContainsKey(expression.UnionName))
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_UNSUPPORTED", $"Member calls on local values are not implemented for '{expression.UnionName}.{expression.VariantName}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (!_unionsByName.TryGetValue(expression.UnionName, out var union))
         {
             foreach (var argument in expression.Arguments)
@@ -804,6 +1041,15 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                     }
                     return union.Type;
                 }
+                if (_structsByName.TryGetValue(syntax.Name, out var structure))
+                {
+                    if (syntax.Args.Count != 0)
+                    {
+                        Add("E_TYPE_MISMATCH", $"Struct type '{syntax.Name}' does not take type arguments", syntax.At);
+                        return LangType.Error;
+                    }
+                    return structure.Type;
+                }
                 Add("E_NAME_UNRESOLVED", $"Type '{syntax.Name}' is not declared", syntax.At);
                 return LangType.Error;
         }
@@ -839,6 +1085,14 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         public UnionDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
         public List<CheckedVariant> Variants { get; } = [];
+    }
+
+    private sealed class StructSymbol(int id, StructDecl declaration, LangType type)
+    {
+        public int Id { get; } = id;
+        public StructDecl Declaration { get; } = declaration;
+        public LangType Type { get; } = type;
+        public List<CheckedStructField> Fields { get; } = [];
     }
 
     private sealed class FunctionSymbol(

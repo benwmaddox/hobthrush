@@ -1,0 +1,31 @@
+module example.structs;
+
+pub union Contact { Email(Text), Phone(Text) }
+pub struct Address { street: Text, number: i32 }
+pub struct User {
+    nickname: Option<Text>,
+    name: Text,
+    address: Address,
+    contact: Contact,
+}
+
+fn display_name(user: User) -> Text effects {} {
+    return match user.nickname {
+        Some(nickname) => nickname,
+        None => user.name,
+    };
+}
+
+pub fn main() -> Text effects {} {
+    let user: User = User {
+        contact: Contact.Email("ada@example.test"),
+        address: Address { number: 221, street: "Baker Street" },
+        name: "Ada",
+        nickname: Some("Ada Lovelace"),
+    };
+
+    return match user.contact {
+        Contact.Email(email) => display_name(user),
+        Contact.Phone(phone) => user.address.street,
+    };
+}

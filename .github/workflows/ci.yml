@@ -20,3 +20,4 @@ jobs:
       - run: dotnet run --project tests/Lang.IntegrationTests --configuration Release --no-build
       - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/pure/src/main.lang
       - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/types/src/main.lang
+      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/structs/src/main.lang

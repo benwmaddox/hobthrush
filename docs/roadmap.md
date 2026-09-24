@@ -2,25 +2,26 @@
 
 The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source files use `.lang`.
 
-## M0 — repository and toolchain
+## M0 - repository and toolchain
 
 - [x] Pin .NET 10 and create a buildable C# repository.
 - [x] Record the grammar decisions and canonical source fixtures.
 - [x] Configure Windows and Linux CI for Release builds, active compiler fixtures, the integration harness, and runnable examples.
 
-## M1 — pure typed values
+## M1 - pure typed values
 
 - [x] Parse, check, build, and run pure functions with checked `i32` arithmetic.
 - [x] Check `bool`, `Text`, declared tagged unions, `Option<T>`, and `Result<T, E>`.
 - [x] Type-check union construction and payloads, reject `null`, and check exhaustive matches.
 - [x] Lower the supported source into typed semantic IR and emit deterministic C#.
 - [x] Build a library DLL when no supported executable entrypoint is present.
+- [x] Add immutable non-generic nominal structs with named construction, field checks and reads, and direct-recursion checks.
 - [ ] Add package manifests, imports, and multi-file module resolution.
-- [ ] Add user-defined generics, traits, structs, and the remaining core types.
+- [ ] Add user-defined generics, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 14–19 are still pending. M1 is also incomplete; package imports, user-defined generics, traits, and the maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 14-19 are still pending. M1 is also incomplete; package imports, user-defined generics, traits, and the maintained library/CLI/web project set remain future work.
 
-The active compiler-fixture set covers fixtures 01–13 and 20–21. A module header names one source file; it does not enable imports or package resolution.
+The active compiler-fixture set covers fixtures 01-13 and 20-25. Fixtures 14-19 remain pending. A module header names one source file; it does not enable imports or package resolution. Struct support is a bounded pure-language slice and does not complete the M1 library, imports, generics, traits, effects, or package requirements.
 
 ## Later gates
 

@@ -38,6 +38,15 @@ internal static class IntegrationTests
             ("primitive main values preserve exact output", TestPrimitiveMainOutput),
             ("union payload matching executes", TestUnionMatchOutput),
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
+            ("struct constructors support nested and chained field reads", TestStructValues),
+            ("struct values compose with Option, Result, and unions", TestStructWrappers),
+            ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
+            ("direct and mutual struct field cycles are rejected", TestStructCycles),
+            ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
+            ("duplicate and reserved struct names are rejected", TestStructDeclarationNames),
+            ("contextual keywords are identifiers only in their grammar contexts", TestContextualIdentifiers),
+            ("public APIs reject nested private struct types", TestStructVisibility),
+            ("deep field chains produce a structured diagnostic", TestDeepStructFieldChain),
             ("type mismatches fail before generated code", TestTypeMismatchContexts),
             ("match validation reports omissions, duplicates, and payload arity", TestInvalidMatches),
             ("null is rejected as both an expression and identifier", TestNull),
@@ -210,6 +219,339 @@ internal static class IntegrationTests
         AssertRunOutput("23" + Environment.NewLine, optionResult);
         var resultResult = await harness.InvokeAsync("result-match", "run", resultSource);
         AssertRunOutput("31" + Environment.NewLine, resultResult);
+    }
+
+    private static async Task TestStructValues(Harness harness)
+    {
+        const string source = """
+            module harness.struct_values;
+            pub union Color { Red, Blue }
+            pub union Choice { Yes, No }
+            pub struct Container { item: Choice }
+            pub struct Person { name: Text, age: i32 }
+            pub struct Profile { owner: Person }
+            pub struct ColorValue { Red: i32 }
+
+            pub fn make_person(name: Text, age: i32) -> Person effects {} {
+                return Person { age: age, name: name };
+            }
+            pub fn person_age(person: Person) -> i32 effects {} { return person.age; }
+            pub fn red_value() -> i32 effects {} {
+                let color: Color = Color.Red;
+                return match color { Color.Red => 1, Color.Blue => 0, };
+            }
+            pub fn main() -> i32 effects {} {
+                let Color: ColorValue = ColorValue { Red: 40 };
+                let profile: Profile = Profile { owner: make_person("Ada", 37) };
+                let chained: i32 = profile.owner.age;
+                let call_field: i32 = make_person("Lin", 2).age;
+                let call_argument: i32 = person_age(profile.owner);
+                let parenthesized_value: i32 = (profile.owner).age;
+                let parenthesized_constructor: i32 = (Person { age: 3, name: "Ada" }).age;
+                let matched: i32 = match (Container { item: Choice.Yes }).item {
+                    Choice.Yes => Color.Red,
+                    Choice.No => 0,
+                };
+                return chained + call_field + call_argument + parenthesized_value
+                    + parenthesized_constructor + matched + red_value();
+            }
+            """;
+
+        var result = await harness.InvokeAsync("struct-values", "run", source);
+        AssertRunOutput("157" + Environment.NewLine, result);
+    }
+
+    private static async Task TestStructWrappers(Harness harness)
+    {
+        const string source = """
+            module harness.struct_wrappers;
+            pub struct Record { value: i32 }
+            pub union BoxedRecord { Present(Record), Empty }
+
+            pub fn option_or_default(value: Option<Record>) -> Record effects {} {
+                return match value {
+                    Some(record) => record,
+                    None => Record { value: 0 },
+                };
+            }
+            pub fn result_or_default(value: Result<Record, Text>) -> Record effects {} {
+                return match value {
+                    Ok(record) => record,
+                    Err(message) => Record { value: 0 },
+                };
+            }
+            pub fn main() -> i32 effects {} {
+                let optional: Option<Record> = Some(Record { value: 23 });
+                let from_option: Record = option_or_default(optional);
+                let result: Result<Record, Text> = Ok(from_option);
+                let from_result: Record = result_or_default(result);
+                let boxed: BoxedRecord = BoxedRecord.Present(from_result);
+                return match boxed {
+                    BoxedRecord.Present(record) => record.value,
+                    BoxedRecord.Empty => 0,
+                };
+            }
+            """;
+
+        var result = await harness.InvokeAsync("struct-wrappers", "run", source);
+        AssertRunOutput("23" + Environment.NewLine, result);
+    }
+
+    private static async Task TestForwardAndGuardedRecursion(Harness harness)
+    {
+        const string source = """
+            module harness.forward_guarded_structs;
+            pub struct Empty {}
+            pub struct Before { after: After }
+            pub struct After { value: i32 }
+            pub struct OptionalNode { next: Option<OptionalNode> }
+            pub struct ResultNode { next: Result<Option<ResultNode>, Text> }
+            pub union TreeLink { Branch(TreeBranch), End }
+            pub struct TreeBranch { next: TreeLink }
+
+            pub fn main() -> i32 effects {} {
+                let empty: Empty = Empty {};
+                let optional: OptionalNode = OptionalNode { next: None };
+                let result: ResultNode = ResultNode { next: Err("stop") };
+                let tree: TreeLink = TreeLink.Branch(TreeBranch { next: TreeLink.End });
+                let value: Before = Before { after: After { value: 29 } };
+                return value.after.value;
+            }
+            """;
+
+        var result = await harness.InvokeAsync("forward-guarded-structs", "run", source);
+        AssertRunOutput("29" + Environment.NewLine, result);
+
+        const string librarySource = """
+            module harness.empty_struct_library;
+            pub struct Empty {}
+            pub fn make_empty() -> Empty effects {} { return Empty {}; }
+            """;
+        var library = await harness.InvokeAsync("empty-struct-library", "build", librarySource);
+        AssertBuiltDll(library, Path.GetDirectoryName(harness.LastSourcePath)!);
+    }
+
+    private static async Task TestStructCycles(Harness harness)
+    {
+        var cases = new (string Name, string Source)[]
+        {
+            ("direct-struct-cycle", """
+                module harness.direct_struct_cycle;
+                pub struct Node { next: Node }
+                """),
+            ("mutual-struct-cycle", """
+                module harness.mutual_struct_cycle;
+                pub struct Left { right: Right }
+                pub struct Right { left: Left }
+                """)
+        };
+
+        foreach (var (name, source) in cases)
+            await ExpectDiagnosticsAsync(harness, name, source, "E_TYPE_MISMATCH");
+    }
+
+    private static async Task TestStructFieldDiagnostics(Harness harness)
+    {
+        var cases = new (string Name, string Source, string ExpectedCode)[]
+        {
+            ("missing-struct-field", """
+                module harness.missing_struct_field;
+                pub struct Person { name: Text, age: i32 }
+                pub fn main() -> i32 effects {} {
+                    let person: Person = Person { name: "Ada" };
+                    return 0;
+                }
+                """, "E_FIELD_MISSING"),
+            ("unknown-struct-field", """
+                module harness.unknown_struct_field;
+                pub struct Person { name: Text, age: i32 }
+                pub fn main() -> i32 effects {} {
+                    let person: Person = Person { name: "Ada", age: 37, nickname: "A" };
+                    return 0;
+                }
+                """, "E_FIELD_UNKNOWN"),
+            ("duplicate-struct-initializer-field", """
+                module harness.duplicate_struct_initializer_field;
+                pub struct Person { name: Text, age: i32 }
+                pub fn main() -> i32 effects {} {
+                    let person: Person = Person { name: "Ada", age: 37, age: 38 };
+                    return 0;
+                }
+                """, "E_FIELD_DUPLICATE"),
+            ("shadowed-dotted-call", """
+                module harness.shadowed_dotted_call;
+                pub union Choice { Yes(i32), No }
+                pub struct ChoiceValue { Yes: i32 }
+                pub fn main() -> i32 effects {} {
+                    let Choice: ChoiceValue = ChoiceValue { Yes: 1 };
+                    return Choice.Yes(2);
+                }
+                """, "E_UNSUPPORTED"),
+            ("wrong-struct-field-type", """
+                module harness.wrong_struct_field_type;
+                pub struct Person { name: Text, age: i32 }
+                pub fn main() -> i32 effects {} {
+                    let person: Person = Person { name: "Ada", age: "thirty-seven" };
+                    return 0;
+                }
+                """, "E_TYPE_MISMATCH"),
+            ("unknown-struct-member-read", """
+                module harness.unknown_struct_member;
+                pub struct Person { name: Text, age: i32 }
+                pub fn main() -> i32 effects {} {
+                    let person: Person = Person { name: "Ada", age: 37 };
+                    return person.height;
+                }
+                """, "E_FIELD_UNKNOWN"),
+            ("non-struct-member-read", """
+                module harness.non_struct_member;
+                pub fn main() -> i32 effects {} {
+                    let count: i32 = 3;
+                    return count.value;
+                }
+                """, "E_TYPE_MISMATCH"),
+            ("nominal-struct-mismatch", """
+                module harness.nominal_struct_mismatch;
+                pub struct User { age: i32 }
+                pub struct Score { age: i32 }
+                pub fn use_user(value: User) -> i32 effects {} { return value.age; }
+                pub fn main() -> i32 effects {} { return use_user(Score { age: 37 }); }
+                """, "E_TYPE_MISMATCH")
+        };
+
+        foreach (var (name, source, expectedCode) in cases)
+        {
+            var diagnostics = await ExpectDiagnosticsAsync(harness, name, source, expectedCode);
+            AssertTrue(diagnostics.Any(diagnostic => diagnostic.Code == expectedCode),
+                $"{name} did not produce {expectedCode}.");
+        }
+    }
+
+    private static async Task TestContextualIdentifiers(Harness harness)
+    {
+        const string source = """
+            module true.false.null.match.if.await.with.route.command.effects.return.fn;
+            struct effects { route: i32, return: i32, if: i32, true: i32, null: i32 }
+            union Choice { return(null: i32) }
+
+            fn route(command: i32) -> i32 effects {} {
+                let return: i32 = command;
+                return return;
+            }
+
+            fn make_choice(value: effects) -> Choice effects {} {
+                return Choice.return(value.route + value.return + value.if + value.true + value.null);
+            }
+
+            pub fn main() -> i32 effects {} {
+                let value: effects = effects { route: 1, return: 2, if: 3, true: 4, null: 5 };
+                let choice: Choice = make_choice(value);
+                return match choice {
+                    Choice.return(payload) => route(payload),
+                };
+            }
+            """;
+
+        var result = await harness.InvokeAsync("contextual-identifiers", "run", source);
+        AssertRunOutput("15" + Environment.NewLine, result);
+
+        const string hardKeywordSource = """
+            module harness.hard_keyword_identifier;
+            fn main() -> i32 effects {} {
+                let if: i32 = 1;
+                return 0;
+            }
+            """;
+        var hardKeywordDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "hard-keyword-identifier", hardKeywordSource, "E_SYNTAX");
+        AssertEqual("E_SYNTAX", hardKeywordDiagnostics.Single().Code,
+            "A hard expression keyword must remain unavailable as a bare binding.");
+
+        const string standaloneRouteSource = """
+            module harness.standalone_route;
+            route
+            """;
+        await ExpectDiagnosticsAsync(harness, "standalone-route-declaration", standaloneRouteSource, "E_UNSUPPORTED");
+    }
+
+    private static async Task TestStructDeclarationNames(Harness harness)
+    {
+        var cases = new (string Name, string Source, string ExpectedCode)[]
+        {
+            ("duplicate-struct-declaration", """
+                module harness.duplicate_struct_declaration;
+                pub struct Item {}
+                pub struct Item { value: i32 }
+                """, "E_NAME_DUPLICATE"),
+            ("duplicate-struct-field-declaration", """
+                module harness.duplicate_struct_field_declaration;
+                pub struct Item { value: i32, value: Text }
+                """, "E_NAME_DUPLICATE"),
+            ("union-struct-name-collision", """
+                module harness.union_struct_name_collision;
+                pub union Item { Empty }
+                pub struct Item { value: i32 }
+                """, "E_NAME_DUPLICATE"),
+            ("reserved-struct-name", """
+                module harness.reserved_struct_name;
+                pub struct match { value: i32 }
+                """, "E_SYNTAX"),
+            ("reserved-builtin-type-names", """
+                module harness.reserved_builtin_type_names;
+                pub struct i32 {}
+                pub struct bool {}
+                pub struct Text {}
+                pub struct Option {}
+                pub struct Result {}
+                """, "E_NAME_DUPLICATE"),
+        };
+
+        foreach (var (name, source, expectedCode) in cases)
+        {
+            var diagnostics = await ExpectDiagnosticsAsync(harness, name, source, expectedCode);
+            if (name == "reserved-builtin-type-names")
+                AssertEqual(5, diagnostics.Count(diagnostic => diagnostic.Code == "E_NAME_DUPLICATE"),
+                    "Each built-in type name must reject a struct redeclaration.");
+        }
+    }
+
+    private static async Task TestStructVisibility(Harness harness)
+    {
+        var cases = new (string Name, string Source)[]
+        {
+            ("public-function-private-struct", """
+                module harness.public_function_private_struct;
+                pub struct Public { value: i32 }
+                struct Hidden { value: i32 }
+                pub fn expose(value: Option<Result<Hidden, Text>>) -> i32 effects {} { return 0; }
+                """),
+            ("public-union-private-struct", """
+                module harness.public_union_private_struct;
+                struct Hidden { value: i32 }
+                pub union PublicChoice { Wrapped(Option<Result<Hidden, Text>>), Empty }
+                """),
+            ("public-struct-private-field-type", """
+                module harness.public_struct_private_field;
+                struct Hidden { value: i32 }
+                pub struct PublicBox { value: Option<Result<Hidden, Text>> }
+                """)
+        };
+
+        foreach (var (name, source) in cases)
+            await ExpectDiagnosticsAsync(harness, name, source, "E_TYPE_VISIBILITY");
+    }
+
+    private static async Task TestDeepStructFieldChain(Harness harness)
+    {
+        var fieldChain = "node" + string.Concat(Enumerable.Repeat(".next", 300));
+        var source = "module harness.deep_struct_field_chain;\n"
+            + "pub struct Node { next: i32 }\n"
+            + "pub fn main() -> i32 effects {} { let node: Node = Node { next: 0 }; return " + fieldChain + "; }\n";
+
+        var diagnostics = await ExpectDiagnosticsAsync(harness, "deep-struct-field-chain", source, "E_SYNTAX");
+        var deep = diagnostics.Single(diagnostic => diagnostic.Code == "E_SYNTAX");
+        AssertEqual("Expression nesting is too deep", deep.Message,
+            "A long field chain should produce the structured expression-depth diagnostic.");
     }
 
     private static async Task TestTypeMismatchContexts(Harness harness)

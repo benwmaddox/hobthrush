@@ -103,5 +103,30 @@
     "file": "21-payload-mismatch.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "22-valid-structs.lang",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "23-struct-field-type-mismatch.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "24-struct-invalid-initializers.lang",
+    "status": "active",
+    "expectedCode": null,
+    "expectedCodes": [
+      "E_FIELD_DUPLICATE",
+      "E_FIELD_UNKNOWN",
+      "E_FIELD_MISSING"
+    ]
+  },
+  {
+    "file": "25-struct-direct-recursion.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
   }
 ]

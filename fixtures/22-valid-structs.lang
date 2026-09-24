@@ -1,0 +1,15 @@
+module fixture.valid_structs;
+
+pub union Route { Home, Page(Text) }
+pub struct Link { next: Option<Link>, route: Route }
+
+pub fn route_value(link: Link) -> i32 effects {} {
+    return match link.route {
+        Route.Home => 0,
+        Route.Page(name) => 1,
+    };
+}
+
+pub fn empty_link() -> Link effects {} {
+    return Link { route: Route.Home, next: None };
+}
