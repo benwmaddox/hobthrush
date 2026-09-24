@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Lang/Lang.csproj" />
+  <Project Path="tests/Lang.IntegrationTests/Lang.IntegrationTests.csproj" />
+</Solution>

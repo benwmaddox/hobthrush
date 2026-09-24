@@ -15,6 +15,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - run: dotnet build al.slnx --configuration Release --nologo
-      - run: dotnet run --project src/Al --configuration Release -- test
-      - run: dotnet run --project src/Al --configuration Release -- run examples/pure/src/main.al
+      - run: dotnet build lang.slnx --configuration Release --nologo
+      - run: dotnet run --project src/Lang --configuration Release -- test
+      - run: dotnet run --project tests/Lang.IntegrationTests --configuration Release --no-build
+      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/pure/src/main.lang
+      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/types/src/main.lang

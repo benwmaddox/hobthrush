@@ -1,18 +1,24 @@
-# al
+# lang
 
-`al` is an agent-first general-purpose language under construction. The executable is `al` and source files use `.al`. This repository is independent of Stasis.
+`lang` is a temporary working name for an agent-first general-purpose language under construction; the permanent name is pending. The executable is `lang` and source files use `.lang`. This repository is independent of Stasis.
 
-The first implemented slice checks and runs small pure integer functions. The broader language, effects, capabilities, packages, CLI and web targets are specified in [docs/roadmap.md](docs/roadmap.md) and are not yet implemented.
+The implemented pure-language slice supports `i32`, `bool`, `Text`, declared tagged unions, `Option<T>`, `Result<T, E>`, payload type checks, and exhaustive `match`. Effects must be declared as `effects {}`. The current parser and constructor decisions are described in [docs/grammar.md](docs/grammar.md).
 
 ## Bootstrap
 
 Install the .NET 10.0.401 SDK, then from this directory:
 
 ```sh
-dotnet build al.slnx
-dotnet run --project src/Al -- check examples/pure/src/main.al --json
-dotnet run --project src/Al -- run examples/pure/src/main.al
-dotnet run --project src/Al -- test
+dotnet build lang.slnx --configuration Release
+dotnet run --project src/Lang --configuration Release -- check examples/pure/src/main.lang --json
+dotnet run --project src/Lang --configuration Release -- run examples/pure/src/main.lang
+dotnet run --project src/Lang --configuration Release -- run examples/types/src/main.lang
+dotnet run --project src/Lang --configuration Release -- test
+dotnet run --project tests/Lang.IntegrationTests --configuration Release
 ```
 
-`al check` returns 1 for invalid source and prints diagnostics with stable codes, source ranges, and severity. `al test` runs the currently supported fixture cases. Unsupported language features are tracked separately in the fixture manifest and never reported as passing checks.
+`lang check FILE` checks the source and returns 1 for invalid programs. `lang check FILE --json` prints stable diagnostic codes, source ranges, and severity, including an empty diagnostics array on success. `lang test` checks the active fixtures against their exact expected diagnostic-code lists.
+
+`lang build FILE` compiles a program with a supported `main() -> i32|bool|Text` as an executable. If that entrypoint is absent, it builds a library DLL. Artifacts are stored in a unique `out/<source-name>-<id>/` directory beside the input file. `lang run FILE` requires the supported entrypoint, prints its returned value and a newline, and exits 0 on success. Checked i32 arithmetic overflow reports a generic runtime fault and exits 70.
+
+The CLI build/run/test commands work for the implemented source subset. Language-level CLI and web declarations remain incomplete; fixtures 14–19 are still pending and are not counted as passing checks.
