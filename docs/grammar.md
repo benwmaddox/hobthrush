@@ -69,7 +69,7 @@ Identifiers are contextual. A lexical identifier is any token with identifier sp
 
 Member positions are unambiguous and accept any lexical identifier: struct field declarations and initializers, union variant and named-payload labels, and the name after `.` in field access, qualified types, variant construction, and qualified patterns. Module path segments also accept any lexical identifier. A leading/root type name, constructor name, declaration name, function name, parameter, local binding, or unqualified pattern variant uses a bare identifier. `null` remains invalid as a value; `true` and `false` remain boolean literals.
 
-Structs are immutable, non-generic, nominal value types. Empty structs are legal. A struct declares named fields, and a construction must initialize every field exactly once by name. For example:
+Structs are immutable, non-generic, nominal struct types. Empty structs are legal. A struct declares named fields, and a construction must initialize every field exactly once by name. For example:
 
 ```lang
 pub struct User { name: Text, age: i32 }
@@ -85,7 +85,7 @@ A struct may contain itself through `Option`, `Result`, or a tagged union. Cycle
 
 A struct construction at the top level of a match scrutinee is ambiguous with the match-arm brace and is disabled there. Write `match (Box { value: Choice.Yes }).value { Choice.Yes => 1, Choice.No => 0 }` to use a struct construction within a union-valued scrutinee. Existing forms such as `match value { Some(x) => x, None => 0 }` continue to use the brace for match arms.
 
-The implemented value types are `i32`, `bool`, `Text`, immutable non-generic structs, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above.
+The implemented types are `i32`, `bool`, `Text`, immutable non-generic structs, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above.
 
 Use `Choice.Yes` or `Choice.Value(3)` to construct a declared union. Built-in constructors use `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. `None`, `Some`, `Ok`, and `Err` need an expected type from a local annotation, return type, or function parameter. A same-named user function takes precedence. Fully qualified `Option<T>.Some` and `Result<T, E>.Ok` construction is deferred.
 
