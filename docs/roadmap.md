@@ -1,6 +1,6 @@
 # Roadmap and current claims
 
-The source PRD lives in [PRD.md](PRD.md). The executable is `al`, and source files use `.al`.
+The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source files use `.lang`.
 
 ## M0 — repository and toolchain
 

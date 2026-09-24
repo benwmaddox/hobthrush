@@ -13,11 +13,11 @@ internal static class IntegrationTests
         var repositoryRoot = FindRepositoryRoot();
         if (repositoryRoot is null)
         {
-            Console.Error.WriteLine("Could not locate al.slnx and src/Al/Al.csproj.");
+            Console.Error.WriteLine("Could not locate lang.slnx and src/Lang/Lang.csproj.");
             return 2;
         }
 
-        var compilerDll = Path.Combine(repositoryRoot, "src", "Al", "bin", "Release", "net10.0", "al.dll");
+        var compilerDll = Path.Combine(repositoryRoot, "src", "Lang", "bin", "Release", "net10.0", "lang.dll");
         if (!File.Exists(compilerDll))
         {
             Console.Error.WriteLine($"Compiler build not found: {compilerDll}");
@@ -26,7 +26,7 @@ internal static class IntegrationTests
         }
 
         var dotnet = GetDotnetPath(repositoryRoot);
-        var temporaryRoot = Path.Combine(Path.GetTempPath(), "al-integration-tests", Guid.NewGuid().ToString("N"));
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), "lang-integration-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temporaryRoot);
 
         var harness = new Harness(repositoryRoot, compilerDll, dotnet, temporaryRoot);
@@ -47,7 +47,7 @@ internal static class IntegrationTests
             ("checked i32 overflow exits through the generic runtime fault contract", TestCheckedOverflow),
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
             ("invalid main signatures receive an entrypoint diagnostic", TestInvalidEntrypoint),
-            ("AL_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
+            ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
 
@@ -90,7 +90,7 @@ internal static class IntegrationTests
 
     private static async Task TestPureExample(Harness harness)
     {
-        var source = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "examples", "pure", "src", "main.al"));
+        var source = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "examples", "pure", "src", "main.lang"));
         var result = await harness.InvokeAsync("pure-example", "run", source);
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertEqual("50" + Environment.NewLine, result.StandardOutput, Describe(result));
@@ -622,8 +622,8 @@ internal static class IntegrationTests
             + "pub fn main() -> i32 effects {} { return 29; }\n";
 
         var sharedSourceDirectory = harness.CreateSourceDirectory("parallel-runs");
-        var firstPath = await harness.WriteSourceAsync(sharedSourceDirectory, "first.al", firstSource);
-        var secondPath = await harness.WriteSourceAsync(sharedSourceDirectory, "second.al", secondSource);
+        var firstPath = await harness.WriteSourceAsync(sharedSourceDirectory, "first.lang", firstSource);
+        var secondPath = await harness.WriteSourceAsync(sharedSourceDirectory, "second.lang", secondSource);
         var first = harness.InvokeFileAsync("parallel-run-a", firstPath, "run");
         var second = harness.InvokeFileAsync("parallel-run-b", secondPath, "run");
         var results = await Task.WhenAll(first, second);
@@ -641,8 +641,8 @@ internal static class IntegrationTests
         {
             for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
             {
-                if (File.Exists(Path.Combine(directory.FullName, "al.slnx"))
-                    && File.Exists(Path.Combine(directory.FullName, "src", "Al", "Al.csproj")))
+                if (File.Exists(Path.Combine(directory.FullName, "lang.slnx"))
+                    && File.Exists(Path.Combine(directory.FullName, "src", "Lang", "Lang.csproj")))
                 {
                     return directory.FullName;
                 }
@@ -707,14 +707,14 @@ internal static class IntegrationTests
         public async Task<ProcessResult> InvokeUsingHostOverrideAsync(string caseName, string command, string source, string hostOverride)
         {
             var sourceDirectory = CreateSourceDirectory(caseName);
-            var sourcePath = await WriteSourceAsync(sourceDirectory, "main.al", source);
+            var sourcePath = await WriteSourceAsync(sourceDirectory, "main.lang", source);
             return await InvokeFileWithTimeoutAsync(caseName, sourcePath, command, ProcessTimeout, hostOverride);
         }
 
         public async Task<ProcessResult> InvokeWithTimeoutAsync(string caseName, string command, string source, TimeSpan timeout, params string[] additionalArguments)
         {
             var sourceDirectory = CreateSourceDirectory(caseName);
-            var sourcePath = await WriteSourceAsync(sourceDirectory, "main.al", source);
+            var sourcePath = await WriteSourceAsync(sourceDirectory, "main.lang", source);
             return await InvokeFileWithTimeoutAsync(caseName, sourcePath, command, timeout, null, additionalArguments);
         }
 
@@ -740,10 +740,10 @@ internal static class IntegrationTests
             startInfo.ArgumentList.Add(command);
             startInfo.ArgumentList.Add(sourcePath);
             foreach (var argument in additionalArguments) startInfo.ArgumentList.Add(argument);
-            startInfo.Environment["AL_DOTNET"] = dotnetHostOverride ?? dotnet;
+            startInfo.Environment["LANG_DOTNET"] = dotnetHostOverride ?? dotnet;
 
             using var process = new Process { StartInfo = startInfo };
-            if (!process.Start()) throw new InvalidOperationException($"Could not start the al compiler process for {caseName}.");
+            if (!process.Start()) throw new InvalidOperationException($"Could not start the lang compiler process for {caseName}.");
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();

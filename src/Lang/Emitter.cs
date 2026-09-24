@@ -25,7 +25,7 @@ internal static class Emitter
             _source.AppendLine("using System;");
             _source.AppendLine("using System.Globalization;");
             _source.AppendLine();
-            _source.AppendLine("public static class AlModule");
+            _source.AppendLine("public static class LangModule");
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
@@ -167,7 +167,7 @@ internal static class Emitter
             return "(" + EmitExpr(expression.Value) + ") switch { " + string.Join(", ", allArms) + " }";
         }
 
-        private string EmitPattern(TypedPattern pattern, AlType scrutineeType)
+        private string EmitPattern(TypedPattern pattern, LangType scrutineeType)
         {
             if (pattern is TypedWildcardPattern) return "_";
             if (pattern is not TypedVariantPattern variant)
@@ -232,14 +232,14 @@ internal static class Emitter
             _source.AppendLine("    }");
         }
 
-        private string EmitType(AlType type) => type.Kind switch
+        private string EmitType(LangType type) => type.Kind switch
         {
-            AlTypeKind.I32 => "int",
-            AlTypeKind.Bool => "bool",
-            AlTypeKind.Text => "string",
-            AlTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
-            AlTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
-            AlTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
+            LangTypeKind.I32 => "int",
+            LangTypeKind.Bool => "bool",
+            LangTypeKind.Text => "string",
+            LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
+            LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
+            LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
 

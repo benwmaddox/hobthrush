@@ -4,9 +4,9 @@ This contract covers the next bounded, single-file pure-language slice. It does 
 
 ## File ownership
 
-- **Frontend/model:** `src/Al/Syntax.cs` and `src/Al/Parser.cs`. Own lexer, parser, source AST, `Range`, `Diagnostic`, and `Token`. Do not edit driver, semantic checker, or emitter files.
-- **Semantics/backend:** `src/Al/Semantics.cs` and `src/Al/Emitter.cs`. Own typed IR, `Compiler.Check`, and C# emission. Do not edit frontend or driver files.
-- **Driver/tests:** `src/Al/Program.cs`, fixtures, examples, README, and `docs/diagnostics.md`. Remove the old definitions transferred to frontend and semantics. Keep the CLI entry point and fixture runner. Do not edit frontend or semantics files.
+- **Frontend/model:** `src/Lang/Syntax.cs` and `src/Lang/Parser.cs`. Own lexer, parser, source AST, `Range`, `Diagnostic`, and `Token`. Do not edit driver, semantic checker, or emitter files.
+- **Semantics/backend:** `src/Lang/Semantics.cs` and `src/Lang/Emitter.cs`. Own typed IR, `Compiler.Check`, and C# emission. Do not edit frontend or driver files.
+- **Driver/tests:** `src/Lang/Program.cs`, fixtures, examples, README, and `docs/diagnostics.md`. Remove the old definitions transferred to frontend and semantics. Keep the CLI entry point and fixture runner. Do not edit frontend or semantics files.
 
 These files share a namespace (the current global namespace). The driver owner must remove the old types in `Program.cs` when new files are ready, without changing their public handoff names. Coordinating that one deletion avoids duplicate definitions during parallel work.
 
@@ -71,11 +71,11 @@ The checker supports `i32`, `bool`, `Text`, declared non-generic unions, and com
 
 ## Driver contract
 
-All check, build, and run commands call Compiler.Check before doing backend work. al check FILE --json returns schema version 1 with an empty diagnostics array on success; --json is check-only. Missing files and expected file/process failures produce diagnostics instead of an unhandled exception.
+All check, build, and run commands call Compiler.Check before doing backend work. lang check FILE --json returns schema version 1 with an empty diagnostics array on success; --json is check-only. Missing files and expected file/process failures produce diagnostics instead of an unhandled exception.
 
-al build FILE emits an executable if the checked program contains a supported zero-argument main returning i32, bool, or Text. Otherwise it emits a library, including when a function named main has a different signature. It stages generated projects in unique temporary directories, removes staging output after the build, and copies durable artifacts to a unique out/<source-stem>-<id>/ directory beside the source file.
+lang build FILE emits an executable if the checked program contains a supported zero-argument main returning i32, bool, or Text. Otherwise it emits a library, including when a function named main has a different signature. It stages generated projects in unique temporary directories, removes staging output after the build, and copies durable artifacts to a unique out/<source-stem>-<id>/ directory beside the source file.
 
-al run FILE requires the supported main signature. The generated host writes one line containing the returned i32, lowercase bool, or Text value and exits 0. Checked i32 arithmetic overflow prints a generic runtime-fault message to stderr and exits 70. Diagnostics include E_ENTRYPOINT, E_IO, E_PROCESS, E_BUILD, E_TYPE_VISIBILITY, and E_MATCH_ARM_DUPLICATE.
+lang run FILE requires the supported main signature. The generated host writes one line containing the returned i32, lowercase bool, or Text value and exits 0. Checked i32 arithmetic overflow prints a generic runtime-fault message to stderr and exits 70. Diagnostics include E_ENTRYPOINT, E_IO, E_PROCESS, E_BUILD, E_TYPE_VISIBILITY, and E_MATCH_ARM_DUPLICATE.
 ## Acceptance for this slice
 
 Activate fixtures 11–13 and 20, preserving 01–10; keep fixtures 14–19 pending. Add an active wrong-payload-type fixture. Add a runnable positive example using a union payload, bool, Text, Option, Result, and match where each implemented construct is exercised. Verify exact active fixture diagnostic lists, JSON diagnostics for type and match failures, a library build without a supported main, and both runnable examples, including generated C# build and execution. User generic functions, imports/modules, traits, effects, packages, and the complete M1 library acceptance follow in separate stages.

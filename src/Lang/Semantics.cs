@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
 
-internal enum AlTypeKind
+internal enum LangTypeKind
 {
     Error,
     I32,
@@ -11,11 +11,11 @@ internal enum AlTypeKind
     Result
 }
 
-internal sealed class AlType : IEquatable<AlType>
+internal sealed class LangType : IEquatable<LangType>
 {
-    private readonly ReadOnlyCollection<AlType> _arguments;
+    private readonly ReadOnlyCollection<LangType> _arguments;
 
-    private AlType(AlTypeKind kind, string displayName, int unionId = -1, IEnumerable<AlType>? arguments = null)
+    private LangType(LangTypeKind kind, string displayName, int unionId = -1, IEnumerable<LangType>? arguments = null)
     {
         Kind = kind;
         DisplayName = displayName;
@@ -23,42 +23,42 @@ internal sealed class AlType : IEquatable<AlType>
         _arguments = Array.AsReadOnly((arguments ?? []).ToArray());
     }
 
-    public AlTypeKind Kind { get; }
+    public LangTypeKind Kind { get; }
     public string DisplayName { get; }
-    public IReadOnlyList<AlType> Arguments => _arguments;
-    public bool IsI32 => Kind == AlTypeKind.I32;
-    public bool IsBool => Kind == AlTypeKind.Bool;
-    public bool IsText => Kind == AlTypeKind.Text;
+    public IReadOnlyList<LangType> Arguments => _arguments;
+    public bool IsI32 => Kind == LangTypeKind.I32;
+    public bool IsBool => Kind == LangTypeKind.Bool;
+    public bool IsText => Kind == LangTypeKind.Text;
     internal int UnionId { get; }
-    internal bool IsError => Kind == AlTypeKind.Error;
+    internal bool IsError => Kind == LangTypeKind.Error;
 
-    internal static AlType Error { get; } = new(AlTypeKind.Error, "<error>");
-    internal static AlType I32 { get; } = new(AlTypeKind.I32, "i32");
-    internal static AlType Bool { get; } = new(AlTypeKind.Bool, "bool");
-    internal static AlType Text { get; } = new(AlTypeKind.Text, "Text");
+    internal static LangType Error { get; } = new(LangTypeKind.Error, "<error>");
+    internal static LangType I32 { get; } = new(LangTypeKind.I32, "i32");
+    internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
+    internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
 
-    internal static AlType ForUnion(int unionId, string name) => new(AlTypeKind.Union, name, unionId);
-    internal static AlType Option(AlType item) => new(AlTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
-    internal static AlType Result(AlType ok, AlType error) => new(AlTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
+    internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId);
+    internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
+    internal static LangType Result(LangType ok, LangType error) => new(LangTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
 
-    public bool Equals(AlType? other)
+    public bool Equals(LangType? other)
     {
         if (ReferenceEquals(this, other)) return true;
         if (other is null || Kind != other.Kind) return false;
-        if (Kind == AlTypeKind.Union) return UnionId == other.UnionId;
+        if (Kind == LangTypeKind.Union) return UnionId == other.UnionId;
         if (_arguments.Count != other._arguments.Count) return false;
         for (var i = 0; i < _arguments.Count; i++)
             if (!_arguments[i].Equals(other._arguments[i])) return false;
         return true;
     }
 
-    public override bool Equals(object? obj) => obj is AlType other && Equals(other);
+    public override bool Equals(object? obj) => obj is LangType other && Equals(other);
 
     public override int GetHashCode()
     {
         var hash = new HashCode();
         hash.Add(Kind);
-        if (Kind == AlTypeKind.Union)
+        if (Kind == LangTypeKind.Union)
         {
             hash.Add(UnionId);
         }
@@ -69,22 +69,22 @@ internal sealed class AlType : IEquatable<AlType>
         return hash.ToHashCode();
     }
 
-    public static bool operator ==(AlType? left, AlType? right) => Equals(left, right);
-    public static bool operator !=(AlType? left, AlType? right) => !Equals(left, right);
+    public static bool operator ==(LangType? left, LangType? right) => Equals(left, right);
+    public static bool operator !=(LangType? left, LangType? right) => !Equals(left, right);
 }
 
-internal sealed record CheckedVariantField(string? Name, AlType Type, int Index, Token At);
+internal sealed record CheckedVariantField(string? Name, LangType Type, int Index, Token At);
 internal sealed record CheckedVariant(int Id, string Name, IReadOnlyList<CheckedVariantField> Fields, Token At);
-internal sealed record CheckedUnion(int Id, string Name, bool Public, AlType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
-internal sealed record CheckedParameter(string Name, AlType Type, int LocalId, Token At);
+internal sealed record CheckedUnion(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
+internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 
-internal abstract record TypedExpr(AlType Type, Token At);
-internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(AlType.I32, At);
-internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(AlType.Bool, At);
-internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(AlType.Text, At);
-internal sealed record TypedLocalExpr(AlType Type, int LocalId, Token At) : TypedExpr(Type, At);
-internal sealed record TypedBinaryExpr(AlType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
-internal sealed record TypedCallExpr(AlType Type, int FunctionId, IReadOnlyList<TypedExpr> Arguments, Token At) : TypedExpr(Type, At);
+internal abstract record TypedExpr(LangType Type, Token At);
+internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(LangType.I32, At);
+internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(LangType.Bool, At);
+internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(LangType.Text, At);
+internal sealed record TypedLocalExpr(LangType Type, int LocalId, Token At) : TypedExpr(Type, At);
+internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
+internal sealed record TypedCallExpr(LangType Type, int FunctionId, IReadOnlyList<TypedExpr> Arguments, Token At) : TypedExpr(Type, At);
 
 internal enum BuiltinVariant
 {
@@ -95,13 +95,13 @@ internal enum BuiltinVariant
 }
 
 internal sealed record TypedBuiltinConstructExpr(
-    AlType Type,
+    LangType Type,
     BuiltinVariant Variant,
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
 
 internal sealed record TypedUnionConstructExpr(
-    AlType Type,
+    LangType Type,
     int UnionId,
     int VariantId,
     IReadOnlyList<TypedExpr> Arguments,
@@ -109,20 +109,20 @@ internal sealed record TypedUnionConstructExpr(
 
 internal abstract record TypedPattern(Token At);
 internal sealed record TypedWildcardPattern(Token At) : TypedPattern(At);
-internal sealed record BoundLocal(string Name, int LocalId, AlType Type, Token At);
+internal sealed record BoundLocal(string Name, int LocalId, LangType Type, Token At);
 internal sealed record TypedVariantPattern(
     VariantShape Shape,
     IReadOnlyList<BoundLocal> Bindings,
     Token At) : TypedPattern(At);
 internal sealed record TypedMatchArm(TypedPattern Pattern, TypedExpr Body, Token At);
 internal sealed record TypedMatchExpr(
-    AlType Type,
+    LangType Type,
     TypedExpr Value,
     IReadOnlyList<TypedMatchArm> Arms,
     Token At) : TypedExpr(Type, At);
 
 internal abstract record TypedStmt(Token At);
-internal sealed record TypedLetStmt(int LocalId, string Name, AlType Type, TypedExpr Value, Token At) : TypedStmt(At);
+internal sealed record TypedLetStmt(int LocalId, string Name, LangType Type, TypedExpr Value, Token At) : TypedStmt(At);
 internal sealed record TypedReturnStmt(TypedExpr Value, Token At) : TypedStmt(At);
 
 internal sealed class CheckedFunction
@@ -132,7 +132,7 @@ internal sealed class CheckedFunction
         string name,
         bool isPublic,
         IReadOnlyList<CheckedParameter> parameters,
-        AlType returnType,
+        LangType returnType,
         IReadOnlyList<TypedStmt> body,
         Token at)
     {
@@ -149,7 +149,7 @@ internal sealed class CheckedFunction
     public string Name { get; }
     public bool Public { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
-    public AlType ReturnType { get; }
+    public LangType ReturnType { get; }
     internal IReadOnlyList<TypedStmt> Body { get; }
     internal Token At { get; }
 
@@ -178,7 +178,7 @@ internal sealed record VariantShape(
     int? UnionId,
     int VariantId,
     BuiltinVariant? Builtin,
-    IReadOnlyList<AlType> PayloadTypes);
+    IReadOnlyList<LangType> PayloadTypes);
 
 internal static class Compiler
 {
@@ -245,7 +245,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var symbol = new UnionSymbol(_unions.Count, declaration, AlType.ForUnion(_unions.Count, declaration.Name));
+            var symbol = new UnionSymbol(_unions.Count, declaration, LangType.ForUnion(_unions.Count, declaration.Name));
             _unions.Add(symbol);
             _unionsByName.Add(declaration.Name, symbol);
         }
@@ -338,10 +338,10 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         }
     }
 
-    private void CheckPublicTypeVisibility(AlType type, string owner, Token at)
+    private void CheckPublicTypeVisibility(LangType type, string owner, Token at)
     {
         if (type.IsError) return;
-        if (type.Kind == AlTypeKind.Union &&
+        if (type.Kind == LangTypeKind.Union &&
             _unions[type.UnionId].Declaration.Public == false)
         {
             Add("E_TYPE_VISIBILITY", $"Public declaration '{owner}' exposes private type '{type.DisplayName}'", at);
@@ -410,7 +410,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
     private TypedExpr CheckExpr(
         Expr expression,
-        AlType? expected,
+        LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
@@ -442,7 +442,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         return result;
     }
 
-    private TypedExpr CheckName(NameExpr expression, AlType? expected, Dictionary<string, LocalSymbol> locals)
+    private TypedExpr CheckName(NameExpr expression, LangType? expected, Dictionary<string, LocalSymbol> locals)
     {
         if (locals.TryGetValue(expression.Name, out var local))
             return new TypedLocalExpr(local.Type, local.Id, expression.At);
@@ -461,7 +461,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
             if (expected.IsError) return new TypedErrorExpr(expression.At);
-            if (expected.Kind != AlTypeKind.Option)
+            if (expected.Kind != LangTypeKind.Option)
             {
                 AddMismatch(expected, "Option<T>", expression.At);
                 return new TypedErrorExpr(expression.At);
@@ -481,14 +481,14 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        var left = CheckExpr(expression.Left, AlType.I32, locals, depth);
-        var right = CheckExpr(expression.Right, AlType.I32, locals, depth);
-        return new TypedBinaryExpr(AlType.I32, expression.Op, left, right, expression.At);
+        var left = CheckExpr(expression.Left, LangType.I32, locals, depth);
+        var right = CheckExpr(expression.Right, LangType.I32, locals, depth);
+        return new TypedBinaryExpr(LangType.I32, expression.Op, left, right, expression.At);
     }
 
     private TypedExpr CheckCall(
         CallExpr expression,
-        AlType? expected,
+        LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
@@ -517,13 +517,13 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
     private TypedExpr CheckBuiltinCall(
         CallExpr expression,
-        AlType? expected,
+        LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
         var wantsOption = expression.Name == "Some";
         var wantsOk = expression.Name == "Ok";
-        var expectedKind = wantsOption ? AlTypeKind.Option : AlTypeKind.Result;
+        var expectedKind = wantsOption ? LangTypeKind.Option : LangTypeKind.Result;
         var expectedName = wantsOption ? "Option<T>" : "Result<T, E>";
         var matchingContext = expected is not null && (expected.IsError || expected.Kind == expectedKind);
 
@@ -555,10 +555,10 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             else
             {
                 var actualType = wantsOption
-                    ? AlType.Option(value.Type)
+                    ? LangType.Option(value.Type)
                     : wantsOk
-                        ? AlType.Result(value.Type, AlType.Error)
-                        : AlType.Result(AlType.Error, value.Type);
+                        ? LangType.Result(value.Type, LangType.Error)
+                        : LangType.Result(LangType.Error, value.Type);
                 AddMismatch(expected, actualType, expression.At);
             }
             return new TypedErrorExpr(expression.At);
@@ -612,7 +612,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
     private TypedExpr CheckMatch(
         MatchExpr expression,
-        AlType? expected,
+        LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
@@ -624,7 +624,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         var arms = new List<TypedMatchArm>();
         var covered = new HashSet<string>(StringComparer.Ordinal);
         var wildcardSeen = false;
-        AlType? inferredResult = expected;
+        LangType? inferredResult = expected;
 
         foreach (var arm in expression.Arms)
         {
@@ -655,7 +655,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                     for (var i = 0; i < variantPattern.Bindings.Count; i++)
                     {
                         var name = variantPattern.Bindings[i];
-                        var payloadType = i < shape.PayloadTypes.Count ? shape.PayloadTypes[i] : AlType.Error;
+                        var payloadType = i < shape.PayloadTypes.Count ? shape.PayloadTypes[i] : LangType.Error;
                         if (!boundNames.Add(name))
                             Add("E_NAME_DUPLICATE", $"Pattern binding '{name}' is duplicated", variantPattern.At);
                         var bound = new BoundLocal(name, _nextLocalId++, payloadType, variantPattern.At);
@@ -693,13 +693,13 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                     expression.At.Range));
         }
 
-        return new TypedMatchExpr(inferredResult ?? AlType.Error, value, ReadOnly(arms), expression.At);
+        return new TypedMatchExpr(inferredResult ?? LangType.Error, value, ReadOnly(arms), expression.At);
     }
 
-    private IReadOnlyList<VariantShape>? GetVariantShapes(AlType type)
+    private IReadOnlyList<VariantShape>? GetVariantShapes(LangType type)
     {
         if (type.IsError) return null;
-        if (type.Kind == AlTypeKind.Union)
+        if (type.Kind == LangTypeKind.Union)
         {
             var union = _unions[type.UnionId];
             return ReadOnly(union.Variants.Select(variant => new VariantShape(
@@ -710,14 +710,14 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                 null,
                 ReadOnly(variant.Fields.Select(field => field.Type)))));
         }
-        if (type.Kind == AlTypeKind.Option)
+        if (type.Kind == LangTypeKind.Option)
         {
             return ReadOnly<VariantShape>([
                 new("Some", "option:Some", null, 0, BuiltinVariant.Some, ReadOnly([type.Arguments[0]])),
                 new("None", "option:None", null, 1, BuiltinVariant.None, [])
             ]);
         }
-        if (type.Kind == AlTypeKind.Result)
+        if (type.Kind == LangTypeKind.Result)
         {
             return ReadOnly<VariantShape>([
                 new("Ok", "result:Ok", null, 0, BuiltinVariant.Ok, ReadOnly([type.Arguments[0]])),
@@ -729,10 +729,10 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
     private VariantShape? ResolvePatternShape(
         VariantPattern pattern,
-        AlType scrutineeType,
+        LangType scrutineeType,
         IReadOnlyList<VariantShape> shapes)
     {
-        if (scrutineeType.Kind == AlTypeKind.Union)
+        if (scrutineeType.Kind == LangTypeKind.Union)
         {
             var union = _unions[scrutineeType.UnionId];
             if (pattern.UnionName != union.Declaration.Name)
@@ -749,7 +749,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
             return null;
         }
 
-        var shape = shapes.FirstOrDefault(item => item.Name == (scrutineeType.Kind == AlTypeKind.Union
+        var shape = shapes.FirstOrDefault(item => item.Name == (scrutineeType.Kind == LangTypeKind.Union
             ? $"{pattern.UnionName}.{pattern.VariantName}"
             : pattern.VariantName));
         if (shape is null)
@@ -760,7 +760,7 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         return shape;
     }
 
-    private AlType ResolveType(TypeSyntax syntax, int depth)
+    private LangType ResolveType(TypeSyntax syntax, int depth)
     {
         if (depth >= MaximumSemanticDepth)
         {
@@ -769,62 +769,62 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
                 Add("E_TYPE_MISMATCH", "Type nesting exceeds the semantic checker limit", syntax.At);
                 _semanticDepthReported = true;
             }
-            return AlType.Error;
+            return LangType.Error;
         }
 
         switch (syntax.Name)
         {
             case "i32":
-                return NoTypeArguments(syntax, AlType.I32);
+                return NoTypeArguments(syntax, LangType.I32);
             case "bool":
-                return NoTypeArguments(syntax, AlType.Bool);
+                return NoTypeArguments(syntax, LangType.Bool);
             case "Text":
-                return NoTypeArguments(syntax, AlType.Text);
+                return NoTypeArguments(syntax, LangType.Text);
             case "Option":
                 if (syntax.Args.Count != 1)
                 {
                     Add("E_TYPE_MISMATCH", $"Type 'Option' expects 1 type argument, got {syntax.Args.Count}", syntax.At);
-                    return AlType.Error;
+                    return LangType.Error;
                 }
-                return AlType.Option(ResolveType(syntax.Args[0], depth + 1));
+                return LangType.Option(ResolveType(syntax.Args[0], depth + 1));
             case "Result":
                 if (syntax.Args.Count != 2)
                 {
                     Add("E_TYPE_MISMATCH", $"Type 'Result' expects 2 type arguments, got {syntax.Args.Count}", syntax.At);
-                    return AlType.Error;
+                    return LangType.Error;
                 }
-                return AlType.Result(ResolveType(syntax.Args[0], depth + 1), ResolveType(syntax.Args[1], depth + 1));
+                return LangType.Result(ResolveType(syntax.Args[0], depth + 1), ResolveType(syntax.Args[1], depth + 1));
             default:
                 if (_unionsByName.TryGetValue(syntax.Name, out var union))
                 {
                     if (syntax.Args.Count != 0)
                     {
                         Add("E_TYPE_MISMATCH", $"Union type '{syntax.Name}' does not take type arguments", syntax.At);
-                        return AlType.Error;
+                        return LangType.Error;
                     }
                     return union.Type;
                 }
                 Add("E_NAME_UNRESOLVED", $"Type '{syntax.Name}' is not declared", syntax.At);
-                return AlType.Error;
+                return LangType.Error;
         }
     }
 
-    private AlType NoTypeArguments(TypeSyntax syntax, AlType type)
+    private LangType NoTypeArguments(TypeSyntax syntax, LangType type)
     {
         if (syntax.Args.Count != 0)
         {
             Add("E_TYPE_MISMATCH", $"Type '{syntax.Name}' does not take type arguments", syntax.At);
-            return AlType.Error;
+            return LangType.Error;
         }
         return type;
     }
 
 
-    private void AddMismatch(AlType expected, AlType actual, Token at) =>
+    private void AddMismatch(LangType expected, LangType actual, Token at) =>
         Add("E_TYPE_MISMATCH", $"Expected '{expected.DisplayName}', found '{actual.DisplayName}'", at);
 
 
-    private void AddMismatch(AlType expected, string actual, Token at) =>
+    private void AddMismatch(LangType expected, string actual, Token at) =>
         Add("E_TYPE_MISMATCH", $"Expected '{expected.DisplayName}', found '{actual}'", at);
     private void Add(string code, string message, Token at) =>
         diagnostics.Add(new Diagnostic(code, message, file, at.Range));
@@ -833,11 +833,11 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
 
     private static IReadOnlyList<T> ReadOnly<T>(IEnumerable<T> items) => Array.AsReadOnly(items.ToArray());
 
-    private sealed class UnionSymbol(int id, UnionDecl declaration, AlType type)
+    private sealed class UnionSymbol(int id, UnionDecl declaration, LangType type)
     {
         public int Id { get; } = id;
         public UnionDecl Declaration { get; } = declaration;
-        public AlType Type { get; } = type;
+        public LangType Type { get; } = type;
         public List<CheckedVariant> Variants { get; } = [];
     }
 
@@ -845,18 +845,18 @@ internal sealed class SemanticChecker(string file, List<Diagnostic> diagnostics)
         int id,
         FunctionDecl declaration,
         IReadOnlyList<CheckedParameter> parameters,
-        AlType returnType)
+        LangType returnType)
     {
         public int Id { get; } = id;
         public FunctionDecl Declaration { get; } = declaration;
         public IReadOnlyList<CheckedParameter> Parameters { get; } = parameters;
-        public AlType ReturnType { get; } = returnType;
+        public LangType ReturnType { get; } = returnType;
         public CheckedFunction? CheckedFunction { get; set; }
     }
 
-    private sealed record LocalSymbol(int Id, AlType Type);
+    private sealed record LocalSymbol(int Id, LangType Type);
 
     private int _nextLocalId;
 }
 
-internal sealed record TypedErrorExpr(Token At) : TypedExpr(AlType.Error, At);
+internal sealed record TypedErrorExpr(Token At) : TypedExpr(LangType.Error, At);

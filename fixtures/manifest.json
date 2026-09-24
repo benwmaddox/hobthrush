@@ -1,106 +1,106 @@
 [
   {
-    "file": "01-valid-constant.al",
+    "file": "01-valid-constant.lang",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "02-valid-parameter.al",
+    "file": "02-valid-parameter.lang",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "03-valid-local.al",
+    "file": "03-valid-local.lang",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "04-missing-module.al",
+    "file": "04-missing-module.lang",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "05-missing-semicolon.al",
+    "file": "05-missing-semicolon.lang",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "06-duplicate-function.al",
+    "file": "06-duplicate-function.lang",
     "status": "active",
     "expectedCode": "E_NAME_DUPLICATE"
   },
   {
-    "file": "07-unresolved-name.al",
+    "file": "07-unresolved-name.lang",
     "status": "active",
     "expectedCode": "E_NAME_UNRESOLVED"
   },
   {
-    "file": "08-wrong-arity.al",
+    "file": "08-wrong-arity.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "09-literal-overflow.al",
+    "file": "09-literal-overflow.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "10-missing-return.al",
+    "file": "10-missing-return.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "11-union-match.al",
+    "file": "11-union-match.lang",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "12-match-missing-arm.al",
+    "file": "12-match-missing-arm.lang",
     "status": "active",
     "expectedCode": "E_MATCH_NONEXHAUSTIVE"
   },
   {
-    "file": "13-option-mismatch.al",
+    "file": "13-option-mismatch.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "14-effect-transitive.al",
+    "file": "14-effect-transitive.lang",
     "status": "pending",
     "expectedCode": "E_EFFECT_EXCEEDED"
   },
   {
-    "file": "15-capability-missing.al",
+    "file": "15-capability-missing.lang",
     "status": "pending",
     "expectedCode": "E_CAPABILITY_MISSING"
   },
   {
-    "file": "16-resource-escape.al",
+    "file": "16-resource-escape.lang",
     "status": "pending",
     "expectedCode": "E_RESOURCE_ESCAPE"
   },
   {
-    "file": "17-cli-command.al",
+    "file": "17-cli-command.lang",
     "status": "pending",
     "expectedCode": null
   },
   {
-    "file": "18-route-mapping.al",
+    "file": "18-route-mapping.lang",
     "status": "pending",
     "expectedCode": null
   },
   {
-    "file": "19-route-missing-mapping.al",
+    "file": "19-route-missing-mapping.lang",
     "status": "pending",
     "expectedCode": "E_ROUTE_RESPONSE_MISSING"
   },
   {
-    "file": "20-null-rejected.al",
+    "file": "20-null-rejected.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "21-payload-mismatch.al",
+    "file": "21-payload-mismatch.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   }

@@ -2,7 +2,7 @@
 
 **Status:** Implementation-ready product brief
 **Date:** September 24, 2026
-**Chosen names:** `al` for the executable, `.al` for source files.
+**Temporary working name:** `lang` for the executable and `.lang` for source files; the permanent name is pending.
 **Primary target:** Reliable libraries, command-line tools, JSON web services, and small server-rendered web applications.
 **Owner decision:** Build this as a new language and toolchain. Do not add features to Stasis or depend on Stasis internals.
 
@@ -32,7 +32,7 @@ V1 is complete only when **three maintained example projects** build and run fro
 
 All three must share the same language, module/package format, compiler, standard library conventions, build command, and diagnostic schema. A collection of unrelated demos is not a V1.
 
-**Operational target:** A developer who already has the pinned .NET SDK can clone the repository, run the documented bootstrap, execute `al test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. No performance, formal-security, or binary-size claim is a V1 acceptance criterion.
+**Operational target:** A developer who already has the pinned .NET SDK can clone the repository, run the documented bootstrap, execute `lang test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. No performance, formal-security, or binary-size claim is a V1 acceptance criterion.
 
 ## 3. Decisions fixed for V1
 
@@ -94,13 +94,13 @@ The current parser implements the pure subset described in [docs/grammar.md](gra
 
 Union variants use either named fields, for example TooLong(max: i32), or positional fields, for example Value(i32); a variant cannot mix them. Construct declared variants with Choice.Yes or Choice.Value(3). Built-in Option and Result constructors are Some(value), None, Ok(value), and Err(error), and their type comes from an expected annotation, return type, or parameter. Match arms are comma-separated and use =>. Patterns name union variants, bind payloads positionally, or use the explicit wildcard _. Text literals support escaped quote, backslash, newline, carriage return, tab, and NUL characters. The exact productions and unsupported syntax are maintained in docs/grammar.md.
 
-For the current command-line runner, main must take no arguments and return i32, bool, or Text. al run prints the returned value followed by a newline and exits 0; checked i32 arithmetic overflow reports a generic runtime fault and exits 70. al build creates an executable when that supported entrypoint exists and otherwise creates a library DLL. This sample output behavior is separate from the eventual typed CLI exit-code mapping in this PRD.
+For the current command-line runner, main must take no arguments and return i32, bool, or Text. lang run prints the returned value followed by a newline and exits 0; checked i32 arithmetic overflow reports a generic runtime fault and exits 70. lang build creates an executable when that supported entrypoint exists and otherwise creates a library DLL. This sample output behavior is separate from the eventual typed CLI exit-code mapping in this PRD.
 ### 4.2 Effects and capabilities
 
 - Define a closed V1 effect vocabulary: `fs.read`, `fs.write`, `process.spawn`, `net.client`, `net.listen`, `db.read`, `db.write`, `env.read`, `clock.read`, `log.write`, and `secret.reveal`. Add a new effect only with a documented adapter and conformance tests.
 - Every function has an inferred transitive effect set, including effects of called functions. Public functions must declare an upper bound; the compiler rejects a body or call chain whose inferred set is outside that bound. `effects {}` means no modeled I/O effects, not zero allocation or a proof of mathematical purity.
 - A function can perform an effect only when it receives the appropriate capability value, directly or through a capability-bearing service. Importing a package must not grant ambient I/O. The trusted application root creates capabilities from a manifest and passes them into handlers/commands.
-- Record the shortest useful call path explaining each public effect. Handle recursion with a call-graph fixed point. `al inspect effects <symbol>` must show declared, inferred, and foreign-declared effects separately.
+- Record the shortest useful call path explaining each public effect. Handle recursion with a call-graph fixed point. `lang inspect effects <symbol>` must show declared, inferred, and foreign-declared effects separately.
 - Foreign adapters have explicitly declared effects and may require capability parameters, but the compiler cannot prove the internal .NET code honors its declaration. The build receipt must identify this limit.
 - The runtime may issue capabilities only for operations declared in the application manifest. V1 capabilities constrain code written in this language and first-party adapters; they do **not** provide a security sandbox against malicious .NET code in the same process.
 
@@ -131,23 +131,23 @@ V1 commands:
 
 | Command | Required behavior |
 | --- | --- |
-| `al new lib|cli|web NAME` | Create a compilable minimal project and tests. |
-| `al check [--json]` | Parse, resolve, type-check, check matches/effects/capabilities/routes, return a stable nonzero failure code. |
-| `al build` / `al run` | Build through the pinned backend, then optionally run. Do not skip checks. |
-| `al test` | Discover and run language tests; report source locations and a nonzero exit on failure. |
-| `al fmt --check` / `al fmt` | Deterministic formatting; check mode does not modify files. |
-| `al add PATH|GIT_URL#COMMIT` | Add an exact local or pinned-Git dependency and update the lockfile. |
-| `al audit [--json]` | List package graph, hashes, effects, capabilities, adapters, and checked versus trusted claims. |
-| `al inspect symbols|calls|effects [--json]` | Query the semantic index for agents and developers. |
+| `lang new lib|cli|web NAME` | Create a compilable minimal project and tests. |
+| `lang check [--json]` | Parse, resolve, type-check, check matches/effects/capabilities/routes, return a stable nonzero failure code. |
+| `lang build` / `lang run` | Build through the pinned backend, then optionally run. Do not skip checks. |
+| `lang test` | Discover and run language tests; report source locations and a nonzero exit on failure. |
+| `lang fmt --check` / `lang fmt` | Deterministic formatting; check mode does not modify files. |
+| `lang add PATH|GIT_URL#COMMIT` | Add an exact local or pinned-Git dependency and update the lockfile. |
+| `lang audit [--json]` | List package graph, hashes, effects, capabilities, adapters, and checked versus trusted claims. |
+| `lang inspect symbols|calls|effects [--json]` | Query the semantic index for agents and developers. |
 
-All commands use the same compiler and diagnostic codes. No editor integration or daemon is required. Successful `al build` emits the executable plus the manifest and receipt described below.
+All commands use the same compiler and diagnostic codes. No editor integration or daemon is required. Successful `lang build` emits the executable plus the manifest and receipt described below.
 
 #### Current command implementation
 
-The current compiler accepts al check FILE [--json], al build FILE, al run FILE, and al test. JSON output is supported on check and includes the schema version and ordered diagnostics. al test compares active fixture diagnostic codes exactly; it does not yet discover language-level tests. Build artifacts are copied into a unique out/<source-name>-<id>/ directory beside the source file. Fixtures for effects, capabilities, resource scopes, language CLI commands, and routes remain pending.
+The current compiler accepts lang check FILE [--json], lang build FILE, lang run FILE, and lang test. JSON output is supported on check and includes the schema version and ordered diagnostics. lang test compares active fixture diagnostic codes exactly; it does not yet discover language-level tests. Build artifacts are copied into a unique out/<source-name>-<id>/ directory beside the source file. Fixtures for effects, capabilities, resource scopes, language CLI commands, and routes remain pending.
 ### 5.2 Package format and foreign boundary
 
-`al.toml` declares package name, version, entry kind (`lib`, `cli`, `web`), supported target, dependencies, and application capabilities. `al.lock` records resolved dependency identity and content hash. Builds fail if pinned content differs from the lockfile. Workspace path dependencies are content-hashed for the receipt but remain editable during local development. Test a clean offline rebuild with a populated cache.
+`lang.toml` declares package name, version, entry kind (`lib`, `cli`, `web`), supported target, dependencies, and application capabilities. `lang.lock` records resolved dependency identity and content hash. Builds fail if pinned content differs from the lockfile. Workspace path dependencies are content-hashed for the receipt but remain editable during local development. Test a clean offline rebuild with a populated cache.
 
 Normal packages contain language source and obtain effect summaries from compilation. A **foreign adapter package** explicitly declares a pinned .NET dependency, exposed language signatures, capability requirements, and trusted effect claims. It has wrapper tests and an audit entry for every exposed operation. Ordinary source cannot reference .NET types or load assemblies directly. V1 does not provide a remote package registry, semver solving, or public publishing.
 
@@ -224,13 +224,13 @@ source + locked packages
   -> executable + schemas + audit receipt
 ```
 
-A backend must consume only a successfully checked program snapshot. Keep the typed IR independent of C# syntax so checks and a future backend do not depend on emitted source. Emit reproducible source and preserve diagnostics mapping back to original `.al` spans.
+A backend must consume only a successfully checked program snapshot. Keep the typed IR independent of C# syntax so checks and a future backend do not depend on emitted source. Emit reproducible source and preserve diagnostics mapping back to original `.lang` spans.
 
 **Diagnostic JSON:** Stable `code`, `severity`, `message`, file/range, symbol ID when available, and related locations/call path. Human messages may improve without changing the code. Examples: `E_MATCH_NONEXHAUSTIVE`, `E_EFFECT_EXCEEDED`, `E_CAPABILITY_MISSING`, `E_ROUTE_RESPONSE_MISSING`, `E_RESOURCE_ESCAPE`, `E_TYPE_MISMATCH`. Bad source must never produce a stack trace as the primary compiler diagnostic.
 
 **Semantic IDs:** Public and module-level symbol IDs derive deterministically from locked package identity, module path, declaration kind, and declared name. A body edit or formatting change must not change the ID; a rename or package-identity change may. Local expression IDs are build-scoped and need not survive edits. No semantic-edit mutation API in V1.
 
-**Read-only query interface:** `al inspect --json` exposes symbols, signatures, callers/callees, declared/inferred effects, required capabilities, and foreign boundaries. Version the JSON schema. The compiler is the source of these facts; do not produce them by grepping generated C#.
+**Read-only query interface:** `lang inspect --json` exposes symbols, signatures, callers/callees, declared/inferred effects, required capabilities, and foreign boundaries. Version the JSON schema. The compiler is the source of these facts; do not produce them by grepping generated C#.
 
 **Build receipt:** Emit one `build-receipt.json` with toolchain version, target, source/package hashes, checks actually passed, effects/capabilities, foreign dependencies and their declared claims, and paths/hashes for the binary, command schema, and OpenAPI if present. It is an audit record, not a formal proof or a cryptographic certificate. Never set `boundsProven`, `contractProven`, `secure`, or `deterministic` based on tests or adapter declarations.
 
@@ -265,7 +265,7 @@ Automate these in CI; the named behaviors are contractual even if final syntax c
 | A08 | JSON route receives malformed body and an oversized body. | Documented client errors; handler not invoked. |
 | A09 | Server-rendered page includes `<script>` in a text field. | Literal escaped text in output, no executable element. |
 | A10 | Parameterized SQLite query receives a malicious-looking string. | Treated as data; no change to SQL structure. |
-| A11 | `al audit --json` on a program using SQLite. | Separates compiler-checked language code from trusted adapter declarations. |
+| A11 | `lang audit --json` on a program using SQLite. | Separates compiler-checked language code from trusted adapter declarations. |
 | A12 | Format or change a function body, then inspect its public symbol ID. | ID unchanged; diagnostics and receipt still refer to current source. |
 | A13 | Modify a pinned dependency without updating its lock entry. | Build fails on mismatch; clean cached dependency rebuild works offline. |
 | A14 | CLI run with `--help`, invalid flag, expected domain error, and runtime fault. | Generated help; distinct predictable exit behavior and no secret value in error output. |

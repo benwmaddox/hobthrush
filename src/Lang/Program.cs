@@ -73,7 +73,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: al check FILE [--json] | al build FILE | al run FILE | al test");
+        Console.Error.WriteLine("Usage: lang check FILE [--json] | lang build FILE | lang run FILE | lang test");
 
     private static void PrintDiagnostics(IReadOnlyList<Diagnostic> diagnostics, bool json)
     {
@@ -112,7 +112,7 @@ internal static class Driver
             [
                 AtStart(
                     "E_ENTRYPOINT",
-                    "al run requires fn main() -> i32, bool, or Text with no parameters",
+                    "lang run requires fn main() -> i32, bool, or Text with no parameters",
                     sourceFile)
             ],
             json: false);
@@ -122,7 +122,7 @@ internal static class Driver
         var executable = entry is not null;
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
-            "al-generated",
+            "lang-generated",
             Guid.NewGuid().ToString("N"));
 
         string projectFile;
@@ -288,7 +288,7 @@ internal static class Driver
 
     private static void TryCleanupGeneratedDirectory(string generatedDirectory, string sourceFile)
     {
-        var generatedRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "al-generated"));
+        var generatedRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "lang-generated"));
         var outputDirectory = Path.GetFullPath(generatedDirectory);
         var rootPrefix = Path.EndsInDirectorySeparator(generatedRoot)
             ? generatedRoot
@@ -318,7 +318,7 @@ internal static class Driver
 
     private static string ResolveDotnetHost()
     {
-        foreach (var variable in new[] { "AL_DOTNET", "DOTNET_HOST_PATH" })
+        foreach (var variable in new[] { "LANG_DOTNET", "DOTNET_HOST_PATH" })
         {
             var configuredHost = Environment.GetEnvironmentVariable(variable);
             if (!string.IsNullOrWhiteSpace(configuredHost))
@@ -467,8 +467,8 @@ internal static class Driver
         {
             for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
             {
-                if (File.Exists(Path.Combine(directory.FullName, "al.slnx")) &&
-                    File.Exists(Path.Combine(directory.FullName, "src", "Al", "Al.csproj")))
+                if (File.Exists(Path.Combine(directory.FullName, "lang.slnx")) &&
+                    File.Exists(Path.Combine(directory.FullName, "src", "Lang", "Lang.csproj")))
                 {
                     return directory.FullName;
                 }

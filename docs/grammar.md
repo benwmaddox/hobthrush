@@ -61,6 +61,6 @@ Every function still writes an explicit `effects {}` clause. Only empty effect s
 
 ## Build and run entrypoints
 
-`al build FILE` emits an executable when the source contains `fn main()` with no parameters and a return type of `i32`, `bool`, or `Text`. Otherwise it emits a library, including when a function named `main` has another signature. Build artifacts are saved under an `out/<stem>-<id>/` directory beside the source file.
+`lang build FILE` emits an executable when the source contains `fn main()` with no parameters and a return type of `i32`, `bool`, or `Text`. Otherwise it emits a library, including when a function named `main` has another signature. Build artifacts are saved under an `out/<stem>-<id>/` directory beside the source file.
 
-`al run FILE` requires that executable entry signature. The program prints its returned value followed by a newline; `i32`, lowercase `bool`, and `Text` values are printed directly. Successful runs exit 0. Checked i32 arithmetic overflow prints a generic runtime-fault message and exits 70.
+`lang run FILE` requires that executable entry signature. The program prints its returned value followed by a newline; `i32`, lowercase `bool`, and `Text` values are printed directly. Successful runs exit 0. Checked i32 arithmetic overflow prints a generic runtime-fault message and exits 70.
