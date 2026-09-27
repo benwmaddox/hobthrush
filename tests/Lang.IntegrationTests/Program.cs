@@ -80,7 +80,8 @@ internal static class IntegrationTests
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
-            ("pure Text validation package builds and normalizes empty and nonempty input", TestTextValidationExample),
+            ("Text validation package builds and imported generic calls specialize correctly", TestTextValidationExample),
+            ("generic inference limits and generic main entry selection are diagnosed", TestGenericFunctionRestrictions),
             ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
             ("NativeAOT publishes and runs the current-host file executable", TestAotPublishAndRun),
@@ -1931,6 +1932,94 @@ internal static class IntegrationTests
             var run = await harness.InvokePackageDirectoryAsync($"{name}-run", consumerRoot, "run");
             AssertRunOutput(expectedOutput, run);
         }
+
+        var genericConsumer = await harness.WritePackageAsync(
+            "text-validation-generic-consumer",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/text/validation.lang"] = librarySource,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import text.validation { NormalizeError, require };
+
+                    pub fn main() -> i32 effects {} {
+                        let text_option: Option<Text> = Some("hello 😀");
+                        let text_result: Result<Text, NormalizeError> = require(text_option, NormalizeError.Empty);
+                        let number_option: Option<i32> = Some(35);
+                        let number_result: Result<i32, Text> = require(number_option, "missing");
+                        let text_length: i32 = match text_result {
+                            Ok(value) => value.length,
+                            Err(error) => match error {
+                                NormalizeError.Empty => 0,
+                            },
+                        };
+                        return match number_result {
+                            Ok(number) => number + text_length,
+                            Err(message) => 0,
+                        };
+                    }
+                    """
+            });
+        var genericCheck = await harness.InvokePackageDirectoryAsync(
+            "text-validation-generic-consumer-check", genericConsumer, "check", "--json");
+        AssertEqual(0, genericCheck.ExitCode, Describe(genericCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(genericCheck.StandardOutput).Length,
+            "Both inferred generic instantiations and their exhaustive Result matches should check cleanly.");
+        var genericRun = await harness.InvokePackageDirectoryAsync(
+            "text-validation-generic-consumer-run", genericConsumer, "run");
+        AssertRunOutput("42" + Environment.NewLine, genericRun);
+    }
+
+    private static async Task TestGenericFunctionRestrictions(Harness harness)
+    {
+        var librarySource = await File.ReadAllTextAsync(Path.Combine(
+            harness.RepositoryRoot, "examples", "text-validation", "src", "text", "validation.lang"));
+        var constructorConsumer = await harness.WritePackageAsync(
+            "generic-context-dependent-constructors",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/text/validation.lang"] = librarySource,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import text.validation { require };
+
+                    pub fn from_some() -> Result<Text, Text> effects {} {
+                        return require(Some("present"), "fallback");
+                    }
+                    pub fn from_none() -> Result<Text, Text> effects {} {
+                        return require(None, "fallback");
+                    }
+                    pub fn main() -> Text effects {} { return "unused"; }
+                    """
+            });
+        var constructorCheck = await harness.InvokePackageDirectoryAsync(
+            "generic-context-dependent-constructors-check", constructorConsumer, "check", "--json");
+        AssertTrue(constructorCheck.ExitCode != 0, Describe(constructorCheck));
+        AssertEqual(string.Empty, constructorCheck.StandardError, Describe(constructorCheck));
+        var constructorDiagnostics = ParseDiagnosticSnapshots(constructorCheck.StandardOutput);
+        AssertEqual(2, constructorDiagnostics.Length,
+            "Direct Some and None arguments should each report one inference diagnostic.");
+        AssertTrue(constructorDiagnostics.All(diagnostic =>
+                diagnostic.Code == "E_TYPE_MISMATCH"
+                && diagnostic.Message.Contains("requires an expected type of Option<T>", StringComparison.Ordinal)),
+            $"Direct context-dependent constructors should have the stable Option<T> diagnostic. {constructorCheck.StandardOutput}");
+        AssertTrue(constructorDiagnostics.Any(diagnostic => diagnostic.Message.Contains("Some", StringComparison.Ordinal))
+            && constructorDiagnostics.Any(diagnostic => diagnostic.Message.Contains("None", StringComparison.Ordinal)),
+            "The inference diagnostic should identify both Some and None constructors.");
+
+        const string genericMain = """
+            module harness.generic_main;
+            pub fn main<T>(value: T) -> i32 effects {} { return 7; }
+            """;
+        var genericMainBuild = await harness.InvokeAsync("generic-main-library-build", "build", genericMain);
+        AssertBuiltDll(genericMainBuild, Path.GetDirectoryName(harness.LastSourcePath)!);
+        var genericMainRun = await harness.InvokeAsync("generic-main-entrypoint", "run", genericMain);
+        AssertTrue(genericMainRun.ExitCode != 0, Describe(genericMainRun));
+        AssertEqual(string.Empty, genericMainRun.StandardOutput, Describe(genericMainRun));
+        AssertTrue(genericMainRun.StandardError.Contains("E_ENTRYPOINT", StringComparison.Ordinal),
+            $"A generic main function must not select the executable entrypoint. {Describe(genericMainRun)}");
     }
 
     private static string CliPackageManifest(string entryModule = "app.main") =>

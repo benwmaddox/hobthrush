@@ -9,8 +9,9 @@ import_decl     = "import", module_path, "{", import_symbols, "}", ";" ;
 import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 declaration     = [ "pub" ], ( function | union | struct ) ;
 
-function        = "fn", bare_identifier, "(", [ parameters ], ")",
+function        = "fn", bare_identifier, [ "<", type_parameters, ">" ], "(", [ parameters ], ")",
                   "->", type, "effects", "{", [ effect, { ",", effect }, [ "," ] ], "}", block ;
+type_parameters = bare_identifier, { ",", bare_identifier } ;
 effect          = effect_name ;
 effect_name     = "fs.read" | "fs.write" | "process.spawn" | "net.client" | "net.listen"
                 | "db.read" | "db.write" | "env.read" | "clock.read" | "log.write"
@@ -86,7 +87,9 @@ The root `lang.toml` has a strict schema: exactly the keys `name`, `version`, `k
 
 The current resolver loads modules from one package only. It does not resolve external dependencies, lockfiles, or package registries. A same-package import makes only the listed public declarations available in the importing module. Private declarations remain module-local, and importing a module does not make its own imports visible to downstream modules.
 
-A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. User-defined generic unions and functions are not supported. `Option<T>` and `Result<T, E>` are compiler-provided generic types; their type arguments must be supported types.
+A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. Generic functions may declare type parameters before their parameter list. Calls infer those parameters from independently typed argument expressions; each type parameter must occur in at least one function parameter type. For example, `require<T, E>(value: Option<T>, error: E) -> Result<T, E>` can infer `T` and `E` from an already typed `Option<T>` local and an independently typed error value. Generic function bodies can use their type parameters as values and in supported type constructors, but cannot apply operations that require a concrete type such as `T + T`.
+
+There are no explicit type arguments, generic structs or unions, traits, or constructor-driven generic inference. `Some`, `None`, `Ok`, and `Err` still need an expected built-in type. A direct call such as `require(Some("present"), "fallback")` cannot pass the unresolved `Option<T>` expectation into `Some`; it reports `E_TYPE_MISMATCH` with a constructor-specific message that an expected `Option<T>` type is required. Bind the constructor to an annotated local first, then pass that local to the generic function. `Option<T>` and `Result<T, E>` remain compiler-provided generic types; their type arguments must be supported types.
 
 Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, `await`, and `with`; those seven retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, and `pub`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions, so an unsupported top-level `route` declaration remains unsupported.
 

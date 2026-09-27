@@ -1,0 +1,9 @@
+module fixture.repeated_generic_argument_conflict;
+
+pub fn first<T>(left: T, right: T) -> T effects {} {
+    return left;
+}
+
+pub fn main() -> i32 effects {} {
+    return first(1, true);
+}

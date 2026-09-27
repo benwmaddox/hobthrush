@@ -1,0 +1,5 @@
+module fixture.result_only_generic_parameter;
+
+pub fn wrap_error<T, E>(error: E) -> Result<T, E> effects {} {
+    return Err(error);
+}

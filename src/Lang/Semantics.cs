@@ -6,6 +6,7 @@ internal enum LangTypeKind
     I32,
     Bool,
     Text,
+    TypeParameter,
     Union,
     Struct,
     Option,
@@ -21,12 +22,16 @@ internal sealed class LangType : IEquatable<LangType>
     private LangType(
         LangTypeKind kind,
         string displayName,
+        int typeParameterOwnerId = -1,
+        int typeParameterOrdinal = -1,
         int unionId = -1,
         int structId = -1,
         IEnumerable<LangType>? arguments = null)
     {
         Kind = kind;
         DisplayName = displayName;
+        TypeParameterOwnerId = typeParameterOwnerId;
+        TypeParameterOrdinal = typeParameterOrdinal;
         UnionId = unionId;
         StructId = structId;
         _arguments = Array.AsReadOnly((arguments ?? []).ToArray());
@@ -42,6 +47,8 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsFsError => Kind == LangTypeKind.FsError;
     internal int UnionId { get; }
     internal int StructId { get; }
+    internal int TypeParameterOwnerId { get; }
+    internal int TypeParameterOrdinal { get; }
     internal bool IsError => Kind == LangTypeKind.Error;
 
     internal static LangType Error { get; } = new(LangTypeKind.Error, "<error>");
@@ -51,7 +58,9 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
 
-    internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId);
+    internal static LangType ForTypeParameter(int ownerId, int ordinal, string name) =>
+        new(LangTypeKind.TypeParameter, name, typeParameterOwnerId: ownerId, typeParameterOrdinal: ordinal);
+    internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId: unionId);
     internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
     internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
     internal static LangType Result(LangType ok, LangType error) => new(LangTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
@@ -62,6 +71,8 @@ internal sealed class LangType : IEquatable<LangType>
         if (other is null || Kind != other.Kind) return false;
         if (Kind == LangTypeKind.Union) return UnionId == other.UnionId;
         if (Kind == LangTypeKind.Struct) return StructId == other.StructId;
+        if (Kind == LangTypeKind.TypeParameter)
+            return TypeParameterOwnerId == other.TypeParameterOwnerId && TypeParameterOrdinal == other.TypeParameterOrdinal;
         if (_arguments.Count != other._arguments.Count) return false;
         for (var i = 0; i < _arguments.Count; i++)
             if (!_arguments[i].Equals(other._arguments[i])) return false;
@@ -81,6 +92,11 @@ internal sealed class LangType : IEquatable<LangType>
         else if (Kind == LangTypeKind.Struct)
         {
             hash.Add(StructId);
+        }
+        else if (Kind == LangTypeKind.TypeParameter)
+        {
+            hash.Add(TypeParameterOwnerId);
+            hash.Add(TypeParameterOrdinal);
         }
         else
         {
@@ -109,7 +125,12 @@ internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left,
 internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr(LangType.Text, At);
-internal sealed record TypedCallExpr(LangType Type, int FunctionId, IReadOnlyList<TypedExpr> Arguments, Token At) : TypedExpr(Type, At);
+internal sealed record TypedCallExpr(
+    LangType Type,
+    int FunctionId,
+    IReadOnlyList<LangType> TypeArguments,
+    IReadOnlyList<TypedExpr> Arguments,
+    Token At) : TypedExpr(Type, At);
 
 internal enum BuiltinIntrinsic
 {
@@ -191,6 +212,7 @@ internal sealed class CheckedFunction
         string name,
         bool isPublic,
         IReadOnlyList<CheckedParameter> parameters,
+        IReadOnlyList<LangType> typeParameters,
         LangType returnType,
         IReadOnlyList<TypedStmt> body,
         IReadOnlyList<string> declaredEffects,
@@ -201,6 +223,7 @@ internal sealed class CheckedFunction
         Name = name;
         Public = isPublic;
         Parameters = ReadOnly(parameters);
+        TypeParameters = ReadOnly(typeParameters);
         ReturnType = returnType;
         Body = ReadOnly(body);
         DeclaredEffects = ReadOnly(declaredEffects);
@@ -213,6 +236,7 @@ internal sealed class CheckedFunction
     public string Name { get; }
     public bool Public { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
+    public IReadOnlyList<LangType> TypeParameters { get; }
     public LangType ReturnType { get; }
     public IReadOnlyList<string> DeclaredEffects { get; }
     public IReadOnlyList<string> InferredEffects { get; internal set; }
@@ -394,7 +418,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsRunnableEntry(FunctionSymbol function) =>
-        function.Declaration.Name == "main" && function.Parameters.Count == 0 &&
+        function.Declaration.Name == "main" && function.TypeParameters.Count == 0 && function.Parameters.Count == 0 &&
         (function.ReturnType.IsI32 || function.ReturnType.IsBool || function.ReturnType.IsText);
 
     private void RegisterUnionHeaders(ModuleSymbols module)
@@ -668,6 +692,28 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             if (!module.DeclaredFunctions.TryGetValue(declaration.Name, out var symbol) || symbol.Declaration != declaration)
                 continue;
 
+            var typeParameters = new List<LangType>();
+            var typeParametersByName = new Dictionary<string, LangType>(StringComparer.Ordinal);
+            foreach (var (typeParameter, ordinal) in declaration.TypeParameters.Select((parameter, index) => (parameter, index)))
+            {
+                var type = LangType.ForTypeParameter(symbol.Id, ordinal, typeParameter.Name);
+                typeParameters.Add(type);
+
+                if (!typeParametersByName.TryAdd(typeParameter.Name, type))
+                {
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is already declared", typeParameter.At);
+                    continue;
+                }
+
+                if (IsReservedTypeName(typeParameter.Name))
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
+                else if (module.VisibleTypeNames.Contains(typeParameter.Name))
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
+            }
+
+            symbol.TypeParameters = ReadOnly(typeParameters);
+            symbol.TypeParametersByName = typeParametersByName;
+
             var parameters = new List<CheckedParameter>();
             var localNames = new HashSet<string>(StringComparer.Ordinal);
             for (var i = 0; i < declaration.Parameters.Count; i++)
@@ -675,11 +721,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 var parameter = declaration.Parameters[i];
                 if (!localNames.Add(parameter.Name))
                     Add("E_NAME_DUPLICATE", $"Parameter '{parameter.Name}' is already declared", parameter.At);
-                parameters.Add(new CheckedParameter(parameter.Name, ResolveType(parameter.Type, 0), i, parameter.At));
+                parameters.Add(new CheckedParameter(parameter.Name, ResolveType(parameter.Type, 0, typeParametersByName), i, parameter.At));
             }
 
             symbol.Parameters = ReadOnly(parameters);
-            symbol.ReturnType = ResolveType(declaration.ReturnType, 0);
+            symbol.ReturnType = ResolveType(declaration.ReturnType, 0, typeParametersByName);
+
+            foreach (var (typeParameter, ordinal) in declaration.TypeParameters.Select((parameter, index) => (parameter, index)))
+            {
+                if (!typeParametersByName.TryGetValue(typeParameter.Name, out var resolvedParameter) ||
+                    resolvedParameter.TypeParameterOrdinal != ordinal)
+                    continue;
+
+                if (!parameters.Any(parameter => ContainsType(parameter.Type, resolvedParameter)))
+                    Add("E_TYPE_MISMATCH", $"Type parameter '{typeParameter.Name}' must appear in at least one function parameter type for inference", typeParameter.At);
+            }
+
             var declaredEffects = new HashSet<string>(StringComparer.Ordinal);
             foreach (var effect in declaration.Effects)
             {
@@ -726,7 +783,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void CheckPublicTypeVisibility(LangType type, string owner, Token at)
     {
-        if (type.IsError) return;
+        if (type.IsError || type.Kind == LangTypeKind.TypeParameter) return;
         if (type.Kind == LangTypeKind.Union &&
             _unions[type.UnionId].Declaration.Public == false)
         {
@@ -768,6 +825,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.Declaration.Name,
             function.Declaration.Public,
             function.Parameters,
+            function.TypeParameters,
             function.ReturnType,
             ReadOnly(body),
             function.DeclaredEffects,
@@ -792,7 +850,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 case LetStmt let:
                 {
-                    var localType = ResolveType(let.Type, 0);
+                    var localType = ResolveType(let.Type, 0, _currentFunction!.TypeParametersByName);
                     var value = CheckExpr(let.Value, localType, locals, 0);
                     var id = _nextLocalId++;
                     if (locals.ContainsKey(let.Name))
@@ -1124,8 +1182,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        var left = CheckExpr(expression.Left, LangType.I32, locals, depth);
-        var right = CheckExpr(expression.Right, LangType.I32, locals, depth);
+        var left = CheckExpr(expression.Left, null, locals, depth);
+        var right = CheckExpr(expression.Right, null, locals, depth);
+        if (left.Type.IsError || right.Type.IsError)
+            return new TypedErrorExpr(expression.At);
+        if (!left.Type.IsI32 || !right.Type.IsI32)
+        {
+            Add("E_TYPE_MISMATCH", $"Arithmetic '{expression.Op}' requires i32 operands", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
         return new TypedBinaryExpr(LangType.I32, expression.Op, left, right, expression.At);
     }
 
@@ -1137,6 +1202,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         if (CurrentModule.VisibleFunctions.TryGetValue(expression.Name, out var function))
         {
+            var isGeneric = function.TypeParameters.Count != 0;
             if (expression.Arguments.Count != function.Parameters.Count)
                 Add("E_TYPE_MISMATCH", $"Function '{expression.Name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}", expression.At);
 
@@ -1145,13 +1211,40 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var hasCorrectArity = expression.Arguments.Count == function.Parameters.Count;
             for (var i = 0; i < expression.Arguments.Count; i++)
             {
-                var argumentType = i < function.Parameters.Count ? function.Parameters[i].Type : null;
+                // Generic calls infer from independently checked argument types. Context-dependent
+                // constructors therefore keep their existing expected-type diagnostic here.
+                var argumentType = !isGeneric && i < function.Parameters.Count
+                    ? function.Parameters[i].Type
+                    : null;
                 arguments.Add(CheckExpr(expression.Arguments[i], argumentType, locals, depth));
             }
+
+            var inferredTypeArguments = new Dictionary<LangType, LangType>();
+            if (isGeneric)
+            {
+                for (var i = 0; i < Math.Min(arguments.Count, function.Parameters.Count); i++)
+                {
+                    var formal = function.Parameters[i].Type;
+                    var actual = arguments[i].Type;
+                    if (TryUnifyType(formal, actual, inferredTypeArguments)) continue;
+                    if (!formal.IsError && !actual.IsError)
+                        AddMismatch(SubstituteType(formal, inferredTypeArguments), actual, expression.Arguments[i].At);
+                }
+            }
+
+            var typeArguments = isGeneric
+                ? function.TypeParameters.Select(typeParameter =>
+                    inferredTypeArguments.TryGetValue(typeParameter, out var inferred) ? inferred : LangType.Error).ToArray()
+                : Array.Empty<LangType>();
             var signatureTypesValid = !function.ReturnType.IsError && function.Parameters.All(parameter => !parameter.Type.IsError);
             if (hasCorrectArity && signatureTypesValid && diagnostics.Count == diagnosticsBeforeArguments)
                 _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
-            return new TypedCallExpr(function.ReturnType, function.Id, ReadOnly(arguments), expression.At);
+
+            var returnType = isGeneric ? SubstituteType(function.ReturnType, inferredTypeArguments) : function.ReturnType;
+            if (isGeneric && (!hasCorrectArity || diagnostics.Count != diagnosticsBeforeArguments ||
+                              typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type))))
+                returnType = LangType.Error;
+            return new TypedCallExpr(returnType, function.Id, ReadOnly(typeArguments), ReadOnly(arguments), expression.At);
         }
 
         if (expression.Name is "Some" or "Ok" or "Err")
@@ -1551,7 +1644,63 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return shape;
     }
 
-    private LangType ResolveType(TypeSyntax syntax, int depth)
+    private static bool ContainsType(LangType type, LangType sought)
+    {
+        if (type == sought) return true;
+        return type.Arguments.Any(argument => ContainsType(argument, sought));
+    }
+
+    private static bool ContainsError(LangType type) =>
+        type.IsError || type.Arguments.Any(ContainsError);
+
+    private static bool TryUnifyType(
+        LangType formal,
+        LangType actual,
+        Dictionary<LangType, LangType> bindings)
+    {
+        if (formal.IsError || actual.IsError) return true;
+
+        if (formal.Kind == LangTypeKind.TypeParameter)
+        {
+            if (!bindings.TryGetValue(formal, out var previous))
+            {
+                bindings.Add(formal, actual);
+                return true;
+            }
+            return previous == actual;
+        }
+
+        if (formal.Kind is LangTypeKind.Option or LangTypeKind.Result)
+        {
+            if (formal.Kind != actual.Kind || formal.Arguments.Count != actual.Arguments.Count)
+                return false;
+            for (var i = 0; i < formal.Arguments.Count; i++)
+                if (!TryUnifyType(formal.Arguments[i], actual.Arguments[i], bindings)) return false;
+            return true;
+        }
+
+        return formal == actual;
+    }
+
+    private static LangType SubstituteType(LangType type, IReadOnlyDictionary<LangType, LangType> bindings)
+    {
+        if (type.Kind == LangTypeKind.TypeParameter)
+            return bindings.TryGetValue(type, out var inferred) ? inferred : LangType.Error;
+        if (type.Kind == LangTypeKind.Option)
+            return LangType.Option(SubstituteType(type.Arguments[0], bindings));
+        if (type.Kind == LangTypeKind.Result)
+            return LangType.Result(
+                SubstituteType(type.Arguments[0], bindings),
+                SubstituteType(type.Arguments[1], bindings));
+        return type;
+    }
+
+    private LangType ResolveType(TypeSyntax syntax, int depth) => ResolveType(syntax, depth, null);
+
+    private LangType ResolveType(
+        TypeSyntax syntax,
+        int depth,
+        IReadOnlyDictionary<string, LangType>? typeParameters)
     {
         if (depth >= MaximumSemanticDepth)
         {
@@ -1562,6 +1711,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
             return LangType.Error;
         }
+
+        if (typeParameters is not null && typeParameters.TryGetValue(syntax.Name, out var typeParameter))
+            return NoTypeArguments(syntax, typeParameter);
 
         switch (syntax.Name)
         {
@@ -1581,14 +1733,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     Add("E_TYPE_MISMATCH", $"Type 'Option' expects 1 type argument, got {syntax.Args.Count}", syntax.At);
                     return LangType.Error;
                 }
-                return LangType.Option(ResolveType(syntax.Args[0], depth + 1));
+                return LangType.Option(ResolveType(syntax.Args[0], depth + 1, typeParameters));
             case "Result":
                 if (syntax.Args.Count != 2)
                 {
                     Add("E_TYPE_MISMATCH", $"Type 'Result' expects 2 type arguments, got {syntax.Args.Count}", syntax.At);
                     return LangType.Error;
                 }
-                return LangType.Result(ResolveType(syntax.Args[0], depth + 1), ResolveType(syntax.Args[1], depth + 1));
+                return LangType.Result(
+                    ResolveType(syntax.Args[0], depth + 1, typeParameters),
+                    ResolveType(syntax.Args[1], depth + 1, typeParameters));
             default:
                 if (CurrentModule.VisibleUnions.TryGetValue(syntax.Name, out var union))
                 {
@@ -1679,6 +1833,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public string Module { get; } = module;
         public FunctionDecl Declaration { get; } = declaration;
         public IReadOnlyList<CheckedParameter> Parameters { get; set; } = [];
+        public IReadOnlyList<LangType> TypeParameters { get; set; } = [];
+        public IReadOnlyDictionary<string, LangType> TypeParametersByName { get; set; } = new Dictionary<string, LangType>(StringComparer.Ordinal);
         public LangType ReturnType { get; set; } = LangType.Error;
         public IReadOnlyList<string> DeclaredEffects { get; set; } = [];
         public List<FunctionCallSite> Calls { get; } = [];

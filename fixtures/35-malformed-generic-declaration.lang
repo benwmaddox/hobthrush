@@ -1,0 +1,5 @@
+module fixture.malformed_generic_declaration;
+
+pub fn identity<T(value: T) -> T effects {} {
+    return value;
+}

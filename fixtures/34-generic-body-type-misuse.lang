@@ -1,0 +1,5 @@
+module fixture.generic_body_type_misuse;
+
+pub fn add<T>(left: T, right: T) -> T effects {} {
+    return left + right;
+}
