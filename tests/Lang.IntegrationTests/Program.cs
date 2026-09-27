@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text;
 
@@ -7,6 +8,7 @@ return await IntegrationTests.RunAsync();
 internal static class IntegrationTests
 {
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan AotPublishTimeout = TimeSpan.FromMinutes(10);
 
     public static async Task<int> RunAsync()
     {
@@ -55,12 +57,16 @@ internal static class IntegrationTests
             ("signed i32 literals and unary negation are checked", TestSignedI32),
             ("checked i32 overflow exits through the generic runtime fault contract", TestCheckedOverflow),
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
+            ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
+            ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
+            ("NativeAOT publishes and runs the current-host executable", TestAotPublishAndRun),
             ("invalid main signatures receive an entrypoint diagnostic", TestInvalidEntrypoint),
             ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
 
         var failures = 0;
+        var skipped = 0;
         try
         {
             foreach (var test in cases)
@@ -69,6 +75,11 @@ internal static class IntegrationTests
                 {
                     await test.Run(harness);
                     Console.WriteLine($"PASS {test.Name}");
+                }
+                catch (IntegrationTestSkippedException exception)
+                {
+                    skipped++;
+                    Console.WriteLine($"SKIP {test.Name}: {exception.Message}");
                 }
                 catch (Exception exception)
                 {
@@ -93,7 +104,7 @@ internal static class IntegrationTests
             }
         }
 
-        Console.WriteLine($"{cases.Length - failures} passed, {failures} failed");
+        Console.WriteLine($"{cases.Length - failures - skipped} passed, {skipped} skipped, {failures} failed");
         return failures == 0 ? 0 : 1;
     }
 
@@ -883,6 +894,155 @@ internal static class IntegrationTests
             $"run should reject the non-primitive parameterized main. {Describe(run)}");
     }
 
+    private static async Task TestAotCommandValidation(Harness harness)
+    {
+        const string source = "module harness.aot_cli;\n"
+            + "pub fn main() -> i32 effects {} { return 41; }\n";
+
+        var missingRid = await harness.InvokeAsync("aot-missing-rid", "build", source, "--aot");
+        AssertBuildTargetRejected(missingRid, "requires --rid RID");
+
+        var unsupportedRid = await harness.InvokeAsync(
+            "aot-unsupported-rid", "build", source, "--aot", "--rid", "osx-x64");
+        AssertBuildTargetRejected(unsupportedRid, "Unsupported AOT runtime identifier");
+
+        var ridWithoutAot = await harness.InvokeAsync(
+            "rid-without-aot", "build", source, "--rid", "win-x64");
+        AssertBuildTargetRejected(ridWithoutAot, "only valid with lang build");
+
+        var aotOnRun = await harness.InvokeAsync(
+            "aot-on-run", "run", source, "--aot", "--rid", CurrentHostAotRid());
+        AssertBuildTargetRejected(aotOnRun, "only valid with lang build");
+
+        var aotOnCheck = await harness.InvokeAsync("aot-on-check", "check", source, "--aot");
+        AssertBuildTargetRejected(aotOnCheck, "only valid with lang build");
+
+        var aotOnUnknownCommand = await harness.InvokeAsync(
+            "aot-on-unknown-command", "publish", source, "--aot", "--rid", CurrentHostAotRid());
+        AssertBuildTargetRejected(aotOnUnknownCommand, "only valid with lang build");
+
+        var mismatchedOsRid = CurrentHostAotRid() == "win-x64" ? "linux-x64" : "win-x64";
+        var crossOsPublish = await harness.InvokeAsync(
+            "aot-cross-os", "build", source, "--aot", "--rid", mismatchedOsRid);
+        AssertBuildTargetRejected(crossOsPublish, "cross-OS publishing is not supported");
+        var sourceDirectory = Path.GetDirectoryName(harness.LastSourcePath)!;
+        AssertTrue(!Directory.Exists(Path.Combine(sourceDirectory, "out")),
+            "A cross-OS AOT target must be rejected before creating output or starting publish.");
+    }
+
+    private static async Task TestAotLibraryRejected(Harness harness)
+    {
+        const string source = "module harness.aot_library;\n"
+            + "pub fn square(value: i32) -> i32 effects {} { return value * value; }\n";
+        var result = await harness.InvokeAsync(
+            "aot-library", "build", source, "--aot", "--rid", CurrentHostAotRid());
+
+        AssertBuildTargetRejected(result, "requires fn main()");
+        var sourceDirectory = Path.GetDirectoryName(harness.LastSourcePath)!;
+        AssertTrue(!Directory.Exists(Path.Combine(sourceDirectory, "out")),
+            "A library source must be rejected before an output directory is created.");
+    }
+
+    private static async Task TestAotPublishAndRun(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The NativeAOT smoke test targets x64 hosts only.");
+
+        const string source = "module harness.aot_smoke;\n"
+            + "pub fn main() -> i32 effects {} { return 41; }\n";
+        var result = await harness.InvokeWithTimeoutAsync(
+            "aot-smoke", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+
+        AssertEqual(0, result.ExitCode, Describe(result));
+        const string prefix = "Built native executable: ";
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal),
+            $"Expected NativeAOT build output to start with <{prefix}>. {Describe(result)}");
+        AssertTrue(result.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal),
+            $"Expected one output line containing the native executable path. {Describe(result)}");
+        var executablePath = result.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertEqual(prefix + executablePath + Environment.NewLine, result.StandardOutput,
+            "NativeAOT build output should contain only the documented artifact line.");
+        AssertTrue(Path.IsPathFullyQualified(executablePath),
+            $"Expected a fully qualified native executable path, got <{executablePath}>.");
+        AssertTrue(File.Exists(executablePath), $"Expected NativeAOT to create {executablePath}.");
+        AssertEqual(CurrentHostAotRid() == "win-x64" ? "Generated.exe" : "Generated",
+            Path.GetFileName(executablePath), "Unexpected native executable file name for the current host.");
+
+        var outputDirectory = Path.GetDirectoryName(executablePath)!;
+        var expectedOutputRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(harness.LastSourcePath)!, "out"));
+        AssertEqual(expectedOutputRoot, Path.GetFullPath(Path.GetDirectoryName(outputDirectory)!),
+            "The native executable should remain in the source tree's durable out directory.");
+        AssertTrue(Path.GetFileName(outputDirectory).StartsWith("main-", StringComparison.Ordinal),
+            $"Expected a unique main-<id> output directory, got <{outputDirectory}>.");
+
+        var execution = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
+        AssertRunOutput("41" + Environment.NewLine, execution);
+    }
+
+    private static string CurrentHostAotRid() => OperatingSystem.IsWindows()
+        ? "win-x64"
+        : OperatingSystem.IsLinux()
+            ? "linux-x64"
+            : throw new PlatformNotSupportedException("The NativeAOT integration smoke test requires Windows x64 or Linux x64.");
+
+    private static void AssertBuildTargetRejected(ProcessResult result, string expectedMessage)
+    {
+        AssertTrue(result.ExitCode != 0, Describe(result));
+        AssertEqual(string.Empty, result.StandardOutput, Describe(result));
+        AssertTrue(result.StandardError.Contains("E_BUILD_TARGET", StringComparison.Ordinal)
+            && result.StandardError.Contains(expectedMessage, StringComparison.Ordinal),
+            $"Expected E_BUILD_TARGET with <{expectedMessage}>. {Describe(result)}");
+        AssertTrue(!result.StandardError.Contains("Unhandled exception", StringComparison.Ordinal)
+            && !result.StandardError.Contains(" at ", StringComparison.Ordinal),
+            $"The compiler should report a diagnostic instead of a backend stack trace. {Describe(result)}");
+    }
+
+    private static async Task<ProcessResult> ExecuteNativeAsync(string executablePath, TimeSpan timeout)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            WorkingDirectory = Path.GetDirectoryName(executablePath)!,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            CreateNoWindow = true
+        };
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+            throw new InvalidOperationException($"Could not start NativeAOT executable {executablePath}.");
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            await process.WaitForExitAsync();
+            var timedOutStdout = await stdoutTask;
+            var timedOutStderr = await stderrTask;
+            throw new TimeoutException(
+                $"NativeAOT executable timed out after {timeout}. stdout=<{timedOutStdout}>; stderr=<{timedOutStderr}>");
+        }
+
+        return new ProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
+    }
+
     private static void AssertBuiltDll(ProcessResult result, string sourceDirectory)
     {
         AssertEqual(0, result.ExitCode, Describe(result));
@@ -1116,4 +1276,8 @@ internal static class IntegrationTests
 
     private sealed record DiagnosticSnapshot(string Code, string Message, string File, int StartLine, int StartColumn, int EndLine, int EndColumn);
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+
+    private sealed class IntegrationTestSkippedException(string message) : Exception(message)
+    {
+    }
 }

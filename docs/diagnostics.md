@@ -19,6 +19,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_IO | Source, fixture, or generated build files could not be read or written | Implemented |
 | E_PROCESS | The .NET build or run process could not be started or waited on | Implemented |
 | E_BUILD | The generated C# project failed to compile | Implemented |
+| E_BUILD_TARGET | A recognized `--aot` or `--rid` option is malformed or used outside the supported build form, the RID is unsupported or targets a different host OS, or the program lacks an executable entrypoint | Implemented |
 | E_EFFECT_EXCEEDED | Inferred effect exceeds public declaration | Planned |
 | E_CAPABILITY_MISSING | Required capability absent | Planned |
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
