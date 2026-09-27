@@ -276,6 +276,13 @@ internal sealed class CheckedProgram
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
 
+internal sealed record PackageModuleInput(
+    string PackageId,
+    ParsedProgram Program,
+    IReadOnlyDictionary<string, string> DirectDependencies);
+
+internal readonly record struct ModuleIdentity(string PackageId, string ModuleName);
+
 internal sealed record VariantShape(
     string Name,
     string Key,
@@ -286,6 +293,8 @@ internal sealed record VariantShape(
 
 internal static class Compiler
 {
+    private const string SinglePackageId = "<single-package>";
+
     public static CheckResult Check(string file, string source)
     {
         var diagnostics = new List<Diagnostic>();
@@ -300,8 +309,24 @@ internal static class Compiler
 
     public static CheckResult CheckPackage(IReadOnlyList<ParsedProgram> modules, string? entryModule)
     {
+        var inputs = modules.Select(module => new PackageModuleInput(
+            SinglePackageId,
+            module,
+            new Dictionary<string, string>(StringComparer.Ordinal))).ToArray();
+        return CheckPackage(inputs, SinglePackageId, entryModule);
+    }
+
+    public static CheckResult CheckPackage(
+        IReadOnlyList<PackageModuleInput> modules,
+        string rootPackageId,
+        string? entryModule)
+    {
         var diagnostics = new List<Diagnostic>();
-        return new SemanticChecker(diagnostics).CheckPackage(modules, entryModule, requireEntry: entryModule is not null);
+        return new SemanticChecker(diagnostics).CheckPackage(
+            modules,
+            rootPackageId,
+            entryModule,
+            requireEntry: entryModule is not null);
     }
 }
 
@@ -322,35 +347,42 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         "log.write",
         "secret.reveal"
     ];
-    private readonly Dictionary<(string Module, string Name), UnionSymbol> _unionsByModuleAndName = new();
+    private const string SinglePackageId = "<single-package>";
+    private readonly Dictionary<(ModuleIdentity Module, string Name), UnionSymbol> _unionsByModuleAndName = new();
     private readonly List<UnionSymbol> _unions = [];
-    private readonly Dictionary<(string Module, string Name), StructSymbol> _structsByModuleAndName = new();
+    private readonly Dictionary<(ModuleIdentity Module, string Name), StructSymbol> _structsByModuleAndName = new();
     private readonly List<StructSymbol> _structs = [];
-    private readonly Dictionary<(string Module, string Name), FunctionSymbol> _functionsByModuleAndName = new();
+    private readonly Dictionary<(ModuleIdentity Module, string Name), FunctionSymbol> _functionsByModuleAndName = new();
     private readonly List<FunctionSymbol> _functions = [];
-    private readonly Dictionary<string, ModuleSymbols> _modulesByName = new(StringComparer.Ordinal);
-    private string _currentModule = string.Empty;
+    private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
+    private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
 
     public CheckResult CheckSingle(ParsedProgram program) =>
-        CheckPackage([program], program.Module, requireEntry: false);
+        CheckPackage(
+            [new PackageModuleInput(SinglePackageId, program, new Dictionary<string, string>(StringComparer.Ordinal))],
+            SinglePackageId,
+            program.Module,
+            requireEntry: false);
 
     public CheckResult CheckPackage(
-        IReadOnlyList<ParsedProgram> programs,
+        IReadOnlyList<PackageModuleInput> inputs,
+        string rootPackageId,
         string? entryModule,
         bool requireEntry)
     {
-        var orderedModules = new List<ModuleSymbols>(programs.Count);
-        foreach (var program in programs)
+        var orderedModules = new List<ModuleSymbols>(inputs.Count);
+        foreach (var input in inputs)
         {
-            if (_modulesByName.ContainsKey(program.Module))
+            var identity = new ModuleIdentity(input.PackageId, input.Program.Module);
+            if (_modulesByIdentity.ContainsKey(identity))
             {
-                Add("E_MODULE_PATH", $"Module '{program.Module}' is included more than once", program.ModuleAt);
+                Add("E_MODULE_DUPLICATE", $"Module '{input.Program.Module}' is included more than once in package '{input.PackageId}'", input.Program.ModuleAt);
                 continue;
             }
-            var module = new ModuleSymbols(program);
-            _modulesByName.Add(program.Module, module);
+            var module = new ModuleSymbols(input);
+            _modulesByIdentity.Add(identity, module);
             orderedModules.Add(module);
         }
 
@@ -376,7 +408,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         FunctionSymbol? entry = null;
         if (entryModule is not null)
         {
-            if (_modulesByName.TryGetValue(entryModule, out var entryScope) &&
+            var entryIdentity = new ModuleIdentity(rootPackageId, entryModule);
+            if (_modulesByIdentity.TryGetValue(entryIdentity, out var entryScope) &&
                 entryScope.DeclaredFunctions.TryGetValue("main", out var main) &&
                 IsRunnableEntry(main))
             {
@@ -384,9 +417,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
             else if (requireEntry)
             {
-                var at = _modulesByName.TryGetValue(entryModule, out entryScope)
+                var at = _modulesByIdentity.TryGetValue(entryIdentity, out entryScope)
                     ? entryScope.Program.ModuleAt
-                    : programs.FirstOrDefault()?.ModuleAt ?? new Token("id", entryModule, 1, 1, string.Empty);
+                    : inputs.FirstOrDefault(input => input.PackageId == rootPackageId)?.Program.ModuleAt ??
+                      inputs.FirstOrDefault()?.Program.ModuleAt ??
+                      new Token("id", entryModule, 1, 1, string.Empty);
                 Add("E_ENTRYPOINT", $"Entry module '{entryModule}' must declare a zero-argument main returning i32, bool, or Text", at);
             }
         }
@@ -410,7 +445,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             symbol.Declaration.At));
         return new CheckResult(new CheckedProgram(
             orderedModules.Select(module => module.Program.Module).ToArray(),
-            entry?.Module,
+            entry?.ModuleName,
             entry?.Id,
             functions,
             unions,
@@ -423,7 +458,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void RegisterUnionHeaders(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Unions)
         {
             if (IsReservedTypeName(declaration.Name))
@@ -438,18 +473,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var symbol = new UnionSymbol(_unions.Count, module.Program.Module, declaration, LangType.ForUnion(_unions.Count, declaration.Name));
+            var symbol = new UnionSymbol(_unions.Count, module.Identity, declaration, LangType.ForUnion(_unions.Count, declaration.Name));
             _unions.Add(symbol);
             module.DeclaredUnions.Add(declaration.Name, symbol);
             module.VisibleUnions.Add(declaration.Name, symbol);
             module.VisibleTypeNames.Add(declaration.Name);
-            _unionsByModuleAndName.Add((module.Program.Module, declaration.Name), symbol);
+            _unionsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
     }
 
     private void RegisterStructHeaders(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Structs)
         {
             if (IsReservedTypeName(declaration.Name))
@@ -464,18 +499,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var symbol = new StructSymbol(_structs.Count, module.Program.Module, declaration, LangType.ForStruct(_structs.Count, declaration.Name));
+            var symbol = new StructSymbol(_structs.Count, module.Identity, declaration, LangType.ForStruct(_structs.Count, declaration.Name));
             _structs.Add(symbol);
             module.DeclaredStructs.Add(declaration.Name, symbol);
             module.VisibleStructs.Add(declaration.Name, symbol);
             module.VisibleTypeNames.Add(declaration.Name);
-            _structsByModuleAndName.Add((module.Program.Module, declaration.Name), symbol);
+            _structsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
     }
 
     private void RegisterFunctionHeaders(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Functions)
         {
             if (module.DeclaredFunctions.ContainsKey(declaration.Name))
@@ -484,25 +519,38 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var symbol = new FunctionSymbol(_functions.Count, module.Program.Module, declaration);
+            var symbol = new FunctionSymbol(_functions.Count, module.Identity, declaration);
             _functions.Add(symbol);
             module.DeclaredFunctions.Add(declaration.Name, symbol);
             module.VisibleFunctions.Add(declaration.Name, symbol);
-            _functionsByModuleAndName.Add((module.Program.Module, declaration.Name), symbol);
+            _functionsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
     }
 
     private void BindImports(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var import in module.Program.Imports)
         {
-            if (!_modulesByName.TryGetValue(import.Module, out var target))
+            var targetIdentity = new ModuleIdentity(module.PackageId, import.Module);
+            if (import.DependencyAlias is { } dependencyAlias)
             {
-                if (import.Symbols.Count == 0)
-                    Add("E_IMPORT_UNRESOLVED", $"Module '{import.Module}' is not part of this package", import.ModuleAt);
-                foreach (var imported in import.Symbols)
-                    Add("E_IMPORT_UNRESOLVED", $"Module '{import.Module}' is not part of this package", imported.At);
+                if (!module.DirectDependencies.TryGetValue(dependencyAlias, out var dependencyPackageId))
+                {
+                    AddMissingImportModule(
+                        import,
+                        $"Dependency alias '{dependencyAlias}' is not declared by package '{module.PackageId}'");
+                    continue;
+                }
+                targetIdentity = new ModuleIdentity(dependencyPackageId, import.Module);
+            }
+
+            if (!_modulesByIdentity.TryGetValue(targetIdentity, out _))
+            {
+                var message = import.DependencyAlias is { } alias
+                    ? $"Module '{import.Module}' is not part of dependency '{alias}'"
+                    : $"Module '{import.Module}' is not part of this package";
+                AddMissingImportModule(import, message);
                 continue;
             }
 
@@ -510,7 +558,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var found = false;
                 var hasPublicMatch = false;
-                if (_functionsByModuleAndName.TryGetValue((import.Module, imported.Name), out var function))
+                if (_functionsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var function))
                 {
                     found = true;
                     if (function.Declaration.Public)
@@ -519,7 +567,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                         BindImported(module.VisibleFunctions, module.DeclaredFunctions, imported, function, "function");
                     }
                 }
-                if (_unionsByModuleAndName.TryGetValue((import.Module, imported.Name), out var union))
+                if (_unionsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var union))
                 {
                     found = true;
                     if (union.Declaration.Public)
@@ -528,7 +576,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                         BindImportedType(module, imported, union);
                     }
                 }
-                if (_structsByModuleAndName.TryGetValue((import.Module, imported.Name), out var structure))
+                if (_structsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var structure))
                 {
                     found = true;
                     if (structure.Declaration.Public)
@@ -543,6 +591,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     Add("E_IMPORT_PRIVATE", $"All declarations named '{imported.Name}' in module '{import.Module}' are private", imported.At);
             }
         }
+    }
+
+    private void AddMissingImportModule(ImportDecl import, string message)
+    {
+        if (import.Symbols.Count == 0)
+        {
+            Add("E_IMPORT_UNRESOLVED", message, import.ModuleAt);
+            return;
+        }
+
+        foreach (var imported in import.Symbols)
+            Add("E_IMPORT_UNRESOLVED", message, imported.At);
     }
 
     private void BindImported<T>(
@@ -580,7 +640,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void PopulateUnionVariants(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Unions)
         {
             if (!module.DeclaredUnions.TryGetValue(declaration.Name, out var symbol) || symbol.Declaration != declaration)
@@ -619,7 +679,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void PopulateStructFields(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Structs)
         {
             if (!module.DeclaredStructs.TryGetValue(declaration.Name, out var symbol) || symbol.Declaration != declaration)
@@ -686,7 +746,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void RegisterFunctionSignatures(ModuleSymbols module)
     {
-        _currentModule = module.Program.Module;
+        _currentModule = module.Identity;
         foreach (var declaration in module.Program.Functions)
         {
             if (!module.DeclaredFunctions.TryGetValue(declaration.Name, out var symbol) || symbol.Declaration != declaration)
@@ -803,7 +863,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void CheckFunctionBody(FunctionSymbol function)
     {
-        _currentModule = function.Module;
+        _currentModule = function.ModuleIdentity;
         _currentFunction = function;
         _nextLocalId = function.Parameters.Count;
         var locals = new Dictionary<string, LocalSymbol>(StringComparer.Ordinal);
@@ -821,7 +881,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         function.CheckedFunction = new CheckedFunction(
             function.Id,
-            function.Module,
+            function.ModuleName,
             function.Declaration.Name,
             function.Declaration.Public,
             function.Parameters,
@@ -965,7 +1025,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
 
             foreach (var call in current.Function.Calls
-                         .OrderBy(call => call.Target.Module, StringComparer.Ordinal)
+                         .OrderBy(call => call.Target.PackageId, StringComparer.Ordinal)
+                         .ThenBy(call => call.Target.Module, StringComparer.Ordinal)
                          .ThenBy(call => call.Target.Declaration.Name, StringComparer.Ordinal)
                          .ThenBy(call => call.At.File, StringComparer.Ordinal)
                          .ThenBy(call => call.At.Line)
@@ -979,8 +1040,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return FormatFunctionName(root) + " -> fs.read_text";
     }
 
-    private static string FormatFunctionName(FunctionSymbol function) =>
-        $"{function.Module}.{function.Declaration.Name}";
+    private string FormatFunctionName(FunctionSymbol function) =>
+        $"{FormatModuleIdentity(function.ModuleIdentity)}.{function.Declaration.Name}";
+
+    private static string FormatModuleIdentity(ModuleIdentity identity) => identity.ModuleName;
 
     private TypedExpr CheckExpr(
         Expr expression,
@@ -1614,7 +1677,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             if (visibleUnion.Id != union.Id)
             {
-                Add("E_TYPE_MISMATCH", $"Pattern union '{pattern.UnionName}' resolves to module '{visibleUnion.Module}', but the matched value uses module '{union.Module}'", pattern.At);
+                Add("E_TYPE_MISMATCH", $"Pattern union '{pattern.UnionName}' resolves to module '{FormatModuleIdentity(visibleUnion.ModuleIdentity)}', but the matched value uses module '{FormatModuleIdentity(union.ModuleIdentity)}'", pattern.At);
                 return null;
             }
         }
@@ -1790,15 +1853,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private void Add(string code, string message, Token at) =>
         diagnostics.Add(new Diagnostic(code, message, at.File, at.Range));
 
-    private ModuleSymbols CurrentModule => _modulesByName[_currentModule];
+    private ModuleSymbols CurrentModule => _modulesByIdentity[_currentModule];
 
     private TypedExpr UnsupportedExpr(Expr expression) { Add("E_UNSUPPORTED", "Expression is not implemented in this language slice", expression.At); return new TypedErrorExpr(expression.At); }
 
     private static IReadOnlyList<T> ReadOnly<T>(IEnumerable<T> items) => Array.AsReadOnly(items.ToArray());
 
-    private sealed class ModuleSymbols(ParsedProgram program)
+    private sealed class ModuleSymbols(PackageModuleInput input)
     {
-        public ParsedProgram Program { get; } = program;
+        public string PackageId { get; } = input.PackageId;
+        public ParsedProgram Program { get; } = input.Program;
+        public ModuleIdentity Identity { get; } = new(input.PackageId, input.Program.Module);
+        public IReadOnlyDictionary<string, string> DirectDependencies { get; } = input.DirectDependencies
+            .ToDictionary(dependency => dependency.Key, dependency => dependency.Value, StringComparer.Ordinal);
         public HashSet<string> TypeNames { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, UnionSymbol> DeclaredUnions { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, StructSymbol> DeclaredStructs { get; } = new(StringComparer.Ordinal);
@@ -1809,28 +1876,33 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public Dictionary<string, FunctionSymbol> VisibleFunctions { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed class UnionSymbol(int id, string module, UnionDecl declaration, LangType type)
+    private sealed class UnionSymbol(int id, ModuleIdentity moduleIdentity, UnionDecl declaration, LangType type)
     {
         public int Id { get; } = id;
-        public string Module { get; } = module;
+        public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string Module => ModuleIdentity.ModuleName;
         public UnionDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
         public List<CheckedVariant> Variants { get; } = [];
     }
 
-    private sealed class StructSymbol(int id, string module, StructDecl declaration, LangType type)
+    private sealed class StructSymbol(int id, ModuleIdentity moduleIdentity, StructDecl declaration, LangType type)
     {
         public int Id { get; } = id;
-        public string Module { get; } = module;
+        public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string Module => ModuleIdentity.ModuleName;
         public StructDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
         public List<CheckedStructField> Fields { get; } = [];
     }
 
-    private sealed class FunctionSymbol(int id, string module, FunctionDecl declaration)
+    private sealed class FunctionSymbol(int id, ModuleIdentity moduleIdentity, FunctionDecl declaration)
     {
         public int Id { get; } = id;
-        public string Module { get; } = module;
+        public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string PackageId => ModuleIdentity.PackageId;
+        public string ModuleName => ModuleIdentity.ModuleName;
+        public string Module => ModuleName;
         public FunctionDecl Declaration { get; } = declaration;
         public IReadOnlyList<CheckedParameter> Parameters { get; set; } = [];
         public IReadOnlyList<LangType> TypeParameters { get; set; } = [];

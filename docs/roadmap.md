@@ -17,16 +17,18 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Build a library DLL when no supported executable entrypoint is present.
 - [x] Add immutable non-generic nominal structs with named construction, field checks and reads, and direct-recursion checks.
 - [x] Add strict same-package manifests, explicit imports, and multi-file module resolution for the implemented pure-language slice.
+- [x] Resolve local path dependencies on library packages, qualify imports by direct dependency alias, and preserve package-specific module identity.
+- [x] Create portable deterministic package locks and reject missing, malformed, or stale locks before package checks and builds.
 - [x] Add scoped `if`/`else`, comparison operators with defined precedence, branch-local scopes, guaranteed-return checking, and `E_UNREACHABLE`.
 - [x] Add `Text.length` using Unicode scalar counts and `Text.trim()` using Unicode whitespace trimming.
 - [x] Add generic functions with type inference from independently typed arguments.
 - [ ] Add generic structs and unions, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; external and path-based dependencies, lockfiles, generic structs and unions, explicit type arguments, traits, language-level tests, application capability grants, and the final maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, language-level package tests, application capability grants, and the final maintained library/CLI/web project set remain future work.
 
-The active compiler-fixture set covers fixtures 01-14 and 20-36. Fixtures 15-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external or path-based package dependencies or locking. Struct support, package resolution, generic functions, control flow, Text operations, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generic types, language tests, traits, or V1 package requirements.
+The active compiler-fixture set covers fixtures 01-14 and 20-36. Fixtures 15-19 remain pending. Package modules resolve within the root and its recursively declared local library paths using explicit imports; this does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generic types, language-level package tests, traits, or V1 package requirements.
 
-[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`; integration consumers exercise empty and nonempty input plus two generic instantiations. The final maintained validation library still needs language-level tests and external or path-based package dependencies.
+[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`; integration consumers exercise empty and nonempty input plus two generic instantiations. The maintained CLI example consumes the sibling library through a local path dependency. The final validation library still needs language-level tests.
 
 ## M2 - effects and capabilities (partial)
 
@@ -49,7 +51,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-Application-level effect and capability enforcement, scoped resources, typed CLI and web declarations, package locking, SQLite, and the maintained V1 library/CLI/web example projects remain future work. The V1 promise in the PRD is not complete.
+Application-level effect and capability enforcement, scoped resources, typed CLI and web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, and the complete maintained V1 library/CLI/web example projects remain future work. Language-level package tests and build receipts are also pending. The V1 promise in the PRD is not complete.
 
 ## MS1 - memory-semantics design (not started)
 

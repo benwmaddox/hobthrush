@@ -78,6 +78,13 @@ internal static class Lexer
                 continue;
             }
 
+            if (i + 1 < source.Length && source.AsSpan(i, 2).SequenceEqual("::"))
+            {
+                tokens.Add(new Token("::", "::", line, column, file));
+                i += 2;
+                column += 2;
+                continue;
+            }
             if (i + 1 < source.Length && source.AsSpan(i, 2).SequenceEqual("->"))
             {
                 tokens.Add(new Token("->", "->", line, column, file));
@@ -374,7 +381,22 @@ internal sealed class Parser
     private ImportDecl ParseImport()
     {
         var at = Expect("import");
-        var moduleAt = ExpectModuleSegment();
+        var firstSegment = ExpectModuleSegment();
+        string? dependencyAlias = null;
+        Token moduleAt;
+        if (Is("::"))
+        {
+            if (!IsBareIdentifier(firstSegment))
+                Fail(firstSegment, "E_SYNTAX", "Expected identifier");
+            dependencyAlias = firstSegment.Text;
+            Take();
+            moduleAt = ExpectModuleSegment();
+        }
+        else
+        {
+            moduleAt = firstSegment;
+        }
+
         var module = moduleAt.Text;
         while (Is("."))
         {
@@ -405,7 +427,7 @@ internal sealed class Parser
 
         Expect("}");
         Expect(";");
-        return new ImportDecl(module, at, moduleAt, symbols);
+        return new ImportDecl(module, at, moduleAt, symbols, dependencyAlias);
     }
 
     private FunctionDecl ParseFunction(bool isPublic)

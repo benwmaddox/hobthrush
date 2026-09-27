@@ -6,9 +6,11 @@ internal static class Emitter
 {
     public static string Emit(CheckedProgram program, bool executable = true)
     {
-        var entry = program.EntryFunctionId is int entryId && program.EntryModule is not null
+        var entry = program.EntryFunctionId is int entryId
             ? program.Functions.FirstOrDefault(function =>
-                function.Id == entryId && function.Module == program.EntryModule && function.TypeParameters.Count == 0)
+                function.Id == entryId && function.Name == "main" && function.TypeParameters.Count == 0 &&
+                function.Parameters.Count == 0 &&
+                (function.ReturnType.IsI32 || function.ReturnType.IsBool || function.ReturnType.IsText))
             : null;
         if (executable && entry is null)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");

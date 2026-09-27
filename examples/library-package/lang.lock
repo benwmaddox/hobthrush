@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "root": {
+    "name": "library-package-example",
+    "version": "0.1.0",
+    "manifest_sha256": "25a69014a8be08e4dfee457554d992b777b4cca179bdf5a2117d4ebe390cf66f",
+    "dependencies": {
+      "validation": "../text-validation"
+    }
+  },
+  "packages": [
+    {
+      "path": "../text-validation",
+      "name": "text-validation",
+      "version": "0.1.0",
+      "content_sha256": "4092021d2ffa61da626b733494d75ce8b347eeacf3cfb5dfcdf104dbb516ba0f",
+      "dependencies": {}
+    }
+  ]
+}

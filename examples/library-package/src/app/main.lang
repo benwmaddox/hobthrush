@@ -1,12 +1,22 @@
 module app.main;
 
 import catalog.message { Greeting, Message, greeting };
+import validation::text.validation { NormalizeError, normalize, require };
 
 pub fn main() -> Text effects {} {
     let welcome: Greeting = greeting();
     let message: Message = Message.Ready(welcome);
-    return match message {
-        Message.Ready(value) => value.text,
-        Message.Missing => "missing",
+    let normalized: Result<Text, NormalizeError> = match message {
+        Message.Ready(value) => normalize(value.text),
+        Message.Missing => Err(NormalizeError.Empty),
+    };
+    let candidate: Option<Text> = match normalized {
+        Ok(value) => Some(value),
+        Err(error) => None,
+    };
+    let required: Result<Text, NormalizeError> = require(candidate, NormalizeError.Empty);
+    return match required {
+        Ok(value) => value,
+        Err(error) => "ready",
     };
 }
