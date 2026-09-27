@@ -8,7 +8,7 @@ internal static class Emitter
     {
         var entry = program.EntryFunctionId is int entryId && program.EntryModule is not null
             ? program.Functions.FirstOrDefault(function =>
-                function.Id == entryId && function.Module == program.EntryModule)
+                function.Id == entryId && function.Module == program.EntryModule && function.TypeParameters.Count == 0)
             : null;
         if (executable && entry is null)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
@@ -20,6 +20,7 @@ internal static class Emitter
     private sealed class SourceEmitter(CheckedProgram program)
     {
         private readonly StringBuilder _source = new();
+        private CheckedFunction? _emittingFunction;
 
         public string Emit(CheckedFunction? entry, bool executable)
         {
@@ -129,8 +130,15 @@ internal static class Emitter
 
         private void EmitFunction(CheckedFunction function)
         {
+            _emittingFunction = function;
             _source.Append("    ").Append(function.Public ? "public" : "private").Append(" static ")
-                .Append(EmitType(function.ReturnType)).Append(" Function_").Append(function.Id).Append('(');
+                .Append(EmitType(function.ReturnType)).Append(" Function_").Append(function.Id);
+            if (function.TypeParameters.Count != 0)
+            {
+                var typeParameterNames = function.TypeParameters.Select((_, index) => TypeParameterName(index));
+                _source.Append('<').Append(string.Join(", ", typeParameterNames)).Append('>');
+            }
+            _source.Append('(');
             for (var i = 0; i < function.Parameters.Count; i++)
             {
                 if (i != 0) _source.Append(", ");
@@ -142,6 +150,7 @@ internal static class Emitter
             EmitStatements(function.Body, 2);
             _source.AppendLine("    }");
             _source.AppendLine();
+            _emittingFunction = null;
         }
 
         private void EmitStatements(IEnumerable<TypedStmt> statements, int indent)
@@ -194,8 +203,7 @@ internal static class Emitter
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
-            TypedCallExpr call => "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture) +
-                "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")",
+            TypedCallExpr call => EmitCall(call),
             TypedTextLengthExpr length => "TextLength(" + EmitExpr(length.Target) + ")",
             TypedTextTrimExpr trim => "(" + EmitExpr(trim.Target) + ").Trim()",
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
@@ -207,6 +215,14 @@ internal static class Emitter
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
+
+        private string EmitCall(TypedCallExpr call)
+        {
+            var functionName = "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture);
+            if (call.TypeArguments.Count != 0)
+                functionName += "<" + string.Join(", ", call.TypeArguments.Select(EmitType)) + ">";
+            return functionName + "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")";
+        }
 
         private string EmitIntrinsicCall(TypedIntrinsicCallExpr expression) => expression.Intrinsic switch
         {
@@ -431,10 +447,24 @@ internal static class Emitter
             LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
+            LangTypeKind.TypeParameter => EmitTypeParameter(type),
             LangTypeKind.FsRead => "FsRead",
             LangTypeKind.FsError => "FsError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
+
+        private string EmitTypeParameter(LangType type)
+        {
+            var ordinal = type.TypeParameterOrdinal;
+            if (_emittingFunction is null ||
+                type.TypeParameterOwnerId != _emittingFunction.Id ||
+                ordinal < 0 || ordinal >= _emittingFunction.TypeParameters.Count)
+                throw new InvalidOperationException("Type parameter reached emitter outside its defining function");
+            return TypeParameterName(ordinal);
+        }
+
+        private static string TypeParameterName(int ordinal) =>
+            "T" + ordinal.ToString(CultureInfo.InvariantCulture);
 
         private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText;
 
@@ -480,7 +510,12 @@ internal static class Emitter
 
                 foreach (var statement in EnumerateStatements(function.Body))
                 foreach (var expression in StatementExpressions(statement).SelectMany(EnumerateExpressions))
+                {
                     yield return expression.Type;
+                    if (expression is TypedCallExpr call)
+                    foreach (var typeArgument in call.TypeArguments)
+                        yield return typeArgument;
+                }
             }
         }
 

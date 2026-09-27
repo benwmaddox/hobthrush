@@ -414,7 +414,7 @@ internal sealed class Parser
             Fail(Current, "E_UNSUPPORTED", "Async functions are not implemented yet");
         Expect("fn");
         var name = ExpectBareIdentifier();
-        if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic functions are not implemented yet");
+        var typeParameters = ParseFunctionTypeParameters();
 
         Expect("(");
         var parameters = new List<ParameterDecl>();
@@ -441,7 +441,35 @@ internal sealed class Parser
         Expect("effects");
         var effects = ParseEffects();
         var body = ParseStatementBlock("Unclosed function body");
-        return new FunctionDecl(name.Text, isPublic, parameters, returnType, effects, body, name);
+        return new FunctionDecl(name.Text, typeParameters, isPublic, parameters, returnType, effects, body, name);
+    }
+
+    private List<TypeParameterSyntax> ParseFunctionTypeParameters()
+    {
+        var typeParameters = new List<TypeParameterSyntax>();
+        if (!Is("<")) return typeParameters;
+
+        Take();
+        if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type parameter");
+        if (Current.Kind == "eof")
+            Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+
+        while (true)
+        {
+            var parameter = ExpectBareIdentifier();
+            typeParameters.Add(new TypeParameterSyntax(parameter.Text, parameter));
+            if (Is(">")) break;
+            if (Current.Kind == "eof")
+                Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+
+            Expect(",");
+            if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type parameter after ','");
+            if (Current.Kind == "eof")
+                Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+        }
+
+        Expect(">");
+        return typeParameters;
     }
 
     private List<Stmt> ParseStatementBlock(string unclosedMessage)

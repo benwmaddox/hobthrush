@@ -11,6 +11,7 @@ internal sealed record Token(string Kind, string Text, int Line, int Column, str
 }
 
 internal sealed record TypeSyntax(string Name, IReadOnlyList<TypeSyntax> Args, Token At);
+internal sealed record TypeParameterSyntax(string Name, Token At);
 internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record EffectSyntax(string Name, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
@@ -20,6 +21,7 @@ internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record StructDecl(string Name, bool Public, IReadOnlyList<StructFieldDecl> Fields, Token At);
 internal sealed record FunctionDecl(
     string Name,
+    IReadOnlyList<TypeParameterSyntax> TypeParameters,
     bool Public,
     IReadOnlyList<ParameterDecl> Parameters,
     TypeSyntax ReturnType,

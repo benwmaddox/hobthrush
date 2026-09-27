@@ -9,3 +9,10 @@ pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {
 
     return Ok(input.trim());
 }
+
+pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
+    return match value {
+        Some(item) => Ok(item),
+        None => Err(error),
+    };
+}

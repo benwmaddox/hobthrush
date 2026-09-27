@@ -153,5 +153,35 @@
     "file": "30-if-branch-local-escape.lang",
     "status": "active",
     "expectedCode": "E_NAME_UNRESOLVED"
+  },
+  {
+    "file": "31-duplicate-generic-parameter.lang",
+    "status": "active",
+    "expectedCode": "E_NAME_DUPLICATE"
+  },
+  {
+    "file": "32-result-only-generic-parameter.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "33-repeated-generic-argument-conflict.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "34-generic-body-type-misuse.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "35-malformed-generic-declaration.lang",
+    "status": "active",
+    "expectedCode": "E_SYNTAX"
+  },
+  {
+    "file": "36-constructor-generic-inference.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
   }
 ]
