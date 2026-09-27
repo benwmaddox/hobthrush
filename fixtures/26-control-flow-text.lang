@@ -1,0 +1,18 @@
+module fixture.control_flow_text;
+
+pub union NormalizeError { Empty }
+
+pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {
+    if input.length == 0 {
+        return Err(NormalizeError.Empty);
+    }
+    return Ok(input.trim());
+}
+
+pub fn read_if_empty(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
+    if path.length == 0 {
+        return fs.read_text(path);
+    } else {
+        return fs.read_text(path);
+    }
+}

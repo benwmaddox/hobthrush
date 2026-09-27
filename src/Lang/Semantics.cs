@@ -106,6 +106,9 @@ internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(LangType.
 internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(LangType.Text, At);
 internal sealed record TypedLocalExpr(LangType Type, int LocalId, Token At) : TypedExpr(Type, At);
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
+internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
+internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
+internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr(LangType.Text, At);
 internal sealed record TypedCallExpr(LangType Type, int FunctionId, IReadOnlyList<TypedExpr> Arguments, Token At) : TypedExpr(Type, At);
 
 internal enum BuiltinIntrinsic
@@ -174,6 +177,11 @@ internal sealed record TypedMatchExpr(
 internal abstract record TypedStmt(Token At);
 internal sealed record TypedLetStmt(int LocalId, string Name, LangType Type, TypedExpr Value, Token At) : TypedStmt(At);
 internal sealed record TypedReturnStmt(TypedExpr Value, Token At) : TypedStmt(At);
+internal sealed record TypedIfStmt(
+    TypedExpr Condition,
+    IReadOnlyList<TypedStmt> ThenBody,
+    IReadOnlyList<TypedStmt>? ElseBody,
+    Token At) : TypedStmt(At);
 
 internal sealed class CheckedFunction
 {
@@ -749,8 +757,37 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         var body = new List<TypedStmt>();
-        foreach (var statement in function.Declaration.Body)
+        var guaranteesReturn = CheckStatements(function.Declaration.Body, body, locals);
+
+        if (!guaranteesReturn)
+            Add("E_TYPE_MISMATCH", "Function must end with a return value", function.Declaration.At);
+
+        function.CheckedFunction = new CheckedFunction(
+            function.Id,
+            function.Module,
+            function.Declaration.Name,
+            function.Declaration.Public,
+            function.Parameters,
+            function.ReturnType,
+            ReadOnly(body),
+            function.DeclaredEffects,
+            function.Declaration.At);
+    }
+
+    private bool CheckStatements(
+        IReadOnlyList<Stmt> statements,
+        List<TypedStmt> typedStatements,
+        Dictionary<string, LocalSymbol> locals)
+    {
+        var guaranteesReturn = false;
+        foreach (var statement in statements)
         {
+            if (guaranteesReturn)
+            {
+                Add("E_UNREACHABLE", "Statement is unreachable after a guaranteed return", statement.At);
+                continue;
+            }
+
             switch (statement)
             {
                 case LetStmt let:
@@ -766,13 +803,39 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     {
                         locals.Add(let.Name, new LocalSymbol(id, localType));
                     }
-                    body.Add(new TypedLetStmt(id, let.Name, localType, value, let.At));
+                    typedStatements.Add(new TypedLetStmt(id, let.Name, localType, value, let.At));
                     break;
                 }
                 case ReturnStmt ret:
                 {
-                    var value = CheckExpr(ret.Value, function.ReturnType, locals, 0);
-                    body.Add(new TypedReturnStmt(value, ret.At));
+                    var value = CheckExpr(ret.Value, _currentFunction!.ReturnType, locals, 0);
+                    typedStatements.Add(new TypedReturnStmt(value, ret.At));
+                    guaranteesReturn = true;
+                    break;
+                }
+                case IfStmt conditional:
+                {
+                    var condition = CheckExpr(conditional.Condition, LangType.Bool, locals, 0);
+                    var thenLocals = new Dictionary<string, LocalSymbol>(locals, StringComparer.Ordinal);
+                    var thenBody = new List<TypedStmt>();
+                    var thenReturns = CheckStatements(conditional.Then, thenBody, thenLocals);
+
+                    IReadOnlyList<TypedStmt>? elseBody = null;
+                    var elseReturns = false;
+                    if (conditional.Else.Count != 0)
+                    {
+                        var elseLocals = new Dictionary<string, LocalSymbol>(locals, StringComparer.Ordinal);
+                        var typedElseBody = new List<TypedStmt>();
+                        elseReturns = CheckStatements(conditional.Else, typedElseBody, elseLocals);
+                        elseBody = ReadOnly(typedElseBody);
+                    }
+
+                    typedStatements.Add(new TypedIfStmt(
+                        condition,
+                        ReadOnly(thenBody),
+                        elseBody,
+                        conditional.At));
+                    guaranteesReturn = conditional.Else.Count != 0 && thenReturns && elseReturns;
                     break;
                 }
                 default:
@@ -781,19 +844,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
         }
 
-        if (function.Declaration.Body.Count == 0 || function.Declaration.Body[^1] is not ReturnStmt)
-            Add("E_TYPE_MISMATCH", "Function must end with a return value", function.Declaration.At);
-
-        function.CheckedFunction = new CheckedFunction(
-            function.Id,
-            function.Module,
-            function.Declaration.Name,
-            function.Declaration.Public,
-            function.Parameters,
-            function.ReturnType,
-            ReadOnly(body),
-            function.DeclaredEffects,
-            function.Declaration.At);
+        return guaranteesReturn;
     }
 
     private void InferEffectsAndValidateBounds()
@@ -897,7 +948,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             NameExpr name => CheckName(name, expected, locals),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1),
-            QualifiedCallExpr call => CheckQualifiedCall(call, locals, depth + 1),
+            MemberCallExpr call => CheckMemberCall(call, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
@@ -995,7 +1046,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             CurrentModule.VisibleUnions.ContainsKey(typeName.Name))
         {
             return CheckVariantConstruction(
-                new QualifiedCallExpr(expression.At, typeName.Name, expression.Field, expression.At, []),
+                typeName.Name,
+                expression.Field,
+                expression.At,
+                expression.At,
+                [],
                 locals,
                 depth);
         }
@@ -1013,6 +1068,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         var target = CheckExpr(expression.Target, null, locals, depth);
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
+        if (target.Type.IsText && expression.Field == "length")
+            return new TypedTextLengthExpr(target, expression.At);
         if (target.Type.Kind != LangTypeKind.Struct)
         {
             Add("E_TYPE_MISMATCH", $"Field access requires a struct value, found '{target.Type.DisplayName}'", expression.At);
@@ -1031,6 +1088,36 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private TypedExpr CheckBinary(BinaryExpr expression, Dictionary<string, LocalSymbol> locals, int depth)
     {
+        if (expression.Op is "==" or "!=")
+        {
+            var comparedLeft = CheckExpr(expression.Left, null, locals, depth);
+            var comparedRight = CheckExpr(expression.Right, null, locals, depth);
+            if (comparedLeft.Type.IsError || comparedRight.Type.IsError) return new TypedErrorExpr(expression.At);
+
+            if (comparedLeft.Type == comparedRight.Type &&
+                (comparedLeft.Type.IsI32 || comparedLeft.Type.IsBool || comparedLeft.Type.IsText))
+                return new TypedCompareExpr(expression.Op, comparedLeft, comparedRight, expression.At);
+
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Comparison '{expression.Op}' requires matching operands of type i32, bool, or Text",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Op is "<" or "<=" or ">" or ">=")
+        {
+            var comparedLeft = CheckExpr(expression.Left, null, locals, depth);
+            var comparedRight = CheckExpr(expression.Right, null, locals, depth);
+            if (comparedLeft.Type.IsError || comparedRight.Type.IsError) return new TypedErrorExpr(expression.At);
+
+            if (comparedLeft.Type.IsI32 && comparedRight.Type.IsI32)
+                return new TypedCompareExpr(expression.Op, comparedLeft, comparedRight, expression.At);
+
+            Add("E_TYPE_MISMATCH", $"Comparison '{expression.Op}' requires i32 operands", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (expression.Op is not ("+" or "-" or "*"))
         {
             Add("E_UNSUPPORTED", $"Arithmetic operator '{expression.Op}' is not implemented", expression.At);
@@ -1076,78 +1163,111 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return new TypedErrorExpr(expression.At);
     }
 
-    private TypedExpr CheckQualifiedCall(
-        QualifiedCallExpr expression,
+    private TypedExpr CheckMemberCall(
+        MemberCallExpr expression,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (locals.TryGetValue(expression.Qualifier, out var receiverLocal))
+        if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
-            if (expression.Member == "read_text" && !receiverLocal.Type.IsFsRead)
+            if (CurrentModule.VisibleUnions.ContainsKey(targetName.Name))
+                return CheckVariantConstruction(
+                    targetName.Name,
+                    expression.Member,
+                    expression.At,
+                    expression.MemberAt,
+                    expression.Arguments,
+                    locals,
+                    depth);
+
+            if (targetName.Name == "FsError")
             {
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
-                Add(
-                    "E_CAPABILITY_MISSING",
-                    $"Local '{expression.Qualifier}' of type '{receiverLocal.Type.DisplayName}' cannot provide capability member 'read_text'",
-                    expression.At);
+                if (IsFsErrorVariant(expression.Member))
+                    Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on FsError", expression.MemberAt);
                 return new TypedErrorExpr(expression.At);
             }
 
-            if (receiverLocal.Type.IsFsRead && expression.Member == "read_text")
+            if (targetName.Name == "fs" && expression.Member == "read_text")
             {
-                var diagnosticsBeforeArguments = diagnostics.Count;
-                var hasCorrectArity = expression.Arguments.Count == 1;
-                if (expression.Arguments.Count != 1)
-                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
-
-                var receiver = new TypedLocalExpr(receiverLocal.Type, receiverLocal.Id, expression.At);
-                var arguments = new List<TypedExpr> { receiver };
-                if (expression.Arguments.Count > 0)
-                    arguments.Add(CheckExpr(expression.Arguments[0], LangType.Text, locals, depth));
-                else
-                    arguments.Add(new TypedErrorExpr(expression.MemberAt));
-                for (var i = 1; i < expression.Arguments.Count; i++)
-                    _ = CheckExpr(expression.Arguments[i], null, locals, depth);
-
-                var resultType = LangType.Result(LangType.Text, LangType.FsError);
-                if (hasCorrectArity && diagnostics.Count == diagnosticsBeforeArguments)
-                    _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.read", "fs.read_text", expression.MemberAt));
-                return new TypedIntrinsicCallExpr(
-                    resultType,
-                    BuiltinIntrinsic.FsReadText,
-                    ReadOnly(arguments),
-                    expression.At);
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
+                return new TypedErrorExpr(expression.At);
             }
-
-            foreach (var argument in expression.Arguments)
-                _ = CheckExpr(argument, null, locals, depth);
-            Add("E_UNSUPPORTED", $"Member calls on local values are not implemented for '{expression.Qualifier}.{expression.Member}'", expression.MemberAt);
-            return new TypedErrorExpr(expression.At);
         }
 
-        if (CurrentModule.VisibleUnions.ContainsKey(expression.Qualifier))
-            return CheckVariantConstruction(expression, locals, depth);
-
-        if (expression.Qualifier == "FsError")
+        var diagnosticsBeforeReceiver = diagnostics.Count;
+        var receiver = CheckExpr(expression.Target, null, locals, depth);
+        if (receiver.Type.IsError)
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            if (IsFsErrorVariant(expression.Member))
-                Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.MemberAt);
-            else
-                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on FsError", expression.MemberAt);
             return new TypedErrorExpr(expression.At);
+        }
+
+        if (receiver.Type.IsFsRead && expression.Member == "read_text")
+        {
+            var diagnosticsBeforeCall = diagnosticsBeforeReceiver;
+            var hasCorrectArity = expression.Arguments.Count == 1;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            if (expression.Arguments.Count > 0)
+                arguments.Add(CheckExpr(expression.Arguments[0], LangType.Text, locals, depth));
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+            for (var i = 1; i < expression.Arguments.Count; i++)
+                _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+            var resultType = LangType.Result(LangType.Text, LangType.FsError);
+            if (hasCorrectArity && diagnostics.Count == diagnosticsBeforeCall)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.read", "fs.read_text", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                resultType,
+                BuiltinIntrinsic.FsReadText,
+                ReadOnly(arguments),
+                expression.At);
+        }
+
+        if (expression.Member == "read_text")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+
+            var message = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
+                ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}' cannot provide capability member 'read_text'"
+                : $"Value of type '{receiver.Type.DisplayName}' cannot provide capability member 'read_text'";
+            Add("E_CAPABILITY_MISSING", message, expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (receiver.Type.IsText && expression.Member == "trim")
+        {
+            if (expression.Arguments.Count != 0)
+            {
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'Text.trim' expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+            return new TypedTextTrimExpr(receiver, expression.At);
         }
 
         foreach (var argument in expression.Arguments)
             _ = CheckExpr(argument, null, locals, depth);
-        if (expression.Qualifier == "fs" && expression.Member == "read_text")
-        {
-            Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
-            return new TypedErrorExpr(expression.At);
-        }
-        Add("E_NAME_UNRESOLVED", $"Union '{expression.Qualifier}' is not declared", expression.At);
+
+        var targetDescription = expression.Target is NameExpr name && locals.ContainsKey(name.Name)
+            ? name.Name
+            : receiver.Type.DisplayName;
+        var unsupportedMessage = expression.Target is NameExpr local && locals.ContainsKey(local.Name)
+            ? $"Member calls on local values are not implemented for '{targetDescription}.{expression.Member}'"
+            : $"Member calls on values are not implemented for '{targetDescription}.{expression.Member}'";
+        Add("E_UNSUPPORTED", unsupportedMessage, expression.MemberAt);
         return new TypedErrorExpr(expression.At);
     }
 
@@ -1213,37 +1333,41 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private TypedExpr CheckVariantConstruction(
-        QualifiedCallExpr expression,
+        string qualifier,
+        string member,
+        Token at,
+        Token memberAt,
+        IReadOnlyList<Expr> arguments,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (!CurrentModule.VisibleUnions.TryGetValue(expression.Qualifier, out var union))
+        if (!CurrentModule.VisibleUnions.TryGetValue(qualifier, out var union))
         {
-            foreach (var argument in expression.Arguments)
+            foreach (var argument in arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Union '{expression.Qualifier}' is not declared", expression.At);
-            return new TypedErrorExpr(expression.At);
+            Add("E_NAME_UNRESOLVED", $"Union '{qualifier}' is not declared", at);
+            return new TypedErrorExpr(at);
         }
 
-        var variant = union.Variants.FirstOrDefault(item => item.Name == expression.Member);
+        var variant = union.Variants.FirstOrDefault(item => item.Name == member);
         if (variant is null)
         {
-            foreach (var argument in expression.Arguments)
+            foreach (var argument in arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on union '{expression.Qualifier}'", expression.MemberAt);
-            return new TypedErrorExpr(expression.At);
+            Add("E_NAME_UNRESOLVED", $"Variant '{member}' is not declared on union '{qualifier}'", memberAt);
+            return new TypedErrorExpr(at);
         }
 
-        if (expression.Arguments.Count != variant.Fields.Count)
-            Add("E_TYPE_MISMATCH", $"Variant '{expression.Qualifier}.{variant.Name}' expects {variant.Fields.Count} payload values, got {expression.Arguments.Count}", expression.MemberAt);
+        if (arguments.Count != variant.Fields.Count)
+            Add("E_TYPE_MISMATCH", $"Variant '{qualifier}.{variant.Name}' expects {variant.Fields.Count} payload values, got {arguments.Count}", memberAt);
 
-        var arguments = new List<TypedExpr>();
-        for (var i = 0; i < expression.Arguments.Count; i++)
+        var typedArguments = new List<TypedExpr>();
+        for (var i = 0; i < arguments.Count; i++)
         {
             var expected = i < variant.Fields.Count ? variant.Fields[i].Type : null;
-            arguments.Add(CheckExpr(expression.Arguments[i], expected, locals, depth));
+            typedArguments.Add(CheckExpr(arguments[i], expected, locals, depth));
         }
-        return new TypedUnionConstructExpr(union.Type, union.Id, variant.Id, ReadOnly(arguments), expression.At);
+        return new TypedUnionConstructExpr(union.Type, union.Id, variant.Id, ReadOnly(typedArguments), at);
     }
 
     private TypedExpr CheckMatch(

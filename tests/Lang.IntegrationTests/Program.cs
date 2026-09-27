@@ -41,6 +41,9 @@ internal static class IntegrationTests
             ("valid JSON checks return an empty diagnostics array", TestJsonValidProgram),
             ("JSON diagnostics have a stable schema, range, and failing exit", TestJsonDiagnostics),
             ("primitive main values preserve exact output", TestPrimitiveMainOutput),
+            ("comparison precedence and all comparison operators execute", TestComparisonAndControlFlow),
+            ("if conditions, operand types, returns, and scopes are checked", TestInvalidControlFlow),
+            ("Text length counts Unicode scalars and trim removes Unicode whitespace", TestUnicodeTextOperations),
             ("union payload matching executes", TestUnionMatchOutput),
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
             ("struct constructors support nested and chained field reads", TestStructValues),
@@ -77,6 +80,7 @@ internal static class IntegrationTests
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
+            ("pure Text validation package builds and normalizes empty and nonempty input", TestTextValidationExample),
             ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
             ("NativeAOT publishes and runs the current-host file executable", TestAotPublishAndRun),
@@ -204,6 +208,144 @@ internal static class IntegrationTests
         AssertRunOutput("false" + Environment.NewLine, falseResult);
         var textResult = await harness.InvokeAsync("text-output", "run", textSource);
         AssertRunOutput("quote: \" slash: \\ line1\nline2 λ 😀" + Environment.NewLine, textResult);
+    }
+
+    private static async Task TestComparisonAndControlFlow(Harness harness)
+    {
+        const string source = """
+            module harness.comparisons;
+            pub fn choose(enabled: bool, value: i32) -> i32 effects {} {
+                if enabled {
+                    let doubled: i32 = value * 2;
+                    if value > 0 {
+                        return doubled;
+                    } else {
+                        return value;
+                    }
+                } else {
+                    return 0;
+                }
+            }
+            pub fn main() -> i32 effects {} {
+                if 1 + 2 * 3 < 8 == true {
+                    if 8 != 9 {
+                        if 2 < 3 {
+                            if 3 <= 3 {
+                                if 4 > 3 {
+                                    if 4 >= 4 {
+                                        return choose(true, 21);
+                                    } else {
+                                        return 5;
+                                    }
+                                } else {
+                                    return 6;
+                                }
+                            } else {
+                                return 7;
+                            }
+                        } else {
+                            return 8;
+                        }
+                    } else {
+                        return 9;
+                    }
+                } else {
+                    return 10;
+                }
+            }
+            """;
+
+        AssertRunOutput("42" + Environment.NewLine,
+            await harness.InvokeAsync("comparisons-and-control-flow", "run", source));
+
+        const string memberCallSource = """
+            module harness.control_member_call;
+            pub fn read_if_empty(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
+                let loaded: Result<Text, FsError> = fs.read_text(path);
+                if path.length == 0 {
+                    return loaded;
+                } else {
+                    return loaded;
+                }
+            }
+            """;
+        var memberCallCheck = await harness.InvokeAsync(
+            "control-flow-fsread-member-call", "check", memberCallSource, "--json");
+        AssertEqual(0, memberCallCheck.ExitCode, Describe(memberCallCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(memberCallCheck.StandardOutput).Length,
+            "The FsRead member call must remain valid alongside if statements.");
+    }
+
+    private static async Task TestInvalidControlFlow(Harness harness)
+    {
+        const string nonBooleanCondition = """
+            module harness.non_boolean_condition;
+            pub fn main() -> i32 effects {} {
+                if 1 { return 1; } else { return 0; }
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "non-boolean-condition", nonBooleanCondition, "E_TYPE_MISMATCH");
+
+        const string mismatchedOrderingOperands = """
+            module harness.mismatched_ordering;
+            pub fn main() -> i32 effects {} {
+                if 1 < false { return 1; } else { return 0; }
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "mismatched-ordering-operands", mismatchedOrderingOperands, "E_TYPE_MISMATCH");
+
+        const string mismatchedEqualityOperands = """
+            module harness.mismatched_equality;
+            pub fn main() -> i32 effects {} {
+                let same: bool = 1 == "1";
+                if same { return 1; } else { return 0; }
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "mismatched-equality-operands", mismatchedEqualityOperands, "E_TYPE_MISMATCH");
+
+        const string missingReturn = """
+            module harness.if_missing_return;
+            pub fn choose(enabled: bool) -> i32 effects {} {
+                if enabled { return 1; }
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "if-missing-return", missingReturn, "E_TYPE_MISMATCH");
+
+        const string branchLocalEscape = """
+            module harness.branch_local_escape;
+            pub fn main() -> i32 effects {} {
+                if true { let branch_value: i32 = 1; } else { }
+                return branch_value;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "branch-local-escape", branchLocalEscape, "E_NAME_UNRESOLVED");
+
+        const string unreachableStatement = """
+            module harness.unreachable_statement;
+            pub fn main() -> i32 effects {} {
+                if true { return 1; } else { return 2; }
+                return 3;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "unreachable-after-returning-if", unreachableStatement, "E_UNREACHABLE");
+    }
+
+    private static async Task TestUnicodeTextOperations(Harness harness)
+    {
+        const string scalarLengthSource = """
+            module harness.scalar_length;
+            pub fn main() -> i32 effects {} { return "😀".length; }
+            """;
+        AssertRunOutput("1" + Environment.NewLine,
+            await harness.InvokeAsync("unicode-scalar-length", "run", scalarLengthSource));
+
+        var whitespace = "\u00A0\u3000hello 😀\u3000\u00A0";
+        var trimSource = $$"""
+            module harness.unicode_trim;
+            pub fn main() -> Text effects {} { return "{{whitespace}}".trim(); }
+            """;
+        AssertRunOutput("hello 😀" + Environment.NewLine,
+            await harness.InvokeAsync("unicode-whitespace-trim", "run", trimSource));
     }
 
     private static async Task TestUnionMatchOutput(Harness harness)
@@ -1720,6 +1862,75 @@ internal static class IntegrationTests
         AssertEqual(0, check.ExitCode, Describe(check));
         var run = await harness.InvokePackageDirectoryAsync("maintained-package-run", packageRoot, "run");
         AssertRunOutput("ready" + Environment.NewLine, run);
+    }
+
+    private static async Task TestTextValidationExample(Harness harness)
+    {
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "text-validation");
+        var librarySource = await File.ReadAllTextAsync(
+            Path.Combine(packageRoot, "src", "text", "validation.lang"));
+
+        var check = await harness.InvokePackageDirectoryAsync(
+            "text-validation-example-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length,
+            "The maintained validation library should check with no diagnostics.");
+
+        var build = await harness.InvokePackageDirectoryAsync(
+            "text-validation-example-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        AssertTrue(build.StandardOutput.StartsWith("Built library: ", StringComparison.Ordinal),
+            $"The pure library package should build a managed library. {Describe(build)}");
+        var artifact = build.StandardOutput["Built library: ".Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact) && File.Exists(artifact),
+            $"Expected the built library DLL at {artifact}. {Describe(build)}");
+
+        var unicodeInput = "\u00A0\u3000hello 😀\u3000\u00A0";
+        var cases = new (string Name, string MainSource, string ExpectedOutput)[]
+        {
+            ("text-validation-empty", """
+                module app.main;
+                import text.validation { NormalizeError, normalize };
+                pub fn main() -> Text effects {} {
+                    return match normalize("") {
+                        Ok(value) => "unexpected success",
+                        Err(error) => match error {
+                            NormalizeError.Empty => "empty",
+                        },
+                    };
+                }
+                """, "empty" + Environment.NewLine),
+            ("text-validation-nonempty", $$"""
+                module app.main;
+                import text.validation { NormalizeError, normalize };
+                pub fn main() -> Text effects {} {
+                    return match normalize("{{unicodeInput}}") {
+                        Ok(value) => value,
+                        Err(error) => "unexpected error",
+                    };
+                }
+                """, "hello 😀" + Environment.NewLine)
+        };
+
+        foreach (var (name, mainSource, expectedOutput) in cases)
+        {
+            var consumerRoot = await harness.WritePackageAsync(
+                name,
+                CliPackageManifest(),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = librarySource,
+                    ["src/app/main.lang"] = mainSource
+                });
+            var consumerCheck = await harness.InvokePackageDirectoryAsync(
+                $"{name}-check", consumerRoot, "check", "--json");
+            AssertEqual(0, consumerCheck.ExitCode, Describe(consumerCheck));
+            AssertEqual(0, ParseDiagnosticSnapshots(consumerCheck.StandardOutput).Length,
+                $"The same-package normalization consumer {name} should check cleanly.");
+
+            var run = await harness.InvokePackageDirectoryAsync($"{name}-run", consumerRoot, "run");
+            AssertRunOutput(expectedOutput, run);
+        }
     }
 
     private static string CliPackageManifest(string entryModule = "app.main") =>

@@ -17,11 +17,15 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Build a library DLL when no supported executable entrypoint is present.
 - [x] Add immutable non-generic nominal structs with named construction, field checks and reads, and direct-recursion checks.
 - [x] Add strict same-package manifests, explicit imports, and multi-file module resolution for the implemented pure-language slice.
+- [x] Add scoped `if`/`else`, comparison operators with defined precedence, branch-local scopes, guaranteed-return checking, and `E_UNREACHABLE`.
+- [x] Add `Text.length` using Unicode scalar counts and `Text.trim()` using Unicode whitespace trimming.
 - [ ] Add user-defined generics, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; external dependencies and lockfiles, user-defined generics, traits, application capability grants, and the maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; external and path-based dependencies, lockfiles, user-defined generics, traits, language-level tests, application capability grants, and the final maintained library/CLI/web project set remain future work.
 
-The active compiler-fixture set covers fixtures 01-14 and 20-25. Fixtures 15-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external package dependencies or locking. Struct support, package resolution, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generics, traits, or V1 package requirements.
+The active compiler-fixture set covers fixtures 01-14 and 20-30. Fixtures 15-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external or path-based package dependencies or locking. Struct support, package resolution, control flow, Text operations, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generics, language tests, traits, or V1 package requirements.
+
+[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds the `NormalizeError`/`normalize` shape and integration consumers exercise empty and nonempty input. The final maintained validation library still needs user-defined generics, language-level tests, and external or path-based package dependencies.
 
 ## M2 - effects and capabilities (partial)
 

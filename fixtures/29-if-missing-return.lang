@@ -1,0 +1,7 @@
+module fixture.if_missing_return;
+
+pub fn choose(flag: bool) -> i32 effects {} {
+    if flag {
+        return 1;
+    }
+}

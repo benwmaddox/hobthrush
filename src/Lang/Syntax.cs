@@ -48,9 +48,9 @@ internal sealed record TextExpr(Token At, string Value) : Expr(At);
 internal sealed record NameExpr(Token At, string Name) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
 internal sealed record CallExpr(Token At, string Name, IReadOnlyList<Expr> Arguments) : Expr(At);
-internal sealed record QualifiedCallExpr(
+internal sealed record MemberCallExpr(
     Token At,
-    string Qualifier,
+    Expr Target,
     string Member,
     Token MemberAt,
     IReadOnlyList<Expr> Arguments) : Expr(At);
@@ -71,3 +71,8 @@ internal sealed record WildcardPattern(Token At) : Pattern(At);
 internal abstract record Stmt(Token At);
 internal sealed record LetStmt(Token At, string Name, TypeSyntax Type, Expr Value) : Stmt(At);
 internal sealed record ReturnStmt(Token At, Expr Value) : Stmt(At);
+internal sealed record IfStmt(
+    Token At,
+    Expr Condition,
+    IReadOnlyList<Stmt> Then,
+    IReadOnlyList<Stmt> Else) : Stmt(At);

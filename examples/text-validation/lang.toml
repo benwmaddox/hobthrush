@@ -1,0 +1,4 @@
+name = "text-validation"
+version = "0.1.0"
+kind = "lib"
+source_root = "src"
