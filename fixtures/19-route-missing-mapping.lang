@@ -1,3 +1,12 @@
 module fixture::route_missing;
-pub union Reply { Found(Text), Missing }
-route GET "/items/{id}" { path id: i32; handler: get_item; response Found: 200 json Text; }
+
+union Reply { Found(Text), Missing }
+
+fn get_item() -> self::fixture::route_missing::Reply effects {} {
+    return self::fixture::route_missing::Reply.Found("found");
+}
+
+route GET "/items" {
+    handler: self::fixture::route_missing::get_item;
+    response Found: 200 json Text;
+}

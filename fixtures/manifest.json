@@ -86,12 +86,12 @@
   },
   {
     "file": "18-route-mapping.lang",
-    "status": "pending",
+    "status": "active",
     "expectedCode": null
   },
   {
     "file": "19-route-missing-mapping.lang",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_ROUTE_RESPONSE_MISSING"
   },
   {

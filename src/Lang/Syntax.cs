@@ -45,6 +45,25 @@ internal sealed record CommandTextLiteralSyntax(Token At, string Value) : Comman
 internal sealed record CommandIntegerLiteralSyntax(Token At, int Value) : CommandLiteralSyntax(At);
 internal sealed record CommandBooleanLiteralSyntax(Token At, bool Value) : CommandLiteralSyntax(At);
 internal sealed record CommandDecl(string Name, IReadOnlyList<CommandEntrySyntax> Entries, Token At);
+internal abstract record RouteItemSyntax(Token At);
+internal sealed record RouteBodySyntax(Token At, TypeSyntax Type) : RouteItemSyntax(At);
+internal sealed record RouteHandlerSyntax(Token At, SourceDeclarationRefSyntax Reference) : RouteItemSyntax(At);
+internal sealed record RouteResponseSyntax(
+    Token At,
+    Token VariantAt,
+    string Variant,
+    Token StatusAt,
+    int StatusCode,
+    Token? FormatAt,
+    string? Format,
+    TypeSyntax? BodyType) : RouteItemSyntax(At);
+internal sealed record RouteDecl(
+    Token At,
+    Token MethodAt,
+    string Method,
+    Token PathAt,
+    string Path,
+    IReadOnlyList<RouteItemSyntax> Items);
 internal sealed record FunctionDecl(
     string Name,
     IReadOnlyList<TypeParameterSyntax> TypeParameters,
@@ -62,7 +81,8 @@ internal sealed record ParsedProgram(
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs,
     IReadOnlyList<TestDecl> Tests,
-    IReadOnlyList<CommandDecl> Commands);
+    IReadOnlyList<CommandDecl> Commands,
+    IReadOnlyList<RouteDecl> Routes);
 
 internal sealed record TestDecl(
     string Name,
