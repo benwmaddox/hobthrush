@@ -8,6 +8,12 @@ return await Driver.RunAsync(args);
 
 internal static class Driver
 {
+    private static readonly HashSet<string> SupportedAotRids = new(StringComparer.Ordinal)
+    {
+        "win-x64",
+        "linux-x64"
+    };
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -19,15 +25,72 @@ internal static class Driver
         if (args.Length == 1 && args[0] == "test")
             return TestFixtures();
 
-        if (args.Length < 2 || args[0] is not ("check" or "build" or "run"))
+        if (args.Length < 2)
         {
             PrintUsage();
             return 2;
         }
 
+        var hasAotOption = args.Contains("--aot", StringComparer.Ordinal);
+        var hasRidOption = args.Contains("--rid", StringComparer.Ordinal);
+        if (args[0] is not ("check" or "build" or "run"))
+        {
+            if (hasAotOption || hasRidOption)
+            {
+                return ReportBuildTargetError(
+                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    args[1]);
+            }
+
+            PrintUsage();
+            return 2;
+        }
+
+        var isAotBuild = args[0] == "build" && hasAotOption && hasRidOption;
+        string? rid = null;
+        if (hasAotOption || hasRidOption)
+        {
+            if (args[0] != "build")
+            {
+                return ReportBuildTargetError(
+                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    args[1]);
+            }
+
+            if (hasRidOption && !hasAotOption)
+            {
+                return ReportBuildTargetError(
+                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    args[1]);
+            }
+
+            if (args.Length != 5 || args[2] != "--aot" || args[3] != "--rid")
+            {
+                return ReportBuildTargetError(
+                    "lang build --aot requires --rid RID (supported RIDs: win-x64, linux-x64)",
+                    args[1]);
+            }
+
+            rid = args[4];
+            if (!SupportedAotRids.Contains(rid))
+            {
+                return ReportBuildTargetError(
+                    $"Unsupported AOT runtime identifier '{rid}'; supported RIDs: win-x64, linux-x64",
+                    args[1]);
+            }
+
+            if (!IsCurrentHostAotRid(rid))
+            {
+                return ReportBuildTargetError(
+                    $"NativeAOT runtime identifier '{rid}' targets a different OS than the current host; " +
+                    "cross-OS publishing is not supported",
+                    args[1]);
+            }
+        }
+
         var json = args[0] == "check" && args.Skip(2).Contains("--json", StringComparer.Ordinal);
         if ((args[0] == "check" && args.Skip(2).Any(arg => arg != "--json")) ||
-            (args[0] != "check" && args.Length != 2))
+            (!isAotBuild && args[0] != "check" && args.Length != 2))
         {
             PrintUsage();
             return 2;
@@ -69,11 +132,17 @@ internal static class Driver
             return 0;
         }
 
-        return await BuildCheckedAsync(result.Program!, file, args[0]);
+        return await BuildCheckedAsync(result.Program!, file, args[0], isAotBuild ? rid : null);
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE [--json] | lang build FILE | lang run FILE | lang test");
+        Console.Error.WriteLine("Usage: lang check FILE [--json] | lang build FILE [--aot --rid RID] | lang run FILE | lang test");
+
+    private static int ReportBuildTargetError(string message, string file)
+    {
+        PrintDiagnostics([AtStart("E_BUILD_TARGET", message, file)], json: false);
+        return 1;
+    }
 
     private static void PrintDiagnostics(IReadOnlyList<Diagnostic> diagnostics, bool json)
     {
@@ -103,9 +172,17 @@ internal static class Driver
     private static async Task<int> BuildCheckedAsync(
         CheckedProgram program,
         string sourceFile,
-        string command)
+        string command,
+        string? aotRid)
     {
         var entry = program.Functions.FirstOrDefault(IsRunnableEntryPoint);
+        if (aotRid is not null && entry is null)
+        {
+            return ReportBuildTargetError(
+                "lang build --aot requires fn main() -> i32, bool, or Text with no parameters",
+                sourceFile);
+        }
+
         if (command == "run" && entry is null)
         {
             PrintDiagnostics(
@@ -127,9 +204,12 @@ internal static class Driver
 
         string projectFile;
         string stagedAssemblyFile;
+        var stagedPublishDirectory = Path.Combine(generatedDirectory, "publish");
         try
         {
             Directory.CreateDirectory(generatedDirectory);
+            if (aotRid is not null)
+                Directory.CreateDirectory(stagedPublishDirectory);
             projectFile = Path.Combine(generatedDirectory, "Generated.csproj");
             stagedAssemblyFile = Path.Combine(
                 generatedDirectory,
@@ -137,7 +217,7 @@ internal static class Driver
                 "Release",
                 "net10.0",
                 "Generated.dll");
-            File.WriteAllText(projectFile, ProjectFileContents(executable));
+            File.WriteAllText(projectFile, ProjectFileContents(executable, aotRid));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
                 Emitter.Emit(program, executable));
@@ -156,6 +236,82 @@ internal static class Driver
         try
         {
             var dotnet = ResolveDotnetHost();
+            if (aotRid is not null)
+            {
+                var publish = await ExecAsync(
+                    dotnet,
+                    [
+                        "publish",
+                        projectFile,
+                        "--nologo",
+                        "-v:q",
+                        "--configuration", "Release",
+                        "--runtime", aotRid,
+                        "--output", stagedPublishDirectory
+                    ],
+                    FindRoot() ?? Directory.GetCurrentDirectory(),
+                    sourceFile);
+
+                if (publish is null)
+                    return 1;
+
+                if (publish.ExitCode != 0)
+                {
+                    PrintDiagnostics(
+                    [
+                        AtStart("E_BUILD", "The generated NativeAOT project failed to publish", sourceFile)
+                    ],
+                    json: false);
+                    WriteProcessOutputToError(publish);
+                    return publish.ExitCode;
+                }
+
+                WriteProcessOutputToError(publish);
+
+                var outputDirectory = CreateBuildOutputDirectory(sourceFile);
+                var executableName = NativeExecutableName(aotRid);
+                var executablePath = Path.Combine(outputDirectory, executableName);
+                try
+                {
+                    CopyBuildArtifacts(stagedPublishDirectory, outputDirectory);
+                    if (!File.Exists(executablePath))
+                    {
+                        TryCleanupBuildOutputDirectory(sourceFile, outputDirectory);
+                        PrintDiagnostics(
+                        [
+                            AtStart(
+                                "E_BUILD",
+                                $"The generated NativeAOT publish did not produce {executableName}",
+                                sourceFile)
+                        ],
+                        json: false);
+                        return 1;
+                    }
+
+                    if (!OperatingSystem.IsWindows() && aotRid == "linux-x64")
+                    {
+                        File.SetUnixFileMode(
+                            executablePath,
+                            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+                    }
+                }
+                catch (Exception error) when (IsFileError(error))
+                {
+                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory);
+                    PrintDiagnostics(
+                    [
+                        AtStart("E_IO", $"Could not save NativeAOT artifacts: {error.Message}", sourceFile)
+                    ],
+                    json: false);
+                    return 1;
+                }
+
+                Console.WriteLine($"Built native executable: {Path.GetFullPath(executablePath)}");
+                return 0;
+            }
+
             var build = await ExecAsync(
                 dotnet,
                 ["build", projectFile, "--nologo", "-v:q", "--configuration", "Release"],
@@ -222,6 +378,13 @@ internal static class Driver
         function.Parameters.Count == 0 &&
         (function.ReturnType.IsI32 || function.ReturnType.IsBool || function.ReturnType.IsText);
 
+    private static string NativeExecutableName(string rid) =>
+        rid.StartsWith("win-", StringComparison.Ordinal) ? "Generated.exe" : "Generated";
+
+    private static bool IsCurrentHostAotRid(string rid) =>
+        (rid.StartsWith("win-", StringComparison.Ordinal) && OperatingSystem.IsWindows()) ||
+        (rid.StartsWith("linux-", StringComparison.Ordinal) && OperatingSystem.IsLinux());
+
     private static string CreateBuildOutputDirectory(string sourceFile)
     {
         var sourceDirectory = Path.GetDirectoryName(sourceFile)!;
@@ -272,16 +435,23 @@ internal static class Driver
         }
     }
 
-    private static string ProjectFileContents(bool executable)
+    private static string ProjectFileContents(bool executable, string? aotRid)
     {
         var outputType = executable ? "Exe" : "Library";
         return
             "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
             "  <PropertyGroup>\n" +
             $"    <OutputType>{outputType}</OutputType>\n" +
+            "    <AssemblyName>Generated</AssemblyName>\n" +
             "    <TargetFramework>net10.0</TargetFramework>\n" +
+            "    <ServerGarbageCollection>false</ServerGarbageCollection>\n" +
             "    <ImplicitUsings>enable</ImplicitUsings>\n" +
             "    <Nullable>enable</Nullable>\n" +
+            (aotRid is null
+                ? string.Empty
+                : $"    <RuntimeIdentifier>{aotRid}</RuntimeIdentifier>\n" +
+                  "    <PublishAot>true</PublishAot>\n" +
+                  "    <SelfContained>true</SelfContained>\n") +
             "  </PropertyGroup>\n" +
             "</Project>\n";
     }
