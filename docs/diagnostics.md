@@ -9,8 +9,10 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_NAME_UNRESOLVED | Name is not declared in scope | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
 | E_MANIFEST | Package manifest file, schema, key, or value is invalid | Implemented |
+| E_DEPENDENCY | A local dependency path, package kind, package identity, or dependency graph is invalid | Implemented |
+| E_LOCK | A required dependency lock is missing, malformed, unreadable, or stale | Implemented |
 | E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
-| E_IMPORT_UNRESOLVED | An imported module or symbol does not exist in the package | Implemented |
+| E_IMPORT_UNRESOLVED | An imported module or symbol does not exist in the current package or a declared direct dependency | Implemented |
 | E_IMPORT_PRIVATE | An import names a declaration that is not public | Implemented |
 | E_IMPORT_CONFLICT | Imports are duplicated or conflict with another visible/local name | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, condition, comparison, or return type mismatch; also a function body that may fall through | Implemented for the pure type and control-flow slices |
@@ -32,6 +34,5 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent or has the wrong type | Implemented for `FsRead.read_text` |
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
 | E_RESOURCE_ESCAPE | Scoped resource escapes its lexical scope | Planned |
-| E_PACKAGE_LOCK_MISMATCH | Pinned content differs from lockfile | Planned |
 
 An unsupported feature is a compilation failure. It never passes as an unchecked construct. `lang test` compares each active fixture's complete ordered diagnostic-code list; pending fixtures are skipped.

@@ -33,7 +33,8 @@ internal sealed record ImportDecl(
     string Module,
     Token At,
     Token ModuleAt,
-    IReadOnlyList<ImportSymbol> Symbols);
+    IReadOnlyList<ImportSymbol> Symbols,
+    string? DependencyAlias = null);
 internal sealed record ParsedProgram(
     string Module,
     Token ModuleAt,

@@ -78,6 +78,11 @@ internal static class IntegrationTests
             ("imported union variants participate in exhaustive matching", TestPackageImportedUnionExhaustiveness),
             ("package imports are not transitive", TestPackageImportsAreNotTransitive),
             ("library packages build as managed libraries", TestPackageLibraryBuild),
+            ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
+            ("dependency graphs reject cycles, missing manifests, non-libraries, and duplicate identities", TestDependencyGraphDiagnostics),
+            ("dependency aliases enforce direct visibility and preserve module identity", TestDependencyAliasResolution),
+            ("dependency imports enforce public and existing symbols", TestDependencyImportDiagnostics),
+            ("dependency source roots and reparse paths stay inside package boundaries", TestDependencyFilesystemSafety),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("Text validation package builds and imported generic calls specialize correctly", TestTextValidationExample),
@@ -1628,6 +1633,35 @@ internal static class IntegrationTests
             "E_MANIFEST",
             "lang.toml");
 
+        foreach (var reservedPath in new[] { "../CON.lib", "../NUL" })
+        {
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                $"package-manifest-reserved-dependency-path-{reservedPath.Replace('/', '-').Replace('.', '-')}",
+                CliPackageManifest() + $"\n[dependencies]\nvalidation = \"{reservedPath}\"\n",
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                "E_MANIFEST",
+                "lang.toml");
+        }
+
+        var ordinaryDeviceLikePaths = await harness.WritePackageAsync(
+            "package-manifest-device-like-dependency-paths",
+            CliPackageManifest() + "\n[dependencies]\nconsole = \"../CONSOLE\"\nnullish = \"../NULL\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+            });
+        var ordinaryDeviceLikeCheck = await harness.InvokePackageDirectoryAsync(
+            "package-manifest-device-like-dependency-paths-check",
+            ordinaryDeviceLikePaths,
+            "check",
+            "--json");
+        AssertTrue(ordinaryDeviceLikeCheck.ExitCode != 0, Describe(ordinaryDeviceLikeCheck));
+        var ordinaryDeviceLikeDiagnostics = ParseDiagnosticSnapshots(ordinaryDeviceLikeCheck.StandardOutput);
+        AssertTrue(ordinaryDeviceLikeDiagnostics.Any(diagnostic => diagnostic.Code == "E_DEPENDENCY")
+            && ordinaryDeviceLikeDiagnostics.All(diagnostic => diagnostic.Code != "E_MANIFEST"),
+            $"Ordinary names adjacent to reserved device names must pass manifest path validation. {ordinaryDeviceLikeCheck.StandardOutput}");
+
         await ExpectPackageJsonDiagnosticAsync(
             harness,
             "package-manifest-library-entry",
@@ -1822,6 +1856,402 @@ internal static class IntegrationTests
         AssertTrue(File.Exists(artifact), $"Expected package library artifact at {artifact}. {Describe(build)}");
     }
 
+    private static async Task TestPathDependencyLockLifecycle(Harness harness)
+    {
+        const string consumerManifest = "name = \"lock-consumer\"\n"
+            + "version = \"0.1.0\"\n"
+            + "kind = \"cli\"\n"
+            + "source_root = \"src\"\n"
+            + "entry_module = \"app.main\"\n"
+            + "\n[dependencies]\n"
+            + "validation = \"../validation\"\n";
+        const string validationSource = "module text.validation;\n"
+            + "pub union NormalizeError { Empty }\n"
+            + "pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {\n"
+            + "    if input.length == 0 { return Err(NormalizeError.Empty); }\n"
+            + "    return Ok(input.trim());\n"
+            + "}\n"
+            + "pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {\n"
+            + "    return match value { Some(item) => Ok(item), None => Err(error) };\n"
+            + "}\n";
+        const string consumerSource = "module app.main;\n"
+            + "import validation::text.validation { NormalizeError, normalize, require };\n"
+            + "pub fn main() -> Text effects {} {\n"
+            + "    let normalized: Result<Text, NormalizeError> = normalize(\" ready \");\n"
+            + "    let candidate: Option<Text> = match normalized {\n"
+            + "        Ok(value) => Some(value),\n"
+            + "        Err(error) => None,\n"
+            + "    };\n"
+            + "    let required: Result<Text, NormalizeError> = require(candidate, NormalizeError.Empty);\n"
+            + "    return match required { Ok(value) => value, Err(error) => \"ready\" };\n"
+            + "}\n";
+        var packageRoot = await harness.WritePackageGraphAsync(
+            "path-dependency-lock",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(consumerManifest, new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = consumerSource
+                }),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("text-validation"), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = validationSource
+                })
+            });
+        var lockPath = Path.Combine(packageRoot, "lang.lock");
+
+        await AssertPathDependencyLockRequiredAsync(harness, "path-dependency-missing-lock", packageRoot);
+
+        var create = await harness.InvokePackageDirectoryAsync("path-dependency-lock-create", packageRoot, "lock");
+        AssertEqual(0, create.ExitCode, Describe(create));
+        AssertTrue(File.Exists(lockPath), "lang lock should create lang.lock for a package with dependencies.");
+        var firstLockBytes = await File.ReadAllBytesAsync(lockPath);
+        AssertTrue(!firstLockBytes.Contains((byte)'\r'), "lang.lock must use LF line endings without carriage returns.");
+        AssertTrue(firstLockBytes.Length > 0
+            && firstLockBytes[^1] == (byte)'\n'
+            && (firstLockBytes.Length == 1 || firstLockBytes[^2] != (byte)'\n'),
+            "lang.lock must end with exactly one LF byte.");
+        var firstLock = Encoding.UTF8.GetString(firstLockBytes);
+        using (var document = JsonDocument.Parse(firstLock))
+        {
+            var root = document.RootElement.GetProperty("root");
+            AssertEqual("../validation", root.GetProperty("dependencies").GetProperty("validation").GetString(),
+                "The root dependency path must be portable and relative to the package root.");
+            var packages = document.RootElement.GetProperty("packages");
+            AssertEqual(1, packages.GetArrayLength(), "The lock should contain the resolved validation package.");
+            var dependencyPath = packages[0].GetProperty("path").GetString() ?? string.Empty;
+            AssertEqual("../validation", dependencyPath, "Package paths in lang.lock should remain relative.");
+            AssertTrue(!Path.IsPathRooted(dependencyPath), "A lock package path must not be absolute.");
+        }
+        AssertTrue(!firstLock.Contains(packageRoot, StringComparison.OrdinalIgnoreCase)
+            && !firstLock.Contains(harness.TemporaryRoot, StringComparison.OrdinalIgnoreCase),
+            "The lock must not contain an absolute workspace path.");
+
+        var repeat = await harness.InvokePackageDirectoryAsync("path-dependency-lock-repeat", packageRoot, "lock");
+        AssertEqual(0, repeat.ExitCode, Describe(repeat));
+        var repeatedLockBytes = await File.ReadAllBytesAsync(lockPath);
+        AssertTrue(firstLockBytes.SequenceEqual(repeatedLockBytes), "Repeated lang lock should be byte-for-byte deterministic.");
+
+        await AssertDependencyConsumerWorksAsync(harness, "path-dependency-initial", packageRoot, "ready" + Environment.NewLine);
+
+        File.Delete(lockPath);
+        await AssertPathDependencyLockRequiredAsync(harness, "path-dependency-deleted-lock", packageRoot);
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("path-dependency-relock-missing", packageRoot, "lock"));
+        await AssertPackageCheckPassesAsync(harness, "path-dependency-missing-lock-repaired", packageRoot);
+
+        await File.WriteAllTextAsync(lockPath, "{\"schema_version\":99}\n");
+        await AssertPathDependencyLockRequiredAsync(harness, "path-dependency-malformed-lock", packageRoot);
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("path-dependency-relock-malformed", packageRoot, "lock"));
+        await AssertPackageCheckPassesAsync(harness, "path-dependency-malformed-lock-repaired", packageRoot);
+
+        var dependencySourcePath = Path.Combine(packageRoot, "..", "validation", "src", "text", "validation.lang");
+        var originalDependencySource = await File.ReadAllTextAsync(dependencySourcePath);
+        var changedDependencySource = originalDependencySource.Replace("input.trim()", "input", StringComparison.Ordinal);
+        AssertTrue(changedDependencySource != originalDependencySource, "The test must edit a dependency source file.");
+        await File.WriteAllTextAsync(dependencySourcePath, changedDependencySource);
+        await AssertPathDependencyLockRequiredAsync(harness, "path-dependency-stale-source", packageRoot);
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("path-dependency-relock-source", packageRoot, "lock"));
+
+        var relockedSource = await File.ReadAllTextAsync(lockPath);
+        AssertTrue(relockedSource != firstLock, "Updating after a dependency source edit should update the recorded content hash.");
+        await File.WriteAllTextAsync(dependencySourcePath, relockedSource.Length == 0
+            ? changedDependencySource
+            : changedDependencySource.Replace("\n", "\r\n", StringComparison.Ordinal));
+        var crlfCheck = await harness.InvokePackageDirectoryAsync("path-dependency-crlf-only", packageRoot, "check", "--json");
+        AssertEqual(0, crlfCheck.ExitCode, Describe(crlfCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(crlfCheck.StandardOutput).Length,
+            "A CRLF-only dependency source rewrite must preserve its lock hash.");
+
+        var ignoredOutput = Path.Combine(packageRoot, "out", "generated.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(ignoredOutput)!);
+        await File.WriteAllTextAsync(ignoredOutput, "generated output is not a package source");
+        var outputCheck = await harness.InvokePackageDirectoryAsync("path-dependency-out-edit", packageRoot, "check", "--json");
+        AssertEqual(0, outputCheck.ExitCode, Describe(outputCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(outputCheck.StandardOutput).Length,
+            "Editing out/ must not change the dependency content hash.");
+
+        await AssertDependencyConsumerWorksAsync(harness, "path-dependency-final", packageRoot, " ready " + Environment.NewLine);
+
+        var dependencyFree = await harness.WritePackageAsync(
+            "dependency-free-package-lock",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 42; }"
+            });
+        var noDependencies = await harness.InvokePackageDirectoryAsync("dependency-free-lock", dependencyFree, "lock");
+        AssertEqual(0, noDependencies.ExitCode, Describe(noDependencies));
+        AssertTrue(!File.Exists(Path.Combine(dependencyFree, "lang.lock")),
+            "A dependency-free package should not need or create a lockfile.");
+    }
+
+    private static async Task TestDependencyGraphDiagnostics(Harness harness)
+    {
+        var cycleRoot = await harness.WritePackageGraphAsync(
+            "dependency-cycle",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    LibraryPackageManifest("cycle-root") + "\n[dependencies]\nnext = \"../next\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/root.lang"] = "module root; pub fn value() -> i32 effects {} { return 1; }"
+                    }),
+                ["next"] = new PackageFixture(
+                    LibraryPackageManifest("cycle-next") + "\n[dependencies]\nback = \"../root\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/next.lang"] = "module next; pub fn value() -> i32 effects {} { return 2; }"
+                    })
+            });
+        await AssertPackageDiagnosticAsync(harness, "dependency-cycle-check", cycleRoot, "E_DEPENDENCY", "../next/lang.toml");
+
+        var missingManifestRoot = await harness.WritePackageGraphAsync(
+            "dependency-missing-manifest",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\nmissing = \"../missing\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                    })
+            });
+        Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(missingManifestRoot)!, "missing"));
+        await AssertPackageDiagnosticAsync(harness, "dependency-missing-manifest-check", missingManifestRoot, "E_DEPENDENCY", "lang.toml");
+
+        var cliDependencyRoot = await harness.WritePackageGraphAsync(
+            "dependency-must-be-library",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\napp = \"../app-dependency\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                    }),
+                ["app-dependency"] = new PackageFixture(
+                    CliPackageManifest(),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 2; }"
+                    })
+            });
+        await AssertPackageDiagnosticAsync(harness, "dependency-cli-child-check", cliDependencyRoot, "E_DEPENDENCY", "lang.toml");
+
+        const string duplicateManifest = "name = \"duplicate-library\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n";
+        var duplicateIdentityRoot = await harness.WritePackageGraphAsync(
+            "dependency-duplicate-name-version",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\nleft = \"../left\"\nright = \"../right\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                    }),
+                ["left"] = new PackageFixture(duplicateManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/left.lang"] = "module left; pub fn value() -> i32 effects {} { return 1; }"
+                    }),
+                ["right"] = new PackageFixture(duplicateManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/right.lang"] = "module right; pub fn value() -> i32 effects {} { return 2; }"
+                    })
+            });
+        await AssertPackageDiagnosticAsync(harness, "dependency-duplicate-identity-check", duplicateIdentityRoot, "E_DEPENDENCY", "lang.toml");
+    }
+
+    private static async Task TestDependencyAliasResolution(Harness harness)
+    {
+        var sharedModuleRoot = await harness.WritePackageGraphAsync(
+            "dependency-shared-module-identity",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"alias-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nalpha = \"../alpha\"\nbeta = \"../beta\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main;\n"
+                            + "import alpha::text.validation { alpha_token, read_alpha };\n"
+                            + "import beta::text.validation { beta_token, read_beta };\n"
+                            + "pub fn main() -> i32 effects {} { return read_alpha(alpha_token()) + read_beta(beta_token()); }\n"
+                    }),
+                ["alpha"] = new PackageFixture(LibraryPackageManifest("alpha-library"), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = "module text.validation;\n"
+                        + "pub struct Token { value: i32 }\n"
+                        + "pub fn alpha_token() -> Token effects {} { return Token { value: 20 }; }\n"
+                        + "pub fn read_alpha(value: Token) -> i32 effects {} { return value.value + 1; }\n"
+                }),
+                ["beta"] = new PackageFixture(LibraryPackageManifest("beta-library"), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = "module text.validation;\n"
+                        + "pub struct Token { value: i32 }\n"
+                        + "pub fn beta_token() -> Token effects {} { return Token { value: 20 }; }\n"
+                        + "pub fn read_beta(value: Token) -> i32 effects {} { return value.value + 1; }\n"
+                })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-shared-module-lock", sharedModuleRoot, "lock"));
+        var sharedModuleRun = await harness.InvokePackageDirectoryAsync("dependency-shared-module-run", sharedModuleRoot, "run");
+        AssertRunOutput("42" + Environment.NewLine, sharedModuleRun);
+
+        var crossIdentityRoot = await harness.WritePackageGraphAsync(
+            "dependency-module-identities-are-isolated",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"identity-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nalpha = \"../alpha\"\nbeta = \"../beta\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main;\n"
+                            + "import alpha::text.validation { alpha_token, read_alpha };\n"
+                            + "import beta::text.validation { beta_token };\n"
+                            + "pub fn main() -> i32 effects {} { return read_alpha(beta_token()); }\n"
+                    }),
+                ["alpha"] = new PackageFixture(LibraryPackageManifest("identity-alpha"), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = "module text.validation; pub struct Token { value: i32 }\n"
+                        + "pub fn alpha_token() -> Token effects {} { return Token { value: 1 }; }\n"
+                        + "pub fn read_alpha(value: Token) -> i32 effects {} { return value.value; }\n"
+                }),
+                ["beta"] = new PackageFixture(LibraryPackageManifest("identity-beta"), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/text/validation.lang"] = "module text.validation; pub struct Token { value: i32 }\n"
+                        + "pub fn beta_token() -> Token effects {} { return Token { value: 2 }; }\n"
+                })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-cross-identity-lock", crossIdentityRoot, "lock"));
+        await AssertPackageDiagnosticAsync(harness, "dependency-cross-identity-check", crossIdentityRoot, "E_TYPE_MISMATCH", "src/app/main.lang");
+
+        var transitiveRoot = await harness.WritePackageGraphAsync(
+            "dependency-alias-direct-only",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"direct-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nmid = \"../mid\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main;\n"
+                            + "import mid::mid.api { wrapped };\n"
+                            + "import foundation::foundation { answer };\n"
+                            + "pub fn main() -> i32 effects {} { return wrapped() + answer(); }\n"
+                    }),
+                ["mid"] = new PackageFixture(LibraryPackageManifest("middle-library") + "\n[dependencies]\nfoundation = \"../foundation\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/mid/api.lang"] = "module mid.api; import foundation::foundation { answer }; pub fn wrapped() -> i32 effects {} { return answer(); }"
+                    }),
+                ["foundation"] = new PackageFixture(LibraryPackageManifest("foundation-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/foundation.lang"] = "module foundation; pub fn answer() -> i32 effects {} { return 21; }"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-transitive-lock", transitiveRoot, "lock"));
+        await AssertPackageDiagnosticAsync(harness, "dependency-transitive-alias-check", transitiveRoot, "E_IMPORT_UNRESOLVED", "src/app/main.lang");
+    }
+
+    private static async Task TestDependencyImportDiagnostics(Harness harness)
+    {
+        var packageRoot = await harness.WritePackageGraphAsync(
+            "dependency-import-visibility",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"visibility-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nvalidation = \"../validation\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main;\n"
+                            + "import validation::text.validation { hidden, absent };\n"
+                            + "pub fn main() -> i32 effects {} { return hidden() + absent(); }\n"
+                    }),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("visibility-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/text/validation.lang"] = "module text.validation;\n"
+                            + "pub fn present() -> i32 effects {} { return 1; }\n"
+                            + "fn hidden() -> i32 effects {} { return 2; }\n"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-import-visibility-lock", packageRoot, "lock"));
+        var visibility = await harness.InvokePackageDirectoryAsync("dependency-import-visibility-check", packageRoot, "check", "--json");
+        AssertEqual(1, visibility.ExitCode, Describe(visibility));
+        var visibilityDiagnostics = ParseDiagnosticSnapshots(visibility.StandardOutput);
+        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_IMPORT_PRIVATE"),
+            $"A private declaration in a path dependency must be rejected. {visibility.StandardOutput}");
+        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_IMPORT_UNRESOLVED"),
+            $"A missing declaration in a path dependency must be rejected. {visibility.StandardOutput}");
+
+        var malformedAliasRoot = await harness.WritePackageGraphAsync(
+            "dependency-malformed-alias-import",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"malformed-import-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nvalidation = \"../validation\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; import 42::text.validation { present }; pub fn main() -> i32 effects {} { return present(); }"
+                    }),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("malformed-import-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/text/validation.lang"] = "module text.validation; pub fn present() -> i32 effects {} { return 1; }"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-malformed-alias-lock", malformedAliasRoot, "lock"));
+        await AssertPackageDiagnosticAsync(harness, "dependency-malformed-alias-check", malformedAliasRoot, "E_SYNTAX", "src/app/main.lang");
+    }
+
+    private static async Task TestDependencyFilesystemSafety(Harness harness)
+    {
+        var invalidSourceRoot = await harness.WritePackageGraphAsync(
+            "dependency-source-root-escape",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"source-root-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    + "\n[dependencies]\nvalidation = \"../validation\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                    }),
+                ["validation"] = new PackageFixture(
+                    "name = \"escaped-source-root\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"../outside\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal))
+            });
+        await AssertPackageDiagnosticAsync(harness, "dependency-source-root-escape-check", invalidSourceRoot, "E_MANIFEST", "../validation/lang.toml");
+
+        var symlinkPackage = await harness.WritePackageAsync(
+            "package-source-root-symlink",
+            CliPackageManifest().Replace("source_root = \"src\"", "source_root = \"src/link\"", StringComparison.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        var sourceDirectoryLink = Path.Combine(symlinkPackage, "src", "link");
+        var externalSourceDirectory = Path.Combine(harness.TemporaryRoot, "external-source-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(externalSourceDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(externalSourceDirectory, "main.lang"),
+            "module app.main; pub fn main() -> i32 effects {} { return 1; }");
+        try
+        {
+            Directory.CreateSymbolicLink(sourceDirectoryLink, externalSourceDirectory);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Console.WriteLine("SKIP source_root reparse-point subcase: this host does not permit directory symbolic links.");
+            return;
+        }
+
+        await AssertPackageDiagnosticAsync(harness, "package-source-root-symlink-check", symlinkPackage, "E_MANIFEST", "lang.toml");
+    }
+
     private static async Task TestPackageAotCommandValidation(Harness harness)
     {
         const string main = "module app.main; pub fn main() -> i32 effects {} { return 41; }";
@@ -1859,8 +2289,25 @@ internal static class IntegrationTests
     private static async Task TestMaintainedPackageExample(Harness harness)
     {
         var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "library-package");
-        var check = await harness.InvokePackageDirectoryAsync("maintained-package-check", packageRoot, "check");
+        var manifest = await File.ReadAllTextAsync(Path.Combine(packageRoot, "lang.toml"));
+        var normalizedManifest = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var source = await File.ReadAllTextAsync(Path.Combine(packageRoot, "src", "app", "main.lang"));
+        AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
+            "The maintained CLI package must resolve validation from its sibling package path.");
+        AssertTrue(source.Contains("import validation::text.validation { NormalizeError, normalize, require };", StringComparison.Ordinal),
+            "The maintained CLI must import the validation and inferred generic APIs through its dependency alias.");
+        AssertTrue(!File.Exists(Path.Combine(packageRoot, "src", "text", "validation.lang")),
+            "The consumer must not contain a copied validation source module.");
+        AssertTrue(File.Exists(Path.Combine(packageRoot, "..", "text-validation", "src", "text", "validation.lang")),
+            "The imported validation source should live in the sibling package.");
+        AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
+            "The maintained path-dependent package should include its generated lockfile.");
+
+        var check = await harness.InvokePackageDirectoryAsync("maintained-package-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+        var build = await harness.InvokePackageDirectoryAsync("maintained-package-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
         var run = await harness.InvokePackageDirectoryAsync("maintained-package-run", packageRoot, "run");
         AssertRunOutput("ready" + Environment.NewLine, run);
     }
@@ -2022,6 +2469,85 @@ internal static class IntegrationTests
             $"A generic main function must not select the executable entrypoint. {Describe(genericMainRun)}");
     }
 
+    private static async Task AssertDependencyConsumerWorksAsync(
+        Harness harness,
+        string caseName,
+        string packageRoot,
+        string expectedOutput)
+    {
+        var check = await harness.InvokePackageDirectoryAsync($"{caseName}-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+        var build = await harness.InvokePackageDirectoryAsync($"{caseName}-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        var run = await harness.InvokePackageDirectoryAsync($"{caseName}-run", packageRoot, "run");
+        AssertRunOutput(expectedOutput, run);
+    }
+
+    private static async Task AssertPackageCheckPassesAsync(Harness harness, string caseName, string packageRoot)
+    {
+        var check = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+    }
+
+    private static async Task AssertPathDependencyLockRequiredAsync(Harness harness, string caseName, string packageRoot)
+    {
+        foreach (var command in new[] { "check", "build", "run" })
+        {
+            var result = command == "check"
+                ? await harness.InvokePackageDirectoryAsync($"{caseName}-{command}", packageRoot, command, "--json")
+                : await harness.InvokePackageDirectoryAsync($"{caseName}-{command}", packageRoot, command);
+            AssertTrue(result.ExitCode != 0, $"{command} unexpectedly accepted an invalid dependency lock. {Describe(result)}");
+            if (command == "check")
+            {
+                var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
+                AssertTrue(diagnostics.Any(diagnostic => diagnostic.Code == "E_LOCK"),
+                    $"check should report E_LOCK for a missing, malformed, or stale lock. {result.StandardOutput}");
+                AssertEqual(string.Empty, result.StandardError, Describe(result));
+            }
+            else
+            {
+                AssertEqual(string.Empty, result.StandardOutput, Describe(result));
+                AssertTrue(result.StandardError.Contains("E_LOCK", StringComparison.Ordinal),
+                    $"{command} should report E_LOCK for a missing, malformed, or stale lock. {Describe(result)}");
+            }
+            AssertTrue(!result.StandardError.Contains("Unhandled exception", StringComparison.Ordinal)
+                && !result.StandardError.Contains(" at ", StringComparison.Ordinal),
+                $"A lock failure should be reported as a diagnostic. {Describe(result)}");
+        }
+    }
+
+    private static void AssertLockCommandSucceeded(ProcessResult result)
+    {
+        AssertEqual(0, result.ExitCode, Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        AssertTrue(result.StandardOutput.StartsWith("Wrote package lock: ", StringComparison.Ordinal), Describe(result));
+    }
+
+    private static async Task AssertPackageDiagnosticAsync(
+        Harness harness,
+        string caseName,
+        string packageRoot,
+        string expectedCode,
+        string expectedFile)
+    {
+        var result = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, "check", "--json");
+        AssertTrue(result.ExitCode != 0, $"Invalid package unexpectedly succeeded. {Describe(result)}");
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        AssertEqual(1, document.RootElement.GetProperty("schemaVersion").GetInt32(),
+            "Package diagnostics must use JSON schema version 1.");
+        var expectedPath = Path.GetFullPath(Path.Combine(packageRoot, expectedFile));
+        var found = document.RootElement.GetProperty("diagnostics").EnumerateArray().Any(diagnostic =>
+            diagnostic.GetProperty("code").GetString() == expectedCode
+            && Path.GetFullPath(diagnostic.GetProperty("file").GetString() ?? string.Empty) == expectedPath
+            && diagnostic.GetProperty("severity").GetString() == "error"
+            && diagnostic.GetProperty("range").GetProperty("startLine").GetInt32() > 0
+            && diagnostic.GetProperty("range").GetProperty("startColumn").GetInt32() > 0);
+        AssertTrue(found, $"Expected {expectedCode} in {expectedPath}. {result.StandardOutput}");
+    }
+
     private static string CliPackageManifest(string entryModule = "app.main") =>
         "name = \"harness-package\"\n" +
         "version = \"0.1.0\"\n" +
@@ -2029,8 +2555,8 @@ internal static class IntegrationTests
         "source_root = \"src\"\n" +
         $"entry_module = \"{entryModule}\"\n";
 
-    private static string LibraryPackageManifest() =>
-        "name = \"harness-library\"\n" +
+    private static string LibraryPackageManifest(string name = "harness-library") =>
+        $"name = \"{name}\"\n" +
         "version = \"0.1.0\"\n" +
         "kind = \"lib\"\n" +
         "source_root = \"src\"\n";
@@ -2459,6 +2985,32 @@ internal static class IntegrationTests
             return packageRoot;
         }
 
+        public async Task<string> WritePackageGraphAsync(
+            string caseName,
+            IReadOnlyDictionary<string, PackageFixture> packages)
+        {
+            var workspaceRoot = Path.Combine(temporaryRoot, $"{caseName}-{Guid.NewGuid():N}", "workspace");
+            Directory.CreateDirectory(workspaceRoot);
+            foreach (var package in packages.OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                var relativeRoot = package.Key.Replace('/', Path.DirectorySeparatorChar);
+                var packageRoot = Path.GetFullPath(Path.Combine(workspaceRoot, relativeRoot));
+                Directory.CreateDirectory(Path.Combine(packageRoot, "src"));
+                await File.WriteAllTextAsync(Path.Combine(packageRoot, "lang.toml"), package.Value.Manifest);
+                LastSourcePath = Path.Combine(packageRoot, "lang.toml");
+                foreach (var sourceFile in package.Value.SourceFiles.OrderBy(file => file.Key, StringComparer.Ordinal))
+                {
+                    var relativePath = sourceFile.Key.Replace('/', Path.DirectorySeparatorChar);
+                    var path = Path.GetFullPath(Path.Combine(packageRoot, relativePath));
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    await File.WriteAllTextAsync(path, sourceFile.Value);
+                    LastSourcePath = path;
+                }
+            }
+
+            return Path.Combine(workspaceRoot, "root");
+        }
+
         public string TemporaryRoot => temporaryRoot;
 
         public Task<ProcessResult> InvokeAsync(string caseName, string command, string source, params string[] additionalArguments) =>
@@ -2591,6 +3143,7 @@ internal static class IntegrationTests
         }
     }
 
+    private sealed record PackageFixture(string Manifest, IReadOnlyDictionary<string, string> SourceFiles);
     private sealed record DiagnosticSnapshot(string Code, string Message, string File, int StartLine, int StartColumn, int EndLine, int EndColumn);
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 

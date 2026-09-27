@@ -25,6 +25,9 @@ internal static class Driver
         if (args.Length == 1 && args[0] == "test")
             return TestFixtures();
 
+        if (args.Length != 0 && args[0] == "lock")
+            return RunLock(args);
+
         if (args.Length < 2)
         {
             PrintUsage();
@@ -138,30 +141,79 @@ internal static class Driver
         return await BuildCheckedAsync(result.Program!, file, args[0], isAotBuild ? rid : null);
     }
 
-    private static async Task<int> RunPackageAsync(string command, string packageDirectory, bool json, string? aotRid)
+    private static int RunLock(string[] args)
     {
-        PackageLoadResult loaded;
+        if (args.Length != 2)
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
         try
         {
-            loaded = PackageLoader.Load(packageDirectory);
+            packageDirectory = Path.GetFullPath(args[1]);
         }
         catch (Exception error) when (IsFileError(error))
         {
             PrintDiagnostics(
             [
-                AtStart("E_IO", $"Could not load package directory: {error.Message}", packageDirectory)
+                AtStart("E_IO", $"Invalid package directory: {error.Message}", args[1])
             ],
-            json);
+            json: false);
             return 1;
         }
 
-        if (loaded.Diagnostics.Count != 0)
+        var resolved = PackageLoader.ResolveGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
         {
-            PrintDiagnostics(loaded.Diagnostics, json);
+            List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
+                ? resolved.Diagnostics
+                : [AtStart("E_DEPENDENCY", "Could not resolve package dependency graph", packageDirectory)];
+            PrintDiagnostics(diagnostics, json: false);
             return 1;
         }
 
-        var package = loaded.Package!;
+        var graph = resolved.Graph!;
+        var writeDiagnostics = PackageLock.Write(graph);
+        if (writeDiagnostics.Count != 0)
+        {
+            PrintDiagnostics(writeDiagnostics, json: false);
+            return 1;
+        }
+
+        if (graph.Nodes.Any(node => node.Package.Manifest.Dependencies.Count != 0))
+            Console.WriteLine($"Wrote package lock: {Path.Combine(packageDirectory, "lang.lock")}");
+        else
+            Console.WriteLine($"No dependencies to lock for package '{graph.Root.Package.Manifest.Name}'.");
+
+        return 0;
+    }
+
+    private static async Task<int> RunPackageAsync(string command, string packageDirectory, bool json, string? aotRid)
+    {
+        var resolved = PackageLoader.ResolveGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
+                ? resolved.Diagnostics
+                : [AtStart("E_DEPENDENCY", "Could not resolve package dependency graph", packageDirectory)];
+            PrintDiagnostics(diagnostics, json);
+            return 1;
+        }
+
+        var graph = resolved.Graph!;
+        var package = graph.Root.Package;
+        if (package.Manifest.Dependencies.Count != 0)
+        {
+            var lockDiagnostics = PackageLock.Validate(graph);
+            if (lockDiagnostics.Count != 0)
+            {
+                PrintDiagnostics(lockDiagnostics, json);
+                return 1;
+            }
+        }
+
         if (aotRid is not null && package.Manifest.IsLibrary)
         {
             return ReportBuildTargetError(
@@ -169,7 +221,7 @@ internal static class Driver
                 package.ManifestFile);
         }
 
-        var parsed = ParsePackageSources(package);
+        var parsed = ParsePackageSources(graph);
         if (parsed.Diagnostics.Count != 0)
         {
             PrintDiagnostics(parsed.Diagnostics, json);
@@ -178,9 +230,12 @@ internal static class Driver
 
         var entryModule = package.Manifest.EntryModule;
         var entryModuleExists = entryModule is null ||
-            parsed.Modules.Any(module => string.Equals(module.Module, entryModule, StringComparison.Ordinal));
+            parsed.Modules.Any(module =>
+                string.Equals(module.PackageId, graph.Root.Id, StringComparison.Ordinal) &&
+                string.Equals(module.Program.Module, entryModule, StringComparison.Ordinal));
         var checkedPackage = Compiler.CheckPackage(
             parsed.Modules,
+            graph.Root.Id,
             entryModuleExists ? entryModule : null);
         if (checkedPackage.Diagnostics.Count != 0 || !entryModuleExists)
         {
@@ -212,68 +267,56 @@ internal static class Driver
             package);
     }
 
-    private static (List<ParsedProgram> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
-        LoadedPackage package)
+    private static (List<PackageModuleInput> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
+        PackageDependencyGraph graph)
     {
-        var modules = new List<ParsedProgram>(package.Sources.Count);
+        var sourceCount = graph.Nodes.Sum(node => node.Package.Sources.Count);
+        var modules = new List<PackageModuleInput>(sourceCount);
         var diagnostics = new List<Diagnostic>();
-        foreach (var source in package.Sources)
+        foreach (var package in graph.Nodes)
         {
-            string text;
-            try
+            foreach (var source in package.Package.Sources)
             {
-                text = File.ReadAllText(source.File, new UTF8Encoding(false, true));
-            }
-            catch (DecoderFallbackException error)
-            {
-                diagnostics.Add(AtStart("E_IO", $"Source file is not valid UTF-8: {error.Message}", source.File));
-                continue;
-            }
-            catch (Exception error) when (IsFileError(error))
-            {
-                diagnostics.Add(AtStart("E_IO", $"Could not read source file: {error.Message}", source.File));
-                continue;
-            }
+                var sourceDiagnostics = new List<Diagnostic>();
+                var tokens = Lexer.Scan(source.Text, source.File, sourceDiagnostics);
+                ParsedProgram? parsed = null;
+                if (sourceDiagnostics.Count == 0 && (tokens.Count == 0 || tokens[0].Text != "module"))
+                {
+                    var at = tokens.Count == 0
+                        ? new Range(1, 1, 1, 1)
+                        : tokens[0].Range;
+                    sourceDiagnostics.Add(new Diagnostic(
+                        "E_MODULE_PATH",
+                        $"Source path module '{source.Module}' requires a matching module declaration",
+                        source.File,
+                        at));
+                }
+                else if (sourceDiagnostics.Count == 0)
+                    parsed = new Parser(tokens, source.File, sourceDiagnostics).Parse();
 
-            var sourceDiagnostics = new List<Diagnostic>();
-            var tokens = Lexer.Scan(text, source.File, sourceDiagnostics);
-            ParsedProgram? parsed = null;
-            if (sourceDiagnostics.Count == 0 && (tokens.Count == 0 || tokens[0].Text != "module"))
-            {
-                var at = tokens.Count == 0
-                    ? new Range(1, 1, 1, 1)
-                    : tokens[0].Range;
-                sourceDiagnostics.Add(new Diagnostic(
-                    "E_MODULE_PATH",
-                    $"Source path module '{source.Module}' requires a matching module declaration",
-                    source.File,
-                    at));
+                if (parsed is null && sourceDiagnostics.Count == 0)
+                    sourceDiagnostics.Add(AtStart("E_SYNTAX", "Could not parse package module", source.File));
+
+                if (parsed is not null && !string.Equals(parsed.Module, source.Module, StringComparison.Ordinal))
+                {
+                    sourceDiagnostics.Add(new Diagnostic(
+                        "E_MODULE_PATH",
+                        $"Module header '{parsed.Module}' does not match source path module '{source.Module}'",
+                        parsed.ModuleAt.File,
+                        parsed.ModuleAt.Range));
+                }
+
+                diagnostics.AddRange(sourceDiagnostics);
+                if (parsed is not null)
+                    modules.Add(new PackageModuleInput(package.Id, parsed, package.DependencyIds));
             }
-            else if (sourceDiagnostics.Count == 0)
-                parsed = new Parser(tokens, source.File, sourceDiagnostics).Parse();
-
-            if (parsed is null && sourceDiagnostics.Count == 0)
-                sourceDiagnostics.Add(AtStart("E_SYNTAX", "Could not parse package module", source.File));
-
-            if (parsed is not null && !string.Equals(parsed.Module, source.Module, StringComparison.Ordinal))
-            {
-                sourceDiagnostics.Add(new Diagnostic(
-                    "E_MODULE_PATH",
-                    $"Module header '{parsed.Module}' does not match source path module '{source.Module}'",
-                    parsed.ModuleAt.File,
-                    parsed.ModuleAt.Range));
-            }
-
-            diagnostics.AddRange(sourceDiagnostics);
-            if (parsed is not null)
-                modules.Add(parsed);
         }
 
         return (modules, diagnostics);
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang test");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang test");
 
     private static int ReportBuildTargetError(string message, string file)
     {

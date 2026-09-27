@@ -5,21 +5,72 @@ internal sealed record PackageManifest(
     string Version,
     string Kind,
     string SourceRoot,
-    string? EntryModule)
+    string? EntryModule,
+    IReadOnlyList<PackageDependency> Dependencies)
 {
     public bool IsLibrary => Kind == "lib";
 }
 
-internal sealed record PackageSource(string Module, string File);
+internal sealed record PackageDependency(string Alias, string Path);
+
+internal sealed record PackageSource(string Module, string File, string Text);
 
 internal sealed record LoadedPackage(
     string Root,
     string ManifestFile,
     string SourceDirectory,
     PackageManifest Manifest,
+    string ManifestText,
     IReadOnlyList<PackageSource> Sources);
 
 internal sealed record PackageLoadResult(LoadedPackage? Package, List<Diagnostic> Diagnostics);
+
+internal sealed record ResolvedPackage(
+    string Id,
+    string RelativePath,
+    LoadedPackage Package,
+    IReadOnlyDictionary<string, string> DependencyIds);
+
+internal sealed record PackageDependencyGraph(
+    ResolvedPackage Root,
+    IReadOnlyList<ResolvedPackage> Nodes,
+    IReadOnlyDictionary<string, ResolvedPackage> ById);
+
+internal sealed record PackageGraphResult(PackageDependencyGraph? Graph, List<Diagnostic> Diagnostics);
+
+internal static class PortablePackagePath
+{
+    private const string InvalidSegmentCharacters = "<>:\"/\\|?*";
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL"
+    };
+
+    public static bool IsValidRelativeSegment(string segment)
+    {
+        if (segment.Length == 0 || segment == ".")
+            return false;
+        if (segment == "..")
+            return true;
+        if (segment.EndsWith('.') || segment.EndsWith(' ') ||
+            segment.Any(character => char.IsControl(character) || InvalidSegmentCharacters.Contains(character)))
+            return false;
+
+        return !IsReservedDeviceName(segment);
+    }
+
+    private static bool IsReservedDeviceName(string segment)
+    {
+        var deviceName = segment.Split('.')[0].TrimEnd(' ');
+        if (ReservedDeviceNames.Contains(deviceName))
+            return true;
+
+        return deviceName.Length == 4 &&
+               (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+                deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+               deviceName[3] is >= '1' and <= '9';
+    }
+}
 
 internal static class PackageLoader
 {
@@ -32,11 +83,26 @@ internal static class PackageLoader
         "entry_module"
     };
 
+    private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
+    {
+        "await", "false", "if", "match", "null", "true", "with"
+    };
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     public static PackageLoadResult Load(string packageDirectory)
     {
         var diagnostics = new List<Diagnostic>();
         var root = Path.GetFullPath(packageDirectory);
         var manifestFile = Path.Combine(root, "lang.toml");
+
+        if (Directory.Exists(root) && HasReparsePointOnPath(root))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "Package directories cannot be reached through a symbolic link or reparse point",
+                manifestFile));
+            return new PackageLoadResult(null, diagnostics);
+        }
 
         if (!File.Exists(manifestFile))
         {
@@ -69,17 +135,18 @@ internal static class PackageLoader
             return new PackageLoadResult(null, diagnostics);
         }
 
-        var values = ParseManifest(manifestText, manifestFile, diagnostics);
-        ValidateManifest(values, manifestFile, diagnostics);
+        var parsedManifest = ParseManifest(manifestText, manifestFile, diagnostics);
+        ValidateManifest(parsedManifest.Values, manifestFile, diagnostics);
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
         var manifest = new PackageManifest(
-            values["name"],
-            values["version"],
-            values["kind"],
-            values["source_root"],
-            values.GetValueOrDefault("entry_module"));
+            parsedManifest.Values["name"],
+            parsedManifest.Values["version"],
+            parsedManifest.Values["kind"],
+            parsedManifest.Values["source_root"],
+            parsedManifest.Values.GetValueOrDefault("entry_module"),
+            parsedManifest.Dependencies);
 
         string sourceDirectory;
         try
@@ -126,19 +193,205 @@ internal static class PackageLoader
             return new PackageLoadResult(null, diagnostics);
 
         return new PackageLoadResult(
-            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, sources),
+            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, manifestText, sources),
+            diagnostics);
+    }
+
+    public static PackageGraphResult ResolveGraph(string packageDirectory)
+    {
+        PackageLoadResult rootLoad;
+        try
+        {
+            rootLoad = Load(packageDirectory);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            return new PackageGraphResult(null,
+            [
+                AtStart("E_IO", $"Could not load package directory: {error.Message}", packageDirectory)
+            ]);
+        }
+
+        if (rootLoad.Diagnostics.Count != 0 || rootLoad.Package is null)
+            return new PackageGraphResult(null, rootLoad.Diagnostics);
+
+        var root = rootLoad.Package;
+        var diagnostics = new List<Diagnostic>();
+        var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var completed = new Dictionary<string, ResolvedPackage>(pathComparer);
+        var loadedByPath = new Dictionary<string, LoadedPackage>(pathComparer)
+        {
+            [root.Root] = root
+        };
+        var active = new List<(LoadedPackage Package, string? ViaAlias)>();
+        var identities = new Dictionary<(string Name, string Version), string>();
+        identities[(root.Manifest.Name, root.Manifest.Version)] = root.Root;
+
+        ResolvedPackage? Visit(LoadedPackage package, string? viaAlias, string edgeFile)
+        {
+            var activeIndex = active.FindIndex(frame => pathComparer.Equals(frame.Package.Root, package.Root));
+            if (activeIndex >= 0)
+            {
+                var chain = new List<string> { active[activeIndex].Package.Manifest.Name };
+                for (var index = activeIndex + 1; index < active.Count; index++)
+                {
+                    chain.Add($"alias '{active[index].ViaAlias}'");
+                    chain.Add(active[index].Package.Manifest.Name);
+                }
+
+                chain.Add($"alias '{viaAlias}'");
+                chain.Add(package.Manifest.Name);
+                diagnostics.Add(AtStart(
+                    "E_DEPENDENCY",
+                    $"Dependency cycle: {string.Join(" -> ", chain)}",
+                    edgeFile));
+                return null;
+            }
+
+            if (completed.TryGetValue(package.Root, out var existing))
+                return existing;
+
+            active.Add((package, viaAlias));
+            var dependencyIds = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var dependency in package.Manifest.Dependencies.OrderBy(item => item.Alias, StringComparer.Ordinal))
+            {
+                string targetRoot;
+                try
+                {
+                    targetRoot = Path.GetFullPath(Path.Combine(
+                        package.Root,
+                        dependency.Path.Replace('/', Path.DirectorySeparatorChar)));
+                    if (HasReparsePointOnPath(targetRoot))
+                    {
+                        diagnostics.Add(AtStart(
+                            "E_DEPENDENCY",
+                            $"Dependency '{dependency.Alias}' resolves through a symbolic link or reparse point",
+                            package.ManifestFile));
+                        continue;
+                    }
+                }
+                catch (Exception error) when (IsFileError(error))
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Could not resolve dependency '{dependency.Alias}': {error.Message}",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                if (!Directory.Exists(targetRoot))
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Dependency '{dependency.Alias}' directory '{dependency.Path}' does not exist",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                if (!loadedByPath.TryGetValue(targetRoot, out var childPackage))
+                {
+                    var childManifest = Path.Combine(targetRoot, "lang.toml");
+                    if (!File.Exists(childManifest))
+                    {
+                        diagnostics.Add(AtStart(
+                            "E_DEPENDENCY",
+                            $"Dependency '{dependency.Alias}' directory '{dependency.Path}' has no lang.toml manifest",
+                            package.ManifestFile));
+                        continue;
+                    }
+
+                    PackageLoadResult childLoad;
+                    try
+                    {
+                        childLoad = Load(targetRoot);
+                    }
+                    catch (Exception error) when (IsFileError(error))
+                    {
+                        diagnostics.Add(AtStart(
+                            "E_DEPENDENCY",
+                            $"Could not load dependency '{dependency.Alias}': {error.Message}",
+                            package.ManifestFile));
+                        continue;
+                    }
+
+                    if (childLoad.Diagnostics.Count != 0 || childLoad.Package is null)
+                    {
+                        diagnostics.AddRange(childLoad.Diagnostics);
+                        continue;
+                    }
+
+                    childPackage = childLoad.Package;
+                    loadedByPath.Add(childPackage.Root, childPackage);
+                }
+
+                if (!childPackage.Manifest.IsLibrary)
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Dependency '{dependency.Alias}' must point to a package with kind = \"lib\"",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                var identity = (childPackage.Manifest.Name, childPackage.Manifest.Version);
+                if (identities.TryGetValue(identity, out var otherRoot) && !pathComparer.Equals(otherRoot, childPackage.Root))
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Package '{identity.Name}' version '{identity.Version}' resolves from multiple package roots",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                identities[identity] = childPackage.Root;
+                var child = Visit(childPackage, dependency.Alias, package.ManifestFile);
+                if (child is not null)
+                    dependencyIds.Add(dependency.Alias, child.Id);
+            }
+
+            active.RemoveAt(active.Count - 1);
+            var resolved = new ResolvedPackage(
+                package.Root,
+                NormalizeRelative(Path.GetRelativePath(root.Root, package.Root)),
+                package,
+                dependencyIds);
+            completed.Add(package.Root, resolved);
+            return resolved;
+        }
+
+        var resolvedRoot = Visit(root, null, root.ManifestFile);
+        if (diagnostics.Count != 0 || resolvedRoot is null)
+            return new PackageGraphResult(null, diagnostics);
+
+        var nodes = completed.Values
+            .OrderBy(node => node.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        var byId = new Dictionary<string, ResolvedPackage>(StringComparer.Ordinal);
+        foreach (var node in nodes)
+            byId.Add(node.Id, node);
+
+        return new PackageGraphResult(
+            new PackageDependencyGraph(resolvedRoot, nodes, byId),
             diagnostics);
     }
 
     public static Diagnostic ModulePathError(string message, string file) =>
         AtStart("E_MODULE_PATH", message, file);
 
-    private static Dictionary<string, string> ParseManifest(
+    private sealed record ParsedManifest(
+        Dictionary<string, string> Values,
+        IReadOnlyList<PackageDependency> Dependencies);
+
+    private static ParsedManifest ParseManifest(
         string text,
         string file,
         List<Diagnostic> diagnostics)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var dependencies = new List<PackageDependency>();
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inDependencies = false;
+        var dependenciesSeen = false;
         using var reader = new StringReader(text);
         var lineNumber = 0;
         while (reader.ReadLine() is { } line)
@@ -148,12 +401,36 @@ internal static class PackageLoader
             if (trimmed.Length == 0 || trimmed.StartsWith('#'))
                 continue;
 
+            if (trimmed.StartsWith('['))
+            {
+                if (trimmed == "[dependencies]" && !dependenciesSeen)
+                {
+                    inDependencies = true;
+                    dependenciesSeen = true;
+                    continue;
+                }
+
+                var sectionMessage = trimmed == "[dependencies]"
+                    ? "The [dependencies] section may appear only once"
+                    : $"Unknown manifest section '{trimmed}'";
+                diagnostics.Add(AtLine("E_MANIFEST", sectionMessage, file, lineNumber));
+                continue;
+            }
+
+            if (dependenciesSeen && !inDependencies)
+            {
+                diagnostics.Add(AtLine("E_MANIFEST", "No manifest assignments may follow the [dependencies] section", file, lineNumber));
+                continue;
+            }
+
             var equals = trimmed.IndexOf('=');
             if (equals <= 0)
             {
                 diagnostics.Add(AtLine(
                     "E_MANIFEST",
-                    "Expected a simple key = \"value\" assignment",
+                    inDependencies
+                        ? "Expected a dependency alias = \"relative/path\" assignment"
+                        : "Expected a simple key = \"value\" assignment",
                     file,
                     lineNumber));
                 continue;
@@ -161,6 +438,48 @@ internal static class PackageLoader
 
             var key = trimmed[..equals].Trim();
             var rawValue = trimmed[(equals + 1)..].Trim();
+            if (inDependencies)
+            {
+                if (!IsDependencyAlias(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", "Dependency aliases must be importable language identifiers", file, lineNumber));
+                    continue;
+                }
+
+                if (!aliases.Add(key))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Duplicate dependency alias '{key}' (aliases are case-insensitive)",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                if (!TryReadStringValue(rawValue, out var dependencyPath))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Value for dependency '{key}' must be a simple double-quoted string without escapes or control characters",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                if (!IsDependencyRelativePath(dependencyPath))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Dependency path for '{key}' must be relative, use forward slashes, and contain no empty or dot segments",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                dependencies.Add(new PackageDependency(key, dependencyPath));
+                continue;
+            }
+
             if (!IsKey(key))
             {
                 diagnostics.Add(AtLine("E_MANIFEST", "Manifest keys must be simple lowercase identifiers", file, lineNumber));
@@ -179,7 +498,7 @@ internal static class PackageLoader
                 continue;
             }
 
-            if (rawValue.Length < 2 || rawValue[0] != '"' || rawValue[^1] != '"')
+            if (!TryReadStringValue(rawValue, out var value))
             {
                 diagnostics.Add(AtLine(
                     "E_MANIFEST",
@@ -189,21 +508,10 @@ internal static class PackageLoader
                 continue;
             }
 
-            var value = rawValue[1..^1];
-            if (value.Contains('"') || value.Contains('\\') || value.Any(char.IsControl))
-            {
-                diagnostics.Add(AtLine(
-                    "E_MANIFEST",
-                    $"Value for '{key}' contains an unsupported escape or control character",
-                    file,
-                    lineNumber));
-                continue;
-            }
-
             values.Add(key, value);
         }
 
-        return values;
+        return new ParsedManifest(values, dependencies);
     }
 
     private static void ValidateManifest(
@@ -327,7 +635,23 @@ internal static class PackageLoader
                 continue;
             }
 
-            sources.Add(new PackageSource(module, item.File));
+            string sourceText;
+            try
+            {
+                sourceText = File.ReadAllText(item.File, StrictUtf8);
+            }
+            catch (DecoderFallbackException error)
+            {
+                diagnostics.Add(AtStart("E_IO", $"Source file is not valid UTF-8: {error.Message}", item.File));
+                continue;
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(AtStart($"E_IO", $"Could not read source file: {error.Message}", item.File));
+                continue;
+            }
+
+            sources.Add(new PackageSource(module, item.File, sourceText));
         }
 
         return sources;
@@ -365,6 +689,24 @@ internal static class PackageLoader
             !segment.Any(char.IsControl) && !segment.Contains(':'));
     }
 
+    private static bool IsDependencyRelativePath(string path)
+    {
+        if (path.Length == 0 || path[0] == '/' || path.Contains('\\') || Path.IsPathRooted(path))
+            return false;
+
+        return path.Split('/').All(PortablePackagePath.IsValidRelativeSegment);
+    }
+
+    private static bool TryReadStringValue(string rawValue, out string value)
+    {
+        value = string.Empty;
+        if (rawValue.Length < 2 || rawValue[0] != '"' || rawValue[^1] != '"')
+            return false;
+
+        value = rawValue[1..^1];
+        return !value.Contains('"') && !value.Contains('\\') && !value.Any(char.IsControl);
+    }
+
     private static bool IsValidModuleName(string module) =>
         module.Length != 0 && module.Split('.').All(IsIdentifier);
 
@@ -374,6 +716,9 @@ internal static class PackageLoader
             return false;
         return identifier.Skip(1).All(character => char.IsLetterOrDigit(character) || character == '_');
     }
+
+    private static bool IsDependencyAlias(string identifier) =>
+        IsIdentifier(identifier) && !ReservedDependencyAliases.Contains(identifier);
 
     private static bool IsKey(string key) =>
         key.Length != 0 && key[0] is >= 'a' and <= 'z' &&
@@ -398,6 +743,28 @@ internal static class PackageLoader
 
     private static bool HasReparsePoint(string path) =>
         (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+
+    private static bool HasReparsePointOnPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var pathRoot = Path.GetPathRoot(fullPath) ?? throw new ArgumentException("Path has no filesystem root", nameof(path));
+        var current = pathRoot;
+        if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            return true;
+
+        foreach (var segment in fullPath[pathRoot.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current))
+                return false;
+            if (HasReparsePoint(current))
+                return true;
+        }
+
+        return false;
+    }
 
     private static bool HasReparsePointWithin(string root, string path)
     {

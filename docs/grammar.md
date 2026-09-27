@@ -5,7 +5,7 @@ The parser accepts the implemented pure-language slice below. The wider V1 synta
 ```ebnf
 module          = "module", module_path, ";", { import_decl }, { declaration } ;
 module_path     = lexical_identifier, { ".", lexical_identifier } ;
-import_decl     = "import", module_path, "{", import_symbols, "}", ";" ;
+import_decl     = "import", [ bare_identifier, "::" ], module_path, "{", import_symbols, "}", ";" ;
 import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 declaration     = [ "pub" ], ( function | union | struct ) ;
 
@@ -73,7 +73,7 @@ member_identifier = lexical_identifier ;
 bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await", "with" ;
 ```
 
-Every package source file has one `module` header. Imports, when present, follow that header and precede declarations. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing dots with directory separators. For example, `module text.validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Imports name one module and an explicit, non-empty list of symbols. No aliases, wildcard imports, or transitive imports are supported.
+Every package source file has one `module` header. Imports, when present, follow that header and precede declarations. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing dots with directory separators. For example, `module text.validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Imports name one module and an explicit, non-empty list of symbols. A same-package import is `import text.validation { normalize, NormalizeError };`. A dependency import qualifies the module with its declared package alias, as in `import validation::text.validation { normalize, NormalizeError };`. Aliases select packages; imported symbols retain their source names. Wildcard imports and transitive imports are not supported.
 
 Package commands use a package directory rather than a source-file path:
 
@@ -81,11 +81,23 @@ Package commands use a package directory rather than a source-file path:
 lang check PACKAGE_DIRECTORY [--json]
 lang build PACKAGE_DIRECTORY
 lang run PACKAGE_DIRECTORY
+lang lock PACKAGE_DIRECTORY
 ```
 
-The root `lang.toml` has a strict schema: exactly the keys `name`, `version`, `kind`, and `source_root`, plus `entry_module` for `kind = "cli"`. The reader supports a simple TOML subset: values are plain double-quoted strings, blank lines and comments outside quoted values are allowed, and escapes are not. `name` must be filesystem-safe; `version` must be non-empty but is not semver-validated; `source_root` must be a normalized, forward-slash relative directory inside the package. `kind` is `"cli"` or `"lib"`; `entry_module` is a valid dotted module name, required for CLI packages and forbidden for libraries. Unknown, missing, duplicate, or invalid keys and values are rejected. A CLI package's entry module must exist and define one supported zero-argument `main() -> i32|bool|Text`. Library packages do not have an entrypoint. See [the package example](../examples/library-package/lang.toml) for a complete same-package import.
+The root `lang.toml` has required keys `name`, `version`, `kind`, and `source_root`, plus `entry_module` for `kind = "cli"`. The optional trailing `[dependencies]` table maps package aliases to relative package paths, one per line. Its values are plain double-quoted strings, paths use forward slashes, and aliases are language identifiers unique without regard to case. The table must be the final manifest section. For example:
 
-The current resolver loads modules from one package only. It does not resolve external dependencies, lockfiles, or package registries. A same-package import makes only the listed public declarations available in the importing module. Private declarations remain module-local, and importing a module does not make its own imports visible to downstream modules.
+```toml
+[dependencies]
+validation = "../text-validation"
+```
+
+The target directory must contain a valid package manifest with `kind = "lib"`. Dependency paths are resolved relative to the manifest that declares them, and dependencies may declare their own local path dependencies. Separate dependency roots cannot share the same package name and version. Path dependencies are local filesystem references; Git sources, registries, caches, `lang add` or other package-install commands, and build receipts are not implemented.
+
+The reader supports a simple TOML subset: values are plain double-quoted strings, blank lines and comments outside quoted values are allowed, and escapes are not. `name` must be filesystem-safe; `version` must be non-empty but is not semver-validated; `source_root` must be a normalized, forward-slash relative directory inside the package. `kind` is `"cli"` or `"lib"`; `entry_module` is a valid dotted module name, required for CLI packages and forbidden for libraries. Unknown, missing, duplicate, or invalid keys and values are rejected. A CLI package's entry module must exist and define one supported zero-argument `main() -> i32|bool|Text`. Library packages do not have an entrypoint. See [the package example](../examples/library-package/lang.toml) for a package dependency and same-package import.
+
+`lang lock PACKAGE_DIRECTORY` resolves the complete local path graph and writes a deterministic `lang.lock`. The JSON lock records the root name, version, and manifest hash, followed by each dependency's package-relative path, name, version, content hash, and aliases to its direct dependencies. Content hashing includes each dependency's manifest and `.lang` source files in normalized relative-path order; dependency source line endings are normalized, and generated `out/` files are excluded. The paths in the lock remain relative so the package directory can move between workspaces. A package with dependencies must have a valid, current lock before `check`, `build`, or `run`; missing, malformed, and stale locks report `E_LOCK`. Run `lang lock` again to create or update it. Dependency-free packages need no lockfile. Path dependencies work offline.
+
+The resolver loads the root package and its local path dependencies. A same-package import or dependency-qualified import makes only the listed public declarations available in the importing module. Private declarations remain module-local, and importing a module does not make its own imports visible to downstream modules. Same-named module paths in distinct dependency packages retain separate type and symbol identities.
 
 A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. Generic functions may declare type parameters before their parameter list. Calls infer those parameters from independently typed argument expressions; each type parameter must occur in at least one function parameter type. For example, `require<T, E>(value: Option<T>, error: E) -> Result<T, E>` can infer `T` and `E` from an already typed `Option<T>` local and an independently typed error value. Generic function bodies can use their type parameters as values and in supported type constructors, but cannot apply operations that require a concrete type such as `T + T`.
 
