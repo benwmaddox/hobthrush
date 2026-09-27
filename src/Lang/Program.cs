@@ -38,7 +38,7 @@ internal static class Driver
             if (hasAotOption || hasRidOption)
             {
                 return ReportBuildTargetError(
-                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    "The --aot and --rid options are only valid with lang build FILE_OR_PACKAGE --aot --rid RID",
                     args[1]);
             }
 
@@ -53,14 +53,14 @@ internal static class Driver
             if (args[0] != "build")
             {
                 return ReportBuildTargetError(
-                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    "The --aot and --rid options are only valid with lang build FILE_OR_PACKAGE --aot --rid RID",
                     args[1]);
             }
 
             if (hasRidOption && !hasAotOption)
             {
                 return ReportBuildTargetError(
-                    "The --aot and --rid options are only valid with lang build FILE --aot --rid RID",
+                    "The --aot and --rid options are only valid with lang build FILE_OR_PACKAGE --aot --rid RID",
                     args[1]);
             }
 
@@ -107,6 +107,9 @@ internal static class Driver
             return 1;
         }
 
+        if (Directory.Exists(file))
+            return await RunPackageAsync(args[0], file, json, isAotBuild ? rid : null);
+
         string source;
         try
         {
@@ -135,8 +138,142 @@ internal static class Driver
         return await BuildCheckedAsync(result.Program!, file, args[0], isAotBuild ? rid : null);
     }
 
+    private static async Task<int> RunPackageAsync(string command, string packageDirectory, bool json, string? aotRid)
+    {
+        PackageLoadResult loaded;
+        try
+        {
+            loaded = PackageLoader.Load(packageDirectory);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Could not load package directory: {error.Message}", packageDirectory)
+            ],
+            json);
+            return 1;
+        }
+
+        if (loaded.Diagnostics.Count != 0)
+        {
+            PrintDiagnostics(loaded.Diagnostics, json);
+            return 1;
+        }
+
+        var package = loaded.Package!;
+        if (aotRid is not null && package.Manifest.IsLibrary)
+        {
+            return ReportBuildTargetError(
+                "NativeAOT publishing is only supported for cli packages",
+                package.ManifestFile);
+        }
+
+        var parsed = ParsePackageSources(package);
+        if (parsed.Diagnostics.Count != 0)
+        {
+            PrintDiagnostics(parsed.Diagnostics, json);
+            return 1;
+        }
+
+        var entryModule = package.Manifest.EntryModule;
+        var entryModuleExists = entryModule is null ||
+            parsed.Modules.Any(module => string.Equals(module.Module, entryModule, StringComparison.Ordinal));
+        var checkedPackage = Compiler.CheckPackage(
+            parsed.Modules,
+            entryModuleExists ? entryModule : null);
+        if (checkedPackage.Diagnostics.Count != 0 || !entryModuleExists)
+        {
+            var diagnostics = checkedPackage.Diagnostics.ToList();
+            if (!entryModuleExists)
+            {
+                diagnostics.Add(AtStart(
+                    "E_ENTRYPOINT",
+                    $"Entry module '{entryModule}' is not present under source_root",
+                    package.ManifestFile));
+            }
+
+            PrintDiagnostics(diagnostics, json);
+            return 1;
+        }
+
+        if (command == "check")
+        {
+            if (json)
+                PrintDiagnostics([], json: true);
+            return 0;
+        }
+
+        return await BuildCheckedAsync(
+            checkedPackage.Program!,
+            package.ManifestFile,
+            command,
+            aotRid,
+            package);
+    }
+
+    private static (List<ParsedProgram> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
+        LoadedPackage package)
+    {
+        var modules = new List<ParsedProgram>(package.Sources.Count);
+        var diagnostics = new List<Diagnostic>();
+        foreach (var source in package.Sources)
+        {
+            string text;
+            try
+            {
+                text = File.ReadAllText(source.File, new UTF8Encoding(false, true));
+            }
+            catch (DecoderFallbackException error)
+            {
+                diagnostics.Add(AtStart("E_IO", $"Source file is not valid UTF-8: {error.Message}", source.File));
+                continue;
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(AtStart("E_IO", $"Could not read source file: {error.Message}", source.File));
+                continue;
+            }
+
+            var sourceDiagnostics = new List<Diagnostic>();
+            var tokens = Lexer.Scan(text, source.File, sourceDiagnostics);
+            ParsedProgram? parsed = null;
+            if (sourceDiagnostics.Count == 0 && (tokens.Count == 0 || tokens[0].Text != "module"))
+            {
+                var at = tokens.Count == 0
+                    ? new Range(1, 1, 1, 1)
+                    : tokens[0].Range;
+                sourceDiagnostics.Add(new Diagnostic(
+                    "E_MODULE_PATH",
+                    $"Source path module '{source.Module}' requires a matching module declaration",
+                    source.File,
+                    at));
+            }
+            else if (sourceDiagnostics.Count == 0)
+                parsed = new Parser(tokens, source.File, sourceDiagnostics).Parse();
+
+            if (parsed is null && sourceDiagnostics.Count == 0)
+                sourceDiagnostics.Add(AtStart("E_SYNTAX", "Could not parse package module", source.File));
+
+            if (parsed is not null && !string.Equals(parsed.Module, source.Module, StringComparison.Ordinal))
+            {
+                sourceDiagnostics.Add(new Diagnostic(
+                    "E_MODULE_PATH",
+                    $"Module header '{parsed.Module}' does not match source path module '{source.Module}'",
+                    parsed.ModuleAt.File,
+                    parsed.ModuleAt.Range));
+            }
+
+            diagnostics.AddRange(sourceDiagnostics);
+            if (parsed is not null)
+                modules.Add(parsed);
+        }
+
+        return (modules, diagnostics);
+    }
+
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE [--json] | lang build FILE [--aot --rid RID] | lang run FILE | lang test");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang test");
 
     private static int ReportBuildTargetError(string message, string file)
     {
@@ -173,9 +310,14 @@ internal static class Driver
         CheckedProgram program,
         string sourceFile,
         string command,
-        string? aotRid)
+        string? aotRid,
+        LoadedPackage? package = null)
     {
-        var entry = program.Functions.FirstOrDefault(IsRunnableEntryPoint);
+        var entry = package is null
+            ? program.Functions.FirstOrDefault(IsRunnableEntryPoint)
+            : program.EntryFunctionId is { } entryFunctionId
+                ? program.Functions.FirstOrDefault(function => function.Id == entryFunctionId)
+                : null;
         if (aotRid is not null && entry is null)
         {
             return ReportBuildTargetError(
@@ -197,6 +339,7 @@ internal static class Driver
         }
 
         var executable = entry is not null;
+        var assemblyName = package?.Manifest.Name ?? "Generated";
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
             "lang-generated",
@@ -216,8 +359,8 @@ internal static class Driver
                 "bin",
                 "Release",
                 "net10.0",
-                "Generated.dll");
-            File.WriteAllText(projectFile, ProjectFileContents(executable, aotRid));
+                assemblyName + ".dll");
+            File.WriteAllText(projectFile, ProjectFileContents(executable, aotRid, assemblyName));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
                 Emitter.Emit(program, executable));
@@ -268,15 +411,16 @@ internal static class Driver
 
                 WriteProcessOutputToError(publish);
 
-                var outputDirectory = CreateBuildOutputDirectory(sourceFile);
-                var executableName = NativeExecutableName(aotRid);
+                var outputDirectory = CreateBuildOutputDirectory(sourceFile, package);
+                var executableName = NativeExecutableName(aotRid, assemblyName);
                 var executablePath = Path.Combine(outputDirectory, executableName);
                 try
                 {
+                    EnsurePackageOutputPathSafe(package);
                     CopyBuildArtifacts(stagedPublishDirectory, outputDirectory);
                     if (!File.Exists(executablePath))
                     {
-                        TryCleanupBuildOutputDirectory(sourceFile, outputDirectory);
+                        TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
                         PrintDiagnostics(
                         [
                             AtStart(
@@ -299,7 +443,7 @@ internal static class Driver
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
-                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory);
+                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
                     PrintDiagnostics(
                     [
                         AtStart("E_IO", $"Could not save NativeAOT artifacts: {error.Message}", sourceFile)
@@ -334,16 +478,17 @@ internal static class Driver
 
             if (command == "build")
             {
-                var outputDirectory = CreateBuildOutputDirectory(sourceFile);
+                var outputDirectory = CreateBuildOutputDirectory(sourceFile, package);
                 try
                 {
+                    EnsurePackageOutputPathSafe(package);
                     CopyBuildArtifacts(
                         Path.GetDirectoryName(stagedAssemblyFile)!,
                         outputDirectory);
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
-                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory);
+                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
                     PrintDiagnostics(
                     [
                         AtStart("E_IO", $"Could not save build artifacts: {error.Message}", sourceFile)
@@ -361,7 +506,7 @@ internal static class Driver
             var run = await ExecAsync(
                 dotnet,
                 [stagedAssemblyFile],
-                Directory.GetCurrentDirectory(),
+                package?.Root ?? Directory.GetCurrentDirectory(),
                 sourceFile,
                 forwardOutput: true);
 
@@ -378,19 +523,32 @@ internal static class Driver
         function.Parameters.Count == 0 &&
         (function.ReturnType.IsI32 || function.ReturnType.IsBool || function.ReturnType.IsText);
 
-    private static string NativeExecutableName(string rid) =>
-        rid.StartsWith("win-", StringComparison.Ordinal) ? "Generated.exe" : "Generated";
+    private static string NativeExecutableName(string rid, string assemblyName) =>
+        rid.StartsWith("win-", StringComparison.Ordinal) ? assemblyName + ".exe" : assemblyName;
 
     private static bool IsCurrentHostAotRid(string rid) =>
         (rid.StartsWith("win-", StringComparison.Ordinal) && OperatingSystem.IsWindows()) ||
         (rid.StartsWith("linux-", StringComparison.Ordinal) && OperatingSystem.IsLinux());
 
-    private static string CreateBuildOutputDirectory(string sourceFile)
+    private static string CreateBuildOutputDirectory(string sourceFile, LoadedPackage? package = null)
     {
-        var sourceDirectory = Path.GetDirectoryName(sourceFile)!;
-        var outputRoot = Path.Combine(sourceDirectory, "out");
-        var stem = Path.GetFileNameWithoutExtension(sourceFile);
+        var outputBase = package?.Root ?? Path.GetDirectoryName(sourceFile)!;
+        var outputRoot = Path.Combine(outputBase, "out");
+        var stem = package?.Manifest.Name ?? Path.GetFileNameWithoutExtension(sourceFile);
         return Path.Combine(outputRoot, $"{stem}-{Guid.NewGuid():N}");
+    }
+
+    private static void EnsurePackageOutputPathSafe(LoadedPackage? package)
+    {
+        if (package is null)
+            return;
+
+        var outputRoot = Path.Combine(package.Root, "out");
+        if (Directory.Exists(outputRoot) &&
+            (File.GetAttributes(outputRoot) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException("Package out directory cannot be a symbolic link or reparse point");
+        }
     }
 
     private static void CopyBuildArtifacts(string stagedOutputDirectory, string destinationDirectory)
@@ -405,9 +563,13 @@ internal static class Driver
         }
     }
 
-    private static void TryCleanupBuildOutputDirectory(string sourceFile, string outputDirectory)
+    private static void TryCleanupBuildOutputDirectory(
+        string sourceFile,
+        string outputDirectory,
+        LoadedPackage? package = null)
     {
-        var outputRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourceFile)!, "out"));
+        var outputBase = package?.Root ?? Path.GetDirectoryName(sourceFile)!;
+        var outputRoot = Path.GetFullPath(Path.Combine(outputBase, "out"));
         var path = Path.GetFullPath(outputDirectory);
         var rootPrefix = Path.EndsInDirectorySeparator(outputRoot)
             ? outputRoot
@@ -435,14 +597,14 @@ internal static class Driver
         }
     }
 
-    private static string ProjectFileContents(bool executable, string? aotRid)
+    private static string ProjectFileContents(bool executable, string? aotRid, string assemblyName = "Generated")
     {
         var outputType = executable ? "Exe" : "Library";
         return
             "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
             "  <PropertyGroup>\n" +
             $"    <OutputType>{outputType}</OutputType>\n" +
-            "    <AssemblyName>Generated</AssemblyName>\n" +
+            $"    <AssemblyName>{assemblyName}</AssemblyName>\n" +
             "    <TargetFramework>net10.0</TargetFramework>\n" +
             "    <ServerGarbageCollection>false</ServerGarbageCollection>\n" +
             "    <ImplicitUsings>enable</ImplicitUsings>\n" +

@@ -27,7 +27,9 @@ jobs:
           fi
       - name: Run integration tests, including NativeAOT publish and execution
         run: dotnet run --project tests/Lang.IntegrationTests --configuration Release --no-build
-        timeout-minutes: 20
+        timeout-minutes: 25
       - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/pure/src/main.lang
       - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/types/src/main.lang
       - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/structs/src/main.lang
+      - run: dotnet run --project src/Lang --configuration Release --no-build -- check examples/library-package
+      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/library-package

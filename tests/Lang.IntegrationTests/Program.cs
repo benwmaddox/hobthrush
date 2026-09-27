@@ -57,9 +57,22 @@ internal static class IntegrationTests
             ("signed i32 literals and unary negation are checked", TestSignedI32),
             ("checked i32 overflow exits through the generic runtime fault contract", TestCheckedOverflow),
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
+            ("same-package CLI package checks, builds, and runs imported public values", TestPackageCliRoundTrip),
+            ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
+            ("package imports enforce module and symbol visibility and conflicts", TestPackageImportDiagnostics),
+            ("package manifest schema is strict and reports JSON locations", TestPackageManifestDiagnostics),
+            ("package module paths match their source headers", TestPackageModulePathDiagnostic),
+            ("CLI entry module and main signature rules are enforced", TestPackageEntryPointDiagnostics),
+            ("only the declared package entry module selects main", TestPackageEntrySelection),
+            ("imported union variants participate in exhaustive matching", TestPackageImportedUnionExhaustiveness),
+            ("package imports are not transitive", TestPackageImportsAreNotTransitive),
+            ("library packages build as managed libraries", TestPackageLibraryBuild),
+            ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
+            ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
-            ("NativeAOT publishes and runs the current-host executable", TestAotPublishAndRun),
+            ("NativeAOT publishes and runs the current-host file executable", TestAotPublishAndRun),
+            ("NativeAOT publishes and runs the current-host package executable", TestPackageAotPublishAndRun),
             ("invalid main signatures receive an entrypoint diagnostic", TestInvalidEntrypoint),
             ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
@@ -894,6 +907,576 @@ internal static class IntegrationTests
             $"run should reject the non-primitive parameterized main. {Describe(run)}");
     }
 
+    private static async Task TestPackageCliRoundTrip(Harness harness)
+    {
+        var packageRoot = await harness.WritePackageAsync(
+            "package-cli-roundtrip",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/catalog/message.lang"] = """
+                    module catalog.message;
+
+                    pub struct Greeting { text: Text }
+                    pub union Message { Ready(Greeting), Missing }
+
+                    pub fn greeting() -> Greeting effects {} {
+                        return Greeting { text: "ready" };
+                    }
+                    """,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import catalog.message { Greeting, Message, greeting };
+
+                    pub fn main() -> Text effects {} {
+                        let welcome: Greeting = greeting();
+                        let message: Message = Message.Ready(welcome);
+                        return match message {
+                            Message.Ready(value) => value.text,
+                            Message.Missing => "missing",
+                        };
+                    }
+                    """
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("package-cli-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(string.Empty, check.StandardOutput, Describe(check));
+        AssertEqual(string.Empty, check.StandardError, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("package-cli-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        const string prefix = "Built executable: ";
+        AssertTrue(build.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(build));
+        var artifact = build.StandardOutput[prefix.Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact), $"Expected a full managed artifact path. {Describe(build)}");
+        AssertTrue(File.Exists(artifact), $"Expected package build artifact at {artifact}. {Describe(build)}");
+
+        var run = await harness.InvokePackageDirectoryAsync("package-cli-run", packageRoot, "run");
+        AssertRunOutput("ready" + Environment.NewLine, run);
+    }
+
+    private static async Task TestPackagePrivateNameIsolation(Harness harness)
+    {
+        const string first = """
+            module first;
+            struct Hidden { value: i32 }
+            pub fn first_value() -> i32 effects {} {
+                let item: Hidden = Hidden { value: 19 };
+                return item.value;
+            }
+            """;
+        const string second = """
+            module second;
+            struct Hidden { value: i32 }
+            pub fn second_value() -> i32 effects {} {
+                let item: Hidden = Hidden { value: 23 };
+                return item.value;
+            }
+            """;
+        const string main = """
+            module app.main;
+            import first { first_value };
+            import second { second_value };
+            pub fn main() -> i32 effects {} { return first_value() + second_value(); }
+            """;
+
+        var result = await harness.InvokePackageAsync(
+            "package-private-name-isolation",
+            "run",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/first.lang"] = first,
+                ["src/second.lang"] = second,
+                ["src/app/main.lang"] = main
+            });
+        AssertRunOutput("42" + Environment.NewLine, result);
+    }
+
+    private static async Task TestPackageImportDiagnostics(Harness harness)
+    {
+        const string library = """
+            module library;
+            pub fn present() -> i32 effects {} { return 7; }
+            fn hidden() -> i32 effects {} { return 9; }
+            """;
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-private",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = library,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import library { hidden };
+                    pub fn main() -> i32 effects {} { return hidden(); }
+                    """
+            },
+            "E_IMPORT_PRIVATE",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-symbol-missing",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = library,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import library { absent };
+                    pub fn main() -> i32 effects {} { return absent(); }
+                    """
+            },
+            "E_IMPORT_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-module-missing",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import absent.module { value };
+                    pub fn main() -> i32 effects {} { return value(); }
+                    """
+            },
+            "E_IMPORT_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-duplicate-symbol",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = library,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import library { present, present };
+                    pub fn main() -> i32 effects {} { return present(); }
+                    """
+            },
+            "E_IMPORT_CONFLICT",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-local-conflict",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = library,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import library { present };
+                    pub fn present() -> i32 effects {} { return 3; }
+                    pub fn main() -> i32 effects {} { return present(); }
+                    """
+            },
+            "E_IMPORT_CONFLICT",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-cross-module-type-conflict",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/left/types.lang"] = "module left.types; pub union Shared { Available }",
+                ["src/right/types.lang"] = "module right.types; pub struct Shared { value: i32 }",
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import left.types { Shared };
+                    import right.types { Shared };
+                    pub fn main() -> i32 effects {} { return 1; }
+                    """
+            },
+            "E_IMPORT_CONFLICT",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-function-does-not-import-return-type",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/model/choice.lang"] = """
+                    module model.choice;
+                    pub union Choice { Ready, Waiting }
+                    pub fn create() -> Choice effects {} { return Choice.Ready; }
+                    """,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import model.choice { create };
+                    pub fn main() -> i32 effects {} {
+                        return match create() {
+                            Choice.Ready => 1,
+                            Choice.Waiting => 0,
+                        };
+                    }
+                    """
+            },
+            "E_NAME_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-local-union-name-mismatch",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/model/choice.lang"] = """
+                    module model.choice;
+                    pub union Choice { Ready, Waiting }
+                    pub fn create() -> Choice effects {} { return Choice.Ready; }
+                    """,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import model.choice { create };
+                    union Choice { Ready, Waiting }
+                    pub fn main() -> i32 effects {} {
+                        return match create() {
+                            Choice.Ready => 1,
+                            Choice.Waiting => 0,
+                        };
+                    }
+                    """
+            },
+            "E_TYPE_MISMATCH",
+            "src/app/main.lang");
+    }
+
+    private static async Task TestPackageManifestDiagnostics(Harness harness)
+    {
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-missing-entry",
+            "name = \"manifest-test\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-unknown-key",
+            CliPackageManifest() + "dependencies = \"none\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-duplicate-key",
+            CliPackageManifest() + "kind = \"lib\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-library-entry",
+            LibraryPackageManifest() + "entry_module = \"app.main\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        var commentManifest = CliPackageManifest()
+            .Replace("version = \"0.1.0\"", "version = \"0.1.0#candidate\"", StringComparison.Ordinal)
+            .Replace("kind = \"cli\"", "kind = \"cli\" # CLI package", StringComparison.Ordinal);
+        var commentPackage = await harness.WritePackageAsync(
+            "package-manifest-comments",
+            commentManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+            });
+        var commentCheck = await harness.InvokePackageDirectoryAsync(
+            "package-manifest-comments-check",
+            commentPackage,
+            "check");
+        AssertEqual(0, commentCheck.ExitCode, Describe(commentCheck));
+        AssertEqual(string.Empty, commentCheck.StandardError, Describe(commentCheck));
+    }
+
+    private static async Task TestPackageModulePathDiagnostic(Harness harness)
+    {
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-module-path-mismatch",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module elsewhere.main;
+                    pub fn main() -> i32 effects {} { return 1; }
+                    """
+            },
+            "E_MODULE_PATH",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-module-dotted-filename",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/text.validation.lang"] = "module text.validation; pub fn main() -> i32 effects {} { return 1; }"
+            },
+            "E_MODULE_PATH",
+            "src/text.validation.lang");
+    }
+
+    private static async Task TestPackageEntryPointDiagnostics(Harness harness)
+    {
+        await ExpectPackageTextDiagnosticAsync(
+            harness,
+            "package-entry-module-missing",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/other.lang"] = "module other; pub fn main() -> i32 effects {} { return 4; }"
+            },
+            "run",
+            "E_ENTRYPOINT",
+            "lang.toml");
+
+        await ExpectPackageTextDiagnosticAsync(
+            harness,
+            "package-entry-main-missing",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn helper() -> i32 effects {} { return 1; }",
+                ["src/other.lang"] = "module other; pub fn main() -> i32 effects {} { return 4; }"
+            },
+            "run",
+            "E_ENTRYPOINT",
+            "src/app/main.lang");
+
+        await ExpectPackageTextDiagnosticAsync(
+            harness,
+            "package-entry-main-invalid",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main(value: i32) -> i32 effects {} { return value; }"
+            },
+            "run",
+            "E_ENTRYPOINT",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-entry-main-duplicate",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    pub fn main() -> i32 effects {} { return 1; }
+                    pub fn main() -> i32 effects {} { return 2; }
+                    """
+            },
+            "E_NAME_DUPLICATE",
+            "src/app/main.lang");
+    }
+
+    private static async Task TestPackageEntrySelection(Harness harness)
+    {
+        var result = await harness.InvokePackageAsync(
+            "package-entry-selection",
+            "run",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 17; }",
+                ["src/other.lang"] = "module other; pub fn main() -> i32 effects {} { return 99; }"
+            });
+        AssertRunOutput("17" + Environment.NewLine, result);
+    }
+
+    private static async Task TestPackageImportedUnionExhaustiveness(Harness harness)
+    {
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-imported-union-exhaustiveness",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/shared/choice.lang"] = """
+                    module shared.choice;
+                    pub union Choice { First, Second, Third }
+                    """,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import shared.choice { Choice };
+                    pub fn main() -> i32 effects {} {
+                        let choice: Choice = Choice.First;
+                        return match choice {
+                            Choice.First => 1,
+                            Choice.Second => 2,
+                        };
+                    }
+                    """
+            },
+            "E_MATCH_NONEXHAUSTIVE",
+            "src/app/main.lang");
+    }
+
+    private static async Task TestPackageImportsAreNotTransitive(Harness harness)
+    {
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-import-not-transitive",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/base.lang"] = "module base; pub fn answer() -> i32 effects {} { return 42; }",
+                ["src/middle.lang"] = """
+                    module middle;
+                    import base { answer };
+                    pub fn wrapped() -> i32 effects {} { return answer(); }
+                    """,
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    import middle { wrapped };
+                    pub fn main() -> i32 effects {} { return wrapped() + answer(); }
+                    """
+            },
+            "E_NAME_UNRESOLVED",
+            "src/app/main.lang");
+    }
+
+    private static async Task TestPackageLibraryBuild(Harness harness)
+    {
+        var packageRoot = await harness.WritePackageAsync(
+            "package-library-build",
+            LibraryPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/core/math.lang"] = "module core.math; pub fn square(value: i32) -> i32 effects {} { return value * value; }"
+            });
+        var check = await harness.InvokePackageDirectoryAsync("package-library-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var build = await harness.InvokePackageDirectoryAsync("package-library-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        AssertTrue(build.StandardOutput.StartsWith("Built library: ", StringComparison.Ordinal), Describe(build));
+        var artifact = build.StandardOutput["Built library: ".Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact), $"Expected a full managed library path. {Describe(build)}");
+        AssertTrue(File.Exists(artifact), $"Expected package library artifact at {artifact}. {Describe(build)}");
+    }
+
+    private static async Task TestPackageAotCommandValidation(Harness harness)
+    {
+        const string main = "module app.main; pub fn main() -> i32 effects {} { return 41; }";
+        var files = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = main
+        };
+        var missingRid = await harness.InvokePackageAsync(
+            "package-aot-missing-rid", "build", CliPackageManifest(), files, "--aot");
+        AssertBuildTargetRejected(missingRid, "requires --rid RID");
+
+        var unsupportedRid = await harness.InvokePackageAsync(
+            "package-aot-unsupported-rid", "build", CliPackageManifest(), files, "--aot", "--rid", "osx-x64");
+        AssertBuildTargetRejected(unsupportedRid, "Unsupported AOT runtime identifier");
+
+        var libraryRoot = await harness.WritePackageAsync(
+            "package-aot-library-rejected",
+            LibraryPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = "module library; pub fn value() -> i32 effects {} { return 1; }"
+            });
+        var libraryAot = await harness.InvokePackageDirectoryAsync(
+            "package-aot-library-rejected",
+            libraryRoot,
+            "build",
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+        AssertBuildTargetRejected(libraryAot, "only supported for cli packages");
+        AssertTrue(!Directory.Exists(Path.Combine(libraryRoot, "out")),
+            "A library package must be rejected before publish output is created.");
+    }
+
+    private static async Task TestMaintainedPackageExample(Harness harness)
+    {
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "library-package");
+        var check = await harness.InvokePackageDirectoryAsync("maintained-package-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var run = await harness.InvokePackageDirectoryAsync("maintained-package-run", packageRoot, "run");
+        AssertRunOutput("ready" + Environment.NewLine, run);
+    }
+
+    private static string CliPackageManifest(string entryModule = "app.main") =>
+        "name = \"harness-package\"\n" +
+        "version = \"0.1.0\"\n" +
+        "kind = \"cli\"\n" +
+        "source_root = \"src\"\n" +
+        $"entry_module = \"{entryModule}\"\n";
+
+    private static string LibraryPackageManifest() =>
+        "name = \"harness-library\"\n" +
+        "version = \"0.1.0\"\n" +
+        "kind = \"lib\"\n" +
+        "source_root = \"src\"\n";
+
+    private static async Task ExpectPackageJsonDiagnosticAsync(
+        Harness harness,
+        string caseName,
+        string manifest,
+        IReadOnlyDictionary<string, string> sourceFiles,
+        string expectedCode,
+        string expectedFile)
+    {
+        var packageRoot = await harness.WritePackageAsync(caseName, manifest, sourceFiles);
+        var result = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, "check", "--json");
+        AssertTrue(result.ExitCode != 0, $"Invalid package unexpectedly succeeded. {Describe(result)}");
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+        AssertEqual(1, root.GetProperty("schemaVersion").GetInt32(), "Package diagnostics must use JSON schema version 1.");
+        var expectedPath = Path.GetFullPath(Path.Combine(packageRoot, expectedFile));
+        var found = root.GetProperty("diagnostics").EnumerateArray().Any(diagnostic =>
+            diagnostic.GetProperty("code").GetString() == expectedCode &&
+            Path.GetFullPath(diagnostic.GetProperty("file").GetString() ?? string.Empty) == expectedPath &&
+            diagnostic.GetProperty("severity").GetString() == "error" &&
+            diagnostic.GetProperty("range").GetProperty("startLine").GetInt32() > 0 &&
+            diagnostic.GetProperty("range").GetProperty("startColumn").GetInt32() > 0);
+        AssertTrue(found,
+            $"Expected {expectedCode} in {expectedPath} with a structured range. {result.StandardOutput}");
+    }
+
+    private static async Task ExpectPackageTextDiagnosticAsync(
+        Harness harness,
+        string caseName,
+        string manifest,
+        IReadOnlyDictionary<string, string> sourceFiles,
+        string command,
+        string expectedCode,
+        string expectedFile)
+    {
+        var packageRoot = await harness.WritePackageAsync(caseName, manifest, sourceFiles);
+        var result = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, command);
+        AssertTrue(result.ExitCode != 0, $"Invalid package unexpectedly succeeded. {Describe(result)}");
+        AssertEqual(string.Empty, result.StandardOutput, Describe(result));
+        var expectedPath = Path.GetFullPath(Path.Combine(packageRoot, expectedFile));
+        AssertTrue(result.StandardError.Contains(expectedPath + ":", StringComparison.Ordinal) &&
+                   result.StandardError.Contains(expectedCode, StringComparison.Ordinal),
+            $"Expected {expectedCode} located in {expectedPath}. {Describe(result)}");
+        AssertTrue(!result.StandardError.Contains("Unhandled exception", StringComparison.Ordinal) &&
+                   !result.StandardError.Contains(" at ", StringComparison.Ordinal),
+            $"Package entrypoint errors should not leak a backend stack trace. {Describe(result)}");
+    }
+
     private static async Task TestAotCommandValidation(Harness harness)
     {
         const string source = "module harness.aot_cli;\n"
@@ -946,7 +1529,7 @@ internal static class IntegrationTests
     private static async Task TestAotPublishAndRun(Harness harness)
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
-            throw new IntegrationTestSkippedException("The NativeAOT smoke test targets x64 hosts only.");
+            throw new IntegrationTestSkippedException("The NativeAOT file smoke test targets x64 hosts only.");
 
         const string source = "module harness.aot_smoke;\n"
             + "pub fn main() -> i32 effects {} { return 41; }\n";
@@ -975,6 +1558,53 @@ internal static class IntegrationTests
             "The native executable should remain in the source tree's durable out directory.");
         AssertTrue(Path.GetFileName(outputDirectory).StartsWith("main-", StringComparison.Ordinal),
             $"Expected a unique main-<id> output directory, got <{outputDirectory}>.");
+
+        var execution = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
+        AssertRunOutput("41" + Environment.NewLine, execution);
+    }
+
+    private static async Task TestPackageAotPublishAndRun(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The NativeAOT package smoke test targets x64 hosts only.");
+
+        var packageRoot = await harness.WritePackageAsync(
+            "package-aot-smoke",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 41; }"
+            });
+        var result = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "package-aot-smoke",
+            packageRoot,
+            "build",
+            AotPublishTimeout,
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+
+        AssertEqual(0, result.ExitCode, Describe(result));
+        const string prefix = "Built native executable: ";
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal),
+            $"Expected NativeAOT build output to start with <{prefix}>. {Describe(result)}");
+        AssertTrue(result.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal),
+            $"Expected one output line containing the native executable path. {Describe(result)}");
+        var executablePath = result.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertEqual(prefix + executablePath + Environment.NewLine, result.StandardOutput,
+            "NativeAOT build output should contain only the documented artifact line.");
+        AssertTrue(Path.IsPathFullyQualified(executablePath),
+            $"Expected a fully qualified native executable path, got <{executablePath}>.");
+        AssertTrue(File.Exists(executablePath), $"Expected NativeAOT to create {executablePath}.");
+        AssertEqual(CurrentHostAotRid() == "win-x64" ? "harness-package.exe" : "harness-package",
+            Path.GetFileName(executablePath), "Unexpected package native executable name for the current host.");
+
+        var outputDirectory = Path.GetDirectoryName(executablePath)!;
+        var expectedOutputRoot = Path.GetFullPath(Path.Combine(packageRoot, "out"));
+        AssertEqual(expectedOutputRoot, Path.GetFullPath(Path.GetDirectoryName(outputDirectory)!),
+            "The native executable should remain in the package's durable out directory.");
+        AssertTrue(Path.GetFileName(outputDirectory).StartsWith("harness-package-", StringComparison.Ordinal),
+            $"Expected a unique package-name-<id> output directory, got <{outputDirectory}>.");
 
         var execution = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
         AssertRunOutput("41" + Environment.NewLine, execution);
@@ -1201,6 +1831,27 @@ internal static class IntegrationTests
             return sourcePath;
         }
 
+        public async Task<string> WritePackageAsync(
+            string caseName,
+            string manifest,
+            IReadOnlyDictionary<string, string> sourceFiles)
+        {
+            var packageRoot = Path.Combine(temporaryRoot, $"{caseName}-{Guid.NewGuid():N}", "package");
+            Directory.CreateDirectory(Path.Combine(packageRoot, "src"));
+            await File.WriteAllTextAsync(Path.Combine(packageRoot, "lang.toml"), manifest);
+            LastSourcePath = Path.Combine(packageRoot, "lang.toml");
+            foreach (var sourceFile in sourceFiles.OrderBy(file => file.Key, StringComparer.Ordinal))
+            {
+                var relativePath = sourceFile.Key.Replace('/', Path.DirectorySeparatorChar);
+                var path = Path.GetFullPath(Path.Combine(packageRoot, relativePath));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, sourceFile.Value);
+                LastSourcePath = path;
+            }
+
+            return packageRoot;
+        }
+
         public string TemporaryRoot => temporaryRoot;
 
         public Task<ProcessResult> InvokeAsync(string caseName, string command, string source, params string[] additionalArguments) =>
@@ -1223,14 +1874,73 @@ internal static class IntegrationTests
         public Task<ProcessResult> InvokeFileAsync(string caseName, string sourcePath, string command, params string[] additionalArguments) =>
             InvokeFileWithTimeoutAsync(caseName, sourcePath, command, ProcessTimeout, null, additionalArguments);
 
+        public async Task<ProcessResult> InvokePackageAsync(
+            string caseName,
+            string command,
+            string manifest,
+            IReadOnlyDictionary<string, string> sourceFiles,
+            params string[] additionalArguments)
+        {
+            var packageRoot = await WritePackageAsync(caseName, manifest, sourceFiles);
+            return await InvokePackageDirectoryAsync(caseName, packageRoot, command, additionalArguments);
+        }
+
+        public Task<ProcessResult> InvokePackageDirectoryAsync(
+            string caseName,
+            string packageRoot,
+            string command,
+            params string[] additionalArguments) =>
+            InvokeTargetWithTimeoutAsync(
+                caseName,
+                packageRoot,
+                packageRoot,
+                command,
+                ProcessTimeout,
+                null,
+                additionalArguments);
+
+        public Task<ProcessResult> InvokePackageDirectoryWithTimeoutAsync(
+            string caseName,
+            string packageRoot,
+            string command,
+            TimeSpan timeout,
+            params string[] additionalArguments) =>
+            InvokeTargetWithTimeoutAsync(
+                caseName,
+                packageRoot,
+                packageRoot,
+                command,
+                timeout,
+                null,
+                additionalArguments);
+
         public async Task<ProcessResult> InvokeFileWithTimeoutAsync(string caseName, string sourcePath, string command, TimeSpan timeout, string? dotnetHostOverride, params string[] additionalArguments)
         {
             var sourceDirectory = Path.GetDirectoryName(sourcePath)
                 ?? throw new InvalidOperationException($"Source file {sourcePath} has no parent directory.");
+            return await InvokeTargetWithTimeoutAsync(
+                caseName,
+                sourcePath,
+                sourceDirectory,
+                command,
+                timeout,
+                dotnetHostOverride,
+                additionalArguments);
+        }
+
+        private async Task<ProcessResult> InvokeTargetWithTimeoutAsync(
+            string caseName,
+            string target,
+            string workingDirectory,
+            string command,
+            TimeSpan timeout,
+            string? dotnetHostOverride,
+            params string[] additionalArguments)
+        {
             var startInfo = new ProcessStartInfo
             {
                 FileName = dotnet,
-                WorkingDirectory = sourceDirectory,
+                WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -1240,7 +1950,7 @@ internal static class IntegrationTests
             };
             startInfo.ArgumentList.Add(compilerDll);
             startInfo.ArgumentList.Add(command);
-            startInfo.ArgumentList.Add(sourcePath);
+            startInfo.ArgumentList.Add(target);
             foreach (var argument in additionalArguments) startInfo.ArgumentList.Add(argument);
             startInfo.Environment["LANG_DOTNET"] = dotnetHostOverride ?? dotnet;
 
