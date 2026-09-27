@@ -6,15 +6,13 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | --- | --- | --- |
 | E_SYNTAX | Token or production does not match the grammar | Implemented |
 | E_UNSUPPORTED | Valid V1 construct is not yet implemented | Implemented |
-| E_NAME_UNRESOLVED | Name is not declared in scope | Implemented |
+| E_NAME_UNRESOLVED | Name is not declared in scope, or a qualified reference names an unknown alias, module, or declaration | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
+| E_ACCESS_PRIVATE | A qualified reference crosses a module or package boundary to a private declaration | Implemented |
 | E_MANIFEST | Package manifest file, schema, key, or value is invalid | Implemented |
 | E_DEPENDENCY | A local dependency path, package kind, package identity, or dependency graph is invalid | Implemented |
 | E_LOCK | A required dependency lock is missing, malformed, unreadable, or stale | Implemented |
 | E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
-| E_IMPORT_UNRESOLVED | An imported module or symbol does not exist in the current package or a declared direct dependency | Implemented |
-| E_IMPORT_PRIVATE | An import names a declaration that is not public | Implemented |
-| E_IMPORT_CONFLICT | Imports are duplicated or conflict with another visible/local name | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, condition, comparison, or return type mismatch; also a function body that may fall through | Implemented for the pure type and control-flow slices |
 | E_TYPE_VISIBILITY | A public type signature exposes a private union or struct | Implemented |
 | E_FIELD_UNKNOWN | A struct initializer or field read names an unknown field | Implemented |

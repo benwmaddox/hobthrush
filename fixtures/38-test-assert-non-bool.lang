@@ -1,4 +1,4 @@
-module fixture.test_assert;
+module fixture::test_assert;
 test "assertion must be bool" {
     assert 1;
 }

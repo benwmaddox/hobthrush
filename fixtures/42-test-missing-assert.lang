@@ -1,4 +1,4 @@
-module fixture.test_missing_assert;
+module fixture::test_missing_assert;
 test "assert is required" {
     let value: bool = true;
 }

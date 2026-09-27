@@ -1,4 +1,4 @@
-module fixture.test_return;
+module fixture::test_return;
 test "return is disallowed" {
     return true;
 }

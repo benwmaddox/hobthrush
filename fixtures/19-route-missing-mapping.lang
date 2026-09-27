@@ -1,3 +1,3 @@
-module fixture.route_missing;
+module fixture::route_missing;
 pub union Reply { Found(Text), Missing }
 route GET "/items/{id}" { path id: i32; handler: get_item; response Found: 200 json Text; }

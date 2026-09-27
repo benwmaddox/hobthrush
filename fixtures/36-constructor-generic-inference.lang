@@ -1,4 +1,4 @@
-module fixture.constructor_generic_inference;
+module fixture::constructor_generic_inference;
 
 pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
     return match value {
@@ -8,5 +8,5 @@ pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
 }
 
 pub fn direct_some() -> Result<Text, Text> effects {} {
-    return require(Some("present"), "fallback");
+    return self::fixture::constructor_generic_inference::require(Some("present"), "fallback");
 }

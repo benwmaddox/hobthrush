@@ -1,7 +1,7 @@
-module fixture.struct_invalid_initializers;
+module fixture::struct_invalid_initializers;
 
 pub struct Pair { left: i32, right: i32 }
 
-pub fn invalid() -> Pair effects {} {
-    return Pair { left: 1, left: 2, typo: 3 };
+pub fn invalid() -> self::fixture::struct_invalid_initializers::Pair effects {} {
+    return self::fixture::struct_invalid_initializers::Pair { left: 1, left: 2, typo: 3 };
 }

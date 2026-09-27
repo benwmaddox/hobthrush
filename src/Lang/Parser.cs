@@ -308,6 +308,27 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
+    private SourceDeclarationRefSyntax ParseSourceDeclarationRef()
+    {
+        var at = ExpectBareIdentifier();
+        if (!Is("::"))
+            return new SourceDeclarationRefSyntax(null, Array.Empty<string>(), at.Text, at);
+
+        var root = at.Text;
+        Take();
+        var path = new List<string> { ExpectMemberIdentifier().Text };
+        while (Is("::"))
+        {
+            Take();
+            path.Add(ExpectMemberIdentifier().Text);
+        }
+
+        if (path.Count < 2)
+            Fail(at, "E_SYNTAX", "A qualified declaration reference must include a module and declaration");
+
+        return new SourceDeclarationRefSyntax(root, path[..^1], path[^1], at);
+    }
+
     private void Fail(Token token, string code, string message)
     {
         _diagnostics.Add(new Diagnostic(
@@ -324,16 +345,14 @@ internal sealed class Parser
         {
             Expect("module");
             var moduleAt = ExpectModuleSegment();
-            var module = moduleAt.Text;
-            while (Is("."))
+            var moduleSegments = new List<string> { moduleAt.Text };
+            while (Is("::"))
             {
                 Take();
-                module += "." + ExpectModuleSegment().Text;
+                moduleSegments.Add(ExpectModuleSegment().Text);
             }
+            var module = string.Join("::", moduleSegments);
             Expect(";");
-
-            var imports = new List<ImportDecl>();
-            while (Is("import")) imports.Add(ParseImport());
 
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
@@ -372,69 +391,17 @@ internal sealed class Parser
                     if (isPublic && Current.Kind == "eof")
                         Fail(Current, "E_SYNTAX", "Expected declaration after 'pub'");
                     if (Is("import"))
-                        Fail(Current, "E_SYNTAX", "Imports must appear before declarations");
+                        Fail(Current, "E_SYNTAX", "Imports are not supported; qualify declaration references with '::'");
                     Fail(declaration, "E_UNSUPPORTED", $"Declaration '{declaration.Text}' is not implemented yet");
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, imports, unions, functions, structs, tests);
+            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests);
         }
         catch (ParseFailure)
         {
             return null;
         }
-    }
-
-    private ImportDecl ParseImport()
-    {
-        var at = Expect("import");
-        var firstSegment = ExpectModuleSegment();
-        string? dependencyAlias = null;
-        Token moduleAt;
-        if (Is("::"))
-        {
-            if (!IsBareIdentifier(firstSegment))
-                Fail(firstSegment, "E_SYNTAX", "Expected identifier");
-            dependencyAlias = firstSegment.Text;
-            Take();
-            moduleAt = ExpectModuleSegment();
-        }
-        else
-        {
-            moduleAt = firstSegment;
-        }
-
-        var module = moduleAt.Text;
-        while (Is("."))
-        {
-            Take();
-            module += "." + ExpectModuleSegment().Text;
-        }
-
-        Expect("{");
-        if (Is("}"))
-            Fail(Current, "E_SYNTAX", "An import must name at least one symbol");
-
-        var symbols = new List<ImportSymbol>();
-        while (!Is("}"))
-        {
-            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed import symbol list");
-            var symbolAt = ExpectMemberIdentifier();
-            symbols.Add(new ImportSymbol(symbolAt.Text, symbolAt));
-            if (Is(","))
-            {
-                Take();
-                if (Is("}")) break;
-            }
-            else if (!Is("}"))
-            {
-                Expect(",");
-            }
-        }
-
-        Expect("}");
-        Expect(";");
-        return new ImportDecl(module, at, moduleAt, symbols, dependencyAlias);
     }
 
     private FunctionDecl ParseFunction(bool isPublic)
@@ -759,13 +726,7 @@ internal sealed class Parser
         EnterNesting(Current, "Type nesting is too deep");
         try
         {
-            var at = ExpectBareIdentifier();
-            var name = at.Text;
-            while (Is("."))
-            {
-                Take();
-                name += "." + ExpectMemberIdentifier().Text;
-            }
+            var reference = ParseSourceDeclarationRef();
 
             var arguments = new List<TypeSyntax>();
             if (Is("<"))
@@ -785,7 +746,7 @@ internal sealed class Parser
                 Expect(">");
             }
 
-            return new TypeSyntax(name, arguments, at);
+            return new TypeSyntax(reference, arguments, reference.At);
         }
         finally
         {
@@ -882,21 +843,35 @@ internal sealed class Parser
             if (!IsBareIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");
 
-            Take();
+            var reference = ParseSourceDeclarationRef();
             Expr expression;
-            if (allowStructConstruction && Is("{"))
+            if (reference.IsQualified && allowStructConstruction && Is("{"))
             {
-                expression = ParseStructConstruction(token);
+                expression = ParseStructConstruction(reference);
+            }
+            else if (reference.IsQualified && Is("("))
+            {
+                var arguments = ParseArguments();
+                expression = RegisterExpression(new CallExpr(token, reference, arguments),
+                    1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
+            }
+            else if (reference.IsQualified)
+            {
+                expression = RegisterExpression(new DeclarationRefExpr(token, reference));
+            }
+            else if (allowStructConstruction && Is("{"))
+            {
+                expression = ParseStructConstruction(reference);
             }
             else if (Is("("))
             {
                 var arguments = ParseArguments();
-                expression = RegisterExpression(new CallExpr(token, token.Text, arguments),
+                expression = RegisterExpression(new CallExpr(token, reference, arguments),
                     1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
             }
             else
             {
-                expression = RegisterExpression(new NameExpr(token, token.Text));
+                expression = RegisterExpression(new NameExpr(token, reference.Declaration));
             }
             return ParsePostfix(expression);
         }
@@ -913,7 +888,7 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private Expr ParseStructConstruction(Token typeName)
+    private Expr ParseStructConstruction(SourceDeclarationRefSyntax typeName)
     {
         Expect("{");
         var fields = new List<StructFieldValue>();
@@ -936,7 +911,7 @@ internal sealed class Parser
         }
         Expect("}");
         var depth = 1 + fields.Select(field => ExpressionDepth(field.Value)).DefaultIfEmpty(0).Max();
-        return RegisterExpression(new StructConstructExpr(typeName, typeName.Text, fields), depth);
+        return RegisterExpression(new StructConstructExpr(typeName.At, typeName, fields), depth);
     }
 
     private Expr ParsePostfix(Expr expression)
@@ -1043,13 +1018,15 @@ internal sealed class Parser
             Fail(at, "E_SYNTAX", "Expected match pattern");
         }
 
-        Take();
-        string? unionName = null;
-        var variantName = at.Text;
-        if (Is("."))
+        var reference = ParseSourceDeclarationRef();
+        SourceDeclarationRefSyntax? union = null;
+        var variantName = reference.Declaration;
+        if (reference.IsQualified || Is("."))
         {
+            if (!Is("."))
+                Fail(at, "E_SYNTAX", "A qualified union pattern must name a variant after '.'");
             Take();
-            unionName = variantName;
+            union = reference;
             variantName = ExpectMemberIdentifier().Text;
         }
 
@@ -1074,7 +1051,7 @@ internal sealed class Parser
             Expect(")");
         }
 
-        return new VariantPattern(at, unionName, variantName, bindings);
+        return new VariantPattern(at, union, variantName, bindings);
     }
 
     private string DecodeText(Token token)

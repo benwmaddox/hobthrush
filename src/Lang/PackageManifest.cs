@@ -85,7 +85,7 @@ internal static class PackageLoader
 
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
     {
-        "await", "false", "if", "match", "null", "true", "with"
+        "await", "false", "if", "match", "null", "self", "true", "with"
     };
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
@@ -552,7 +552,7 @@ internal static class PackageLoader
         }
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))
-            diagnostics.Add(AtStart("E_MANIFEST", "entry_module must be a valid dotted module name", file));
+            diagnostics.Add(AtStart("E_MANIFEST", "entry_module must be a valid module path using '::' separators", file));
     }
 
     private static IReadOnlyList<PackageSource> DiscoverSources(
@@ -625,7 +625,7 @@ internal static class PackageLoader
                 continue;
             }
 
-            var module = string.Join('.', segments);
+            var module = string.Join("::", segments);
 
             if (!modules.Add(module))
             {
@@ -708,7 +708,7 @@ internal static class PackageLoader
     }
 
     private static bool IsValidModuleName(string module) =>
-        module.Length != 0 && module.Split('.').All(IsIdentifier);
+        module.Length != 0 && module.Split("::", StringSplitOptions.None).All(IsIdentifier);
 
     private static bool IsIdentifier(string identifier)
     {

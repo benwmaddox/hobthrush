@@ -10,7 +10,16 @@ internal sealed record Token(string Kind, string Text, int Line, int Column, str
     public Range Range => new(Line, Column, Line, Column + Math.Max(Text.Length, 1));
 }
 
-internal sealed record TypeSyntax(string Name, IReadOnlyList<TypeSyntax> Args, Token At);
+internal sealed record SourceDeclarationRefSyntax(
+    string? Root,
+    IReadOnlyList<string> Module,
+    string Declaration,
+    Token At)
+{
+    public bool IsQualified => Root is not null;
+}
+
+internal sealed record TypeSyntax(SourceDeclarationRefSyntax Reference, IReadOnlyList<TypeSyntax> Args, Token At);
 internal sealed record TypeParameterSyntax(string Name, Token At);
 internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record EffectSyntax(string Name, Token At);
@@ -28,18 +37,10 @@ internal sealed record FunctionDecl(
     IReadOnlyList<EffectSyntax> Effects,
     IReadOnlyList<Stmt> Body,
     Token At);
-internal sealed record ImportSymbol(string Name, Token At);
-internal sealed record ImportDecl(
-    string Module,
-    Token At,
-    Token ModuleAt,
-    IReadOnlyList<ImportSymbol> Symbols,
-    string? DependencyAlias = null);
 internal sealed record ParsedProgram(
     string Module,
     Token ModuleAt,
     string File,
-    IReadOnlyList<ImportDecl> Imports,
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs,
@@ -59,7 +60,8 @@ internal sealed record BoolExpr(Token At, bool Value) : Expr(At);
 internal sealed record TextExpr(Token At, string Value) : Expr(At);
 internal sealed record NameExpr(Token At, string Name) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
-internal sealed record CallExpr(Token At, string Name, IReadOnlyList<Expr> Arguments) : Expr(At);
+internal sealed record DeclarationRefExpr(Token At, SourceDeclarationRefSyntax Reference) : Expr(At);
+internal sealed record CallExpr(Token At, SourceDeclarationRefSyntax Reference, IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record MemberCallExpr(
     Token At,
     Expr Target,
@@ -67,7 +69,10 @@ internal sealed record MemberCallExpr(
     Token MemberAt,
     IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record StructFieldValue(string Name, Expr Value, Token At);
-internal sealed record StructConstructExpr(Token At, string Name, IReadOnlyList<StructFieldValue> Fields) : Expr(At);
+internal sealed record StructConstructExpr(
+    Token At,
+    SourceDeclarationRefSyntax Reference,
+    IReadOnlyList<StructFieldValue> Fields) : Expr(At);
 internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
 internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
@@ -75,7 +80,7 @@ internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
 internal abstract record Pattern(Token At);
 internal sealed record VariantPattern(
     Token At,
-    string? UnionName,
+    SourceDeclarationRefSyntax? Union,
     string VariantName,
     IReadOnlyList<string> Bindings) : Pattern(At);
 internal sealed record WildcardPattern(Token At) : Pattern(At);

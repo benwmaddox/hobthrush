@@ -1,4 +1,4 @@
-module fixture.duplicate_generic_parameter;
+module fixture::duplicate_generic_parameter;
 
 pub fn identity<T, T>(value: T) -> T effects {} {
     return value;

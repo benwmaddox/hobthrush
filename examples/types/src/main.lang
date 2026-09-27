@@ -1,4 +1,4 @@
-module example.types;
+module example::types;
 
 pub union Response {
     Accepted(message: Text, valid: bool),
@@ -11,10 +11,10 @@ pub fn enabled() -> bool effects {} {
     return true;
 }
 
-pub fn display(response: Response) -> Text effects {} {
+pub fn display(response: self::example::types::Response) -> Text effects {} {
     return match response {
-        Response.Accepted(message, valid) => message,
-        Response.Rejected(code) => "rejected",
+        self::example::types::Response.Accepted(message, valid) => message,
+        self::example::types::Response.Rejected(code) => "rejected",
     };
 }
 
@@ -25,7 +25,7 @@ pub fn option_text(value: Option<Text>) -> Text effects {} {
     };
 }
 
-pub fn result_text(value: Result<Text, ParseError>) -> Text effects {} {
+pub fn result_text(value: Result<Text, self::example::types::ParseError>) -> Text effects {} {
     return match value {
         Ok(message) => message,
         Err(error) => "failed",
@@ -36,16 +36,16 @@ pub fn absent() -> Option<Text> effects {} {
     return None;
 }
 
-pub fn failed() -> Result<Text, ParseError> effects {} {
-    return Err(ParseError.Invalid);
+pub fn failed() -> Result<Text, self::example::types::ParseError> effects {} {
+    return Err(self::example::types::ParseError.Invalid);
 }
 
 pub fn main() -> Text effects {} {
-    let is_enabled: bool = enabled();
-    let response: Response = Response.Accepted("escaped quote: \"", is_enabled);
-    let optional: Option<Text> = Some(display(response));
-    let parsed: Result<Text, ParseError> = Ok(option_text(optional));
-    let absent_message: Text = option_text(absent());
-    let failure_message: Text = result_text(failed());
-    return result_text(parsed);
+    let is_enabled: bool = self::example::types::enabled();
+    let response: self::example::types::Response = self::example::types::Response.Accepted("escaped quote: \"", is_enabled);
+    let optional: Option<Text> = Some(self::example::types::display(response));
+    let parsed: Result<Text, self::example::types::ParseError> = Ok(self::example::types::option_text(optional));
+    let absent_message: Text = self::example::types::option_text(self::example::types::absent());
+    let failure_message: Text = self::example::types::result_text(self::example::types::failed());
+    return self::example::types::result_text(parsed);
 }

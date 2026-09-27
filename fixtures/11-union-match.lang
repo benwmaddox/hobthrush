@@ -1,3 +1,3 @@
-module fixture.union_example;
+module fixture::union_example;
 pub union Choice { Yes, No }
-pub fn value(x: Choice) -> i32 effects {} { return match x { Choice.Yes => 1, Choice.No => 0, }; }
+pub fn value(x: self::fixture::union_example::Choice) -> i32 effects {} { return match x { self::fixture::union_example::Choice.Yes => 1, self::fixture::union_example::Choice.No => 0, }; }

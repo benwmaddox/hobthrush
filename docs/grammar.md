@@ -3,10 +3,12 @@
 The parser accepts the implemented pure-language slice below. The wider V1 syntax in [the PRD](PRD.md) remains a design target; unsupported declarations and statements fail with a diagnostic.
 
 ```ebnf
-module          = "module", module_path, ";", { import_decl }, { declaration } ;
-module_path     = lexical_identifier, { ".", lexical_identifier } ;
-import_decl     = "import", [ bare_identifier, "::" ], module_path, "{", import_symbols, "}", ";" ;
-import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
+module          = "module", module_path, ";", { declaration } ;
+module_path     = lexical_identifier, { "::", lexical_identifier } ;
+qualified_ref   = namespace_root, "::", module_segment, "::", { module_segment, "::" }, declaration_identifier ;
+namespace_root  = "self" | bare_identifier ;
+module_segment  = lexical_identifier ;
+declaration_identifier = lexical_identifier ;
 declaration     = [ "pub" ], ( function | union | struct ) | test_declaration ;
 
 function        = "fn", bare_identifier, [ "<", type_parameters, ">" ], "(", [ parameters ], ")",
@@ -20,7 +22,9 @@ parameters      = parameter, { ",", parameter }, [ "," ] ;
 parameter       = bare_identifier, ":", type ;
 
 type            = type_name, [ "<", type, { ",", type }, ">" ] ;
-type_name       = bare_identifier, { ".", member_identifier } ;
+type_name       = builtin_type | type_parameter | qualified_ref ;
+builtin_type    = "i32" | "bool" | "Text" | "Option" | "Result" | "FsError" | "FsRead" ;
+type_parameter  = bare_identifier ;
 
 union           = "union", bare_identifier, "{", [ variant, { ",", variant }, [ "," ] ], "}" ;
 variant         = member_identifier, [ "(", payload_fields, ")" ] ;
@@ -51,11 +55,11 @@ unary           = [ "-" ], postfix ;
 postfix         = primary, { field_access | member_call } ;
 field_access    = ".", member_identifier ;
 member_call     = ".", member_identifier, "(", [ arguments ], ")" ;
-primary         = integer | boolean | text | bare_identifier | call | struct_construction
+primary         = integer | boolean | text | bare_identifier | qualified_ref | call | struct_construction
                 | "(", expression, ")" ;
-call            = bare_identifier, "(", [ arguments ], ")" ;
+call            = qualified_ref, "(", [ arguments ], ")" | bare_identifier, "(", [ arguments ], ")" ;
 struct_construction
-                = bare_identifier, "{", [ field_values ], "}" ;
+                = qualified_ref, "{", [ field_values ], "}" | bare_identifier, "{", [ field_values ], "}" ;
 field_values    = field_value, { ",", field_value }, [ "," ] ;
 field_value     = member_identifier, ":", expression ;
 arguments       = expression, { ",", expression }, [ "," ] ;
@@ -64,6 +68,8 @@ match_expression = "match", expression, "{", match_arm, { ",", match_arm }, [ ",
 match_arm       = pattern, "=>", expression ;
 pattern         = "_"
                 | bare_identifier, [ "(", [ bindings ], ")" ]
+                | builtin_type, ".", member_identifier, [ "(", [ bindings ], ")" ]
+                | qualified_ref, ".", member_identifier, [ "(", [ bindings ], ")" ]
                 | bare_identifier, ".", member_identifier, [ "(", [ bindings ], ")" ] ;
 bindings        = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 
@@ -76,7 +82,9 @@ member_identifier = lexical_identifier ;
 bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await", "with" ;
 ```
 
-Every package source file has one `module` header. Imports, when present, follow that header and precede declarations. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing dots with directory separators. For example, `module text.validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Imports name one module and an explicit, non-empty list of symbols. A same-package import is `import text.validation { normalize, NormalizeError };`. A dependency import qualifies the module with its declared package alias, as in `import validation::text.validation { normalize, NormalizeError };`. Aliases select packages; imported symbols retain their source names. Wildcard imports and transitive imports are not supported.
+The `qualified_ref` primary is a syntactic declaration-reference form, including the base of a zero-payload union variant such as `self::app::main::Choice.Empty`. Semantic checking accepts it as a value only when it resolves to a supported value-producing case; arbitrary function or type declarations are not first-class values. Calls and struct constructions use their separate productions.
+
+Every package source file has one `module` header followed by declarations; source-level imports do not exist, and a legacy top-level `import` is a syntax error. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing `::` with directory separators. For example, `module text::validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Every user declaration reference has a package root, one or more module segments, and a declaration name separated by `::`: `self::text::validation::normalize` names a declaration in the current package, while `validation::text::validation::normalize` names one in the direct dependency alias `validation`. The alias `self` is reserved. A dependency alias exposes only that direct package; aliases are not re-exported transitively. Built-in types and constructors such as `Option<T>`, `Some`, `None`, `Ok`, `Err`, and `FsError` retain short forms, as do local value expressions. Bare `self` follows ordinary local-name rules and is a namespace root only when followed by `::`. An unqualified user declaration may parse as a name, but only locals, built-ins, and type parameters are valid in that form; user declarations require qualification. Use `.` for value fields, member operations, and union variants, such as `self::catalog::message::Message.Ready(value)`. Module and declaration segments use contextual identifier rules.
 
 Package commands use a package directory rather than a source-file path:
 
@@ -99,11 +107,11 @@ validation = "../text-validation"
 
 The target directory must contain a valid package manifest with `kind = "lib"`. Dependency paths are resolved relative to the manifest that declares them, and dependencies may declare their own local path dependencies. Separate dependency roots cannot share the same package name and version. Path dependencies are local filesystem references; Git sources, registries, caches, `lang add` or other package-install commands, and build receipts are not implemented.
 
-The reader supports a simple TOML subset: values are plain double-quoted strings, blank lines and comments outside quoted values are allowed, and escapes are not. `name` must be filesystem-safe; `version` must be non-empty but is not semver-validated; `source_root` must be a normalized, forward-slash relative directory inside the package. `kind` is `"cli"` or `"lib"`; `entry_module` is a valid dotted module name, required for CLI packages and forbidden for libraries. Unknown, missing, duplicate, or invalid keys and values are rejected. A CLI package's entry module must exist and define one supported zero-argument `main() -> i32|bool|Text`. Library packages do not have an entrypoint. See [the package example](../examples/library-package/lang.toml) for a package dependency and same-package import.
+The reader supports a simple TOML subset: values are plain double-quoted strings, blank lines and comments outside quoted values are allowed, and escapes are not. `name` must be filesystem-safe; `version` must be non-empty but is not semver-validated; `source_root` must be a normalized, forward-slash relative directory inside the package. `kind` is `"cli"` or `"lib"`; `entry_module` is a valid `::`-separated module name, such as `app::main`, required for CLI packages and forbidden for libraries. Unknown, missing, duplicate, or invalid keys and values are rejected. A CLI package's entry module must exist and define one supported zero-argument `main() -> i32|bool|Text`. Library packages do not have an entrypoint. The dependency alias `self` is reserved. See [the package example](../examples/library-package/lang.toml) for qualified same-package and dependency references.
 
 `lang lock PACKAGE_DIRECTORY` resolves the complete local path graph and writes a deterministic `lang.lock`. The JSON lock records the root name, version, and manifest hash, followed by each dependency's package-relative path, name, version, content hash, and aliases to its direct dependencies. Content hashing includes each dependency's manifest and `.lang` source files in normalized relative-path order; dependency source line endings are normalized, and generated `out/` files are excluded. The paths in the lock remain relative so the package directory can move between workspaces. A package with dependencies must have a valid, current lock before `check`, `build`, or `run`; missing, malformed, and stale locks report `E_LOCK`. Run `lang lock` again to create or update it. Dependency-free packages need no lockfile. Path dependencies work offline.
 
-The resolver loads the root package and its local path dependencies. A same-package import or dependency-qualified import makes only the listed public declarations available in the importing module. Private declarations remain module-local, and importing a module does not make its own imports visible to downstream modules. Same-named module paths in distinct dependency packages retain separate type and symbol identities.
+The resolver loads the root package and its local path dependencies. A declaration reference directly names the package root, module path, and declaration. The `self` root selects the current package; another root selects a declared direct dependency. Same-package declarations are visible by qualified reference, while private declarations remain module-local. A cross-module or cross-package reference to a private declaration reports `E_ACCESS_PRIVATE`; an unknown alias, module, or declaration reports `E_NAME_UNRESOLVED`. A dependency's aliases are not visible to its consumer. Same-named module paths in distinct dependency packages retain separate type and symbol identities.
 
 A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. Generic functions may declare type parameters before their parameter list. Calls infer those parameters from independently typed argument expressions; each type parameter must occur in at least one function parameter type. For example, `require<T, E>(value: Option<T>, error: E) -> Result<T, E>` can infer `T` and `E` from an already typed `Option<T>` local and an independently typed error value. Generic function bodies can use their type parameters as values and in supported type constructors, but cannot apply operations that require a concrete type such as `T + T`.
 
@@ -117,17 +125,19 @@ Structs are immutable, non-generic, nominal struct types. Empty structs are lega
 
 ```lang
 pub struct User { name: Text, age: i32 }
-let user: User = User { age: 37, name: "Ada" };
-return user.name;
+pub fn user_name() -> Text effects {} {
+    let user: self::app::main::User = self::app::main::User { age: 37, name: "Ada" };
+    return user.name;
+}
 ```
 
 Initializer expressions are evaluated in source order, including when that order differs from the declaration order. Duplicate initializers report `E_FIELD_DUPLICATE`, omitted fields report `E_FIELD_MISSING`, unknown initializers or reads report `E_FIELD_UNKNOWN`, and a value with the wrong field type reports `E_TYPE_MISMATCH`. Duplicate field declarations report `E_NAME_DUPLICATE`.
 
-Field reads can be chained from a local, call, parenthesized value, or struct construction, for example `user.address.city`, `make_user().name`, `(user).name`, and `User { name: "Ada", age: 37 }.name`. A dotted call parses as a member call; the implemented member operations are union constructors, `FsRead.read_text(path)`, and `Text.trim()`. General methods are not implemented. A receiver local takes precedence over a matching type name, so local receiver resolution remains deterministic. A dotted no-call form such as `Choice.Empty` is resolved as a zero-payload union variant only when the left name is not shadowed by a local.
+Field reads can be chained from a local, qualified function call, parenthesized value, or struct construction, for example `user.address.city`, `self::app::main::make_user().name`, `(user).name`, and `self::app::main::User { name: "Ada", age: 37 }.name`. A dotted call parses as a member call; the implemented member operations are union constructors, `FsRead.read_text(path)`, and `Text.trim()`. General methods are not implemented. A dotted no-call form such as `self::app::main::Choice.Empty` is resolved as a zero-payload union variant only when the left side is a qualified declaration reference; a dotted access rooted in a local remains a value-field read.
 
-A struct may contain itself through `Option`, `Result`, or a tagged union. Cycles made only of direct struct fields are rejected with `E_TYPE_MISMATCH`; a bare recursive field such as `struct Node { next: Node }` is invalid.
+A struct may contain itself through `Option`, `Result`, or a tagged union. Cycles made only of direct struct fields are rejected with `E_TYPE_MISMATCH`; a direct recursive field such as `struct Node { next: self::app::main::Node }` is invalid.
 
-A struct construction at the top level of a match scrutinee is ambiguous with the match-arm brace and is disabled there. Write `match (Box { value: Choice.Yes }).value { Choice.Yes => 1, Choice.No => 0 }` to use a struct construction within a union-valued scrutinee. Existing forms such as `match value { Some(x) => x, None => 0 }` continue to use the brace for match arms.
+A struct construction at the top level of a match scrutinee is ambiguous with the match-arm brace and is disabled there. Write `match (self::app::main::Box { value: self::app::main::Choice.Yes }).value { self::app::main::Choice.Yes => 1, self::app::main::Choice.No => 0 }` to use a struct construction within a union-valued scrutinee. Existing forms such as `match value { Some(x) => x, None => 0 }` continue to use the brace for match arms.
 
 The implemented types are `i32`, `bool`, `Text`, immutable non-generic structs, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above. `text.length` returns an `i32` count of Unicode scalar values; a supplementary character such as 😀 counts once. `text.trim()` removes leading and trailing Unicode whitespace using the pinned runtime's string-trim behavior.
 
@@ -137,7 +147,7 @@ Language tests use `test "name" { ... }` at module scope. A test body may contai
 
 Comparison operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They are left-associative, and bind after arithmetic: `*`, then `+`/`-`, then ordering comparisons, then equality comparisons. Equality supports matching `i32`, `bool`, or `Text` operands; ordering supports only `i32`. A comparison returns `bool`. There are no logical operators in this slice.
 
-Use `Choice.Yes` or `Choice.Value(3)` to construct a declared union. Built-in constructors use `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. `None`, `Some`, `Ok`, and `Err` need an expected type from a local annotation, return type, or function parameter. A same-named user function takes precedence. Fully qualified `Option<T>.Some` and `Result<T, E>.Ok` construction is deferred.
+Use `self::app::main::Choice.Yes` or `self::app::main::Choice.Value(3)` to construct a declared union. Built-in constructors use `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. `None`, `Some`, `Ok`, and `Err` need an expected type from a local annotation, return type, or function parameter. These unqualified spellings always denote built-in constructors; a user function with the same spelling requires a qualified reference and does not shadow them. Fully qualified `Option<T>.Some` and `Result<T, E>.Ok` construction is deferred.
 
 A match covers every union variant, including `Some`/`None` or `Ok`/`Err`; `_` is an explicit wildcard. Payload pattern names bind the payload values and do not need to match named field labels. Match arms use `=>` and are comma-separated.
 
