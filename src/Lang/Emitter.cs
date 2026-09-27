@@ -12,12 +12,107 @@ internal static class Emitter
                 function.Parameters.Count == 0 &&
                 (function.ReturnType.IsI32 || function.ReturnType.IsBool || function.ReturnType.IsText))
             : null;
-        if (executable && entry is null)
+        var entryCommand = program.EntryCommandId is int commandId
+            ? program.Commands.FirstOrDefault(command => command.Id == commandId)
+            : null;
+        if (executable && entry is null && entryCommand is null)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
 
         var emitter = new SourceEmitter(program);
-        return emitter.Emit(entry, executable);
+        return emitter.Emit(entry, executable, command: entryCommand);
     }
+
+    public static string EmitCommandSchema(CheckedProgram program)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("schema_version", 1);
+            writer.WriteStartArray("commands");
+            foreach (var command in program.Commands.OrderBy(command => command.Id))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name", command.Name);
+                writer.WriteString("help", command.Help);
+                writer.WriteString("handler", command.HandlerReference);
+                writer.WriteString("error_formatter", command.ErrorReference);
+                WriteCommandInputs(writer, command, CheckedCommandInputKind.Argument, includeDefault: false);
+                WriteCommandInputs(writer, command, CheckedCommandInputKind.Option, includeDefault: true);
+                WriteCommandInputs(writer, command, CheckedCommandInputKind.Flag, includeDefault: false);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+            writer.Flush();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray()).Replace("\r\n", "\n", StringComparison.Ordinal) + "\n";
+    }
+
+    private static void WriteCommandInputs(
+        Utf8JsonWriter writer,
+        CheckedCommand command,
+        CheckedCommandInputKind kind,
+        bool includeDefault)
+    {
+        var propertyName = kind switch
+        {
+            CheckedCommandInputKind.Argument => "arguments",
+            CheckedCommandInputKind.Option => "options",
+            CheckedCommandInputKind.Flag => "flags",
+            _ => throw new InvalidOperationException("Unknown checked command input kind")
+        };
+
+        writer.WriteStartArray(propertyName);
+        foreach (var input in command.Inputs.Where(input => input.Kind == kind).OrderBy(input => input.FieldIndex))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("name", input.Name);
+            writer.WriteString("type", CommandTypeName(input.Type));
+            if (includeDefault)
+            {
+                writer.WritePropertyName("default");
+                WriteCommandLiteral(writer, input.Default);
+            }
+            writer.WriteString("help", input.Help);
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+    }
+
+    private static void WriteCommandLiteral(Utf8JsonWriter writer, CheckedCommandLiteral? literal)
+    {
+        if (literal is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        switch (literal.Kind)
+        {
+            case CheckedCommandLiteralKind.Text:
+                writer.WriteStringValue(literal.TextValue);
+                break;
+            case CheckedCommandLiteralKind.I32:
+                writer.WriteNumberValue(literal.IntegerValue!.Value);
+                break;
+            case CheckedCommandLiteralKind.Boolean:
+                writer.WriteBooleanValue(literal.BooleanValue!.Value);
+                break;
+            default:
+                throw new InvalidOperationException("Unknown checked command literal kind");
+        }
+    }
+
+    private static string CommandTypeName(LangType type) => type.Kind switch
+    {
+        LangTypeKind.FilePath => "FilePath",
+        LangTypeKind.Text => "Text",
+        LangTypeKind.I32 => "i32",
+        LangTypeKind.Bool => "bool",
+        _ => throw new InvalidOperationException("Unsupported checked command input type")
+    };
 
     public static string EmitTests(CheckedProgram program, string? rootPackageId = null)
     {
@@ -46,7 +141,8 @@ internal static class Emitter
         public string Emit(
             CheckedFunction? entry,
             bool executable,
-            IReadOnlyList<CheckedTest>? tests = null)
+            IReadOnlyList<CheckedTest>? tests = null,
+            CheckedCommand? command = null)
         {
             _source.AppendLine("using System;");
             _source.AppendLine("using System.Globalization;");
@@ -56,7 +152,7 @@ internal static class Emitter
                 _source.AppendLine("using System.Security;");
                 _source.AppendLine("using System.Text;");
             }
-            else if (UsesTextLength)
+            else if (UsesTextLength || command is not null)
             {
                 _source.AppendLine("using System.Text;");
             }
@@ -65,6 +161,7 @@ internal static class Emitter
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
+            if (NeedsFilePathType) EmitFilePathType();
             if (NeedsFsReadType) EmitFsReadType();
             if (NeedsFsErrorType) EmitFsErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
@@ -75,6 +172,8 @@ internal static class Emitter
             EmitArithmeticHelpers();
             if (tests is not null)
                 EmitTestEntryPoint(tests);
+            else if (command is not null)
+                EmitCommandEntryPoint(command);
             else if (executable)
                 EmitEntryPoint(entry!);
 
@@ -103,6 +202,16 @@ internal static class Emitter
             _source.AppendLine("    public sealed class FsRead");
             _source.AppendLine("    {");
             _source.AppendLine("        internal FsRead() { }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFilePathType()
+        {
+            _source.AppendLine("    public sealed class FilePath");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal FilePath(string value) => Value = value;");
+            _source.AppendLine("        internal string Value { get; }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -465,6 +574,304 @@ internal static class Emitter
             _source.AppendLine("    }");
         }
 
+        private void EmitCommandEntryPoint(CheckedCommand entryCommand)
+        {
+            _source.AppendLine("    public static int Main(string[] args)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+            _source.AppendLine("            if (args.Length == 1 && args[0] == \"--help\")");
+            _source.AppendLine("            {");
+            _source.Append("                Console.WriteLine(").Append(JsonSerializer.Serialize(TopLevelHelp())).AppendLine(");");
+            _source.AppendLine("                return 0;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            if (args.Length == 0)");
+            _source.AppendLine("                return CliUsageError(\"CLI_MISSING_ARGUMENT\", \"command\");");
+            _source.AppendLine("            if (args[0].StartsWith(\"--\", StringComparison.Ordinal))");
+            _source.AppendLine("                return CliUsageError(\"CLI_UNKNOWN_OPTION\", args[0]);");
+            _source.AppendLine("            switch (args[0])");
+            _source.AppendLine("            {");
+            foreach (var command in program.Commands.OrderBy(command => command.Id))
+            {
+                _source.Append("                case ").Append(JsonSerializer.Serialize(command.Name)).AppendLine(":");
+                _source.AppendLine("                    if (args.Length == 2 && args[1] == \"--help\")");
+                _source.AppendLine("                    {");
+                _source.Append("                        Console.WriteLine(").Append(JsonSerializer.Serialize(CommandHelp(command))).AppendLine(");");
+                _source.AppendLine("                        return 0;");
+                _source.AppendLine("                    }");
+                _source.Append("                    return RunCommand_").Append(command.Id.ToString(CultureInfo.InvariantCulture))
+                    .AppendLine("(args[1..]);");
+            }
+            _source.AppendLine("                default:");
+            _source.AppendLine("                    return CliUsageError(\"CLI_UNKNOWN_COMMAND\", args[0]);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (Exception)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            Console.Error.WriteLine(\"Runtime fault\");");
+            _source.AppendLine("            return 70;");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            foreach (var command in program.Commands.OrderBy(command => command.Id))
+                EmitCommandParser(command);
+            EmitCliUsageError();
+        }
+
+        private void EmitCommandParser(CheckedCommand command)
+        {
+            var inputs = command.Inputs.OrderBy(input => input.FieldIndex).ToArray();
+            _source.Append("    private static int RunCommand_")
+                .Append(command.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(string[] args)");
+            _source.AppendLine("    {");
+            foreach (var input in inputs)
+            {
+                var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+                if (input.Kind == CheckedCommandInputKind.Flag)
+                {
+                    _source.Append("        var input_").Append(index).AppendLine(" = false;");
+                    _source.Append("        var seen_").Append(index).AppendLine(" = false;");
+                }
+                else
+                {
+                    _source.Append("        string? raw_").Append(index).AppendLine(" = null;");
+                    _source.Append("        var seen_").Append(index).AppendLine(" = false;");
+                }
+            }
+            _source.AppendLine("        var positionalIndex = 0;");
+            _source.AppendLine("        var positionalOnly = false;");
+            _source.AppendLine("        for (var argumentIndex = 0; argumentIndex < args.Length; argumentIndex++)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var token = args[argumentIndex];");
+            _source.AppendLine("            if (!positionalOnly && token == \"--\")");
+            _source.AppendLine("            {");
+            _source.AppendLine("                positionalOnly = true;");
+            _source.AppendLine("                continue;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            if (!positionalOnly && token.StartsWith(\"--\", StringComparison.Ordinal))");
+            _source.AppendLine("            {");
+            _source.AppendLine("                var equalsIndex = token.IndexOf('=');");
+            _source.AppendLine("                var optionName = equalsIndex < 0 ? token : token[..equalsIndex];");
+            _source.AppendLine("                var hasInlineValue = equalsIndex >= 0;");
+            _source.AppendLine("                var inlineValue = hasInlineValue ? token[(equalsIndex + 1)..] : string.Empty;");
+            _source.AppendLine("                switch (optionName)");
+            _source.AppendLine("                {");
+            foreach (var input in inputs.Where(input => input.Kind is CheckedCommandInputKind.Option or CheckedCommandInputKind.Flag))
+            {
+                var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+                var optionName = JsonSerializer.Serialize("--" + input.Name);
+                _source.Append("                    case ").Append(optionName).AppendLine(":");
+                _source.Append("                        if (seen_").Append(index).AppendLine(")");
+                _source.AppendLine("                            return CliUsageError(\"CLI_DUPLICATE_OPTION\", optionName);");
+                _source.Append("                        seen_").Append(index).AppendLine(" = true;");
+                if (input.Kind == CheckedCommandInputKind.Flag)
+                {
+                    _source.AppendLine("                        if (hasInlineValue)");
+                    _source.AppendLine("                            return CliUsageError(\"CLI_INVALID_VALUE\", optionName);");
+                    _source.Append("                        input_").Append(index).AppendLine(" = true;");
+                }
+                else
+                {
+                    _source.AppendLine("                        if (hasInlineValue)");
+                    _source.AppendLine("                        {");
+                    _source.Append("                            raw_").Append(index).AppendLine(" = inlineValue;");
+                    _source.AppendLine("                        }");
+                    _source.AppendLine("                        else");
+                    _source.AppendLine("                        {");
+                    _source.AppendLine("                            if (argumentIndex + 1 >= args.Length || args[argumentIndex + 1].StartsWith(\"--\", StringComparison.Ordinal))");
+                    _source.AppendLine("                                return CliUsageError(\"CLI_MISSING_VALUE\", optionName);");
+                    _source.Append("                            raw_").Append(index).AppendLine(" = args[++argumentIndex];");
+                    _source.AppendLine("                        }");
+                }
+                _source.AppendLine("                        break;");
+            }
+            _source.AppendLine("                    default:");
+            _source.AppendLine("                        return CliUsageError(\"CLI_UNKNOWN_OPTION\", optionName);");
+            _source.AppendLine("                }");
+            _source.AppendLine("                continue;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            switch (positionalIndex++)");
+            _source.AppendLine("            {");
+            var argumentOrdinal = 0;
+            foreach (var input in inputs.Where(input => input.Kind == CheckedCommandInputKind.Argument))
+            {
+                var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+                _source.Append("                case ").Append(argumentOrdinal++.ToString(CultureInfo.InvariantCulture)).AppendLine(":");
+                _source.Append("                    raw_").Append(index).AppendLine(" = token;");
+                _source.Append("                    seen_").Append(index).AppendLine(" = true;");
+                _source.AppendLine("                    break;");
+            }
+            _source.AppendLine("                default:");
+            _source.AppendLine("                    return CliUsageError(\"CLI_INVALID_VALUE\", token);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+
+            foreach (var input in inputs)
+            {
+                var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+                if (input.Kind == CheckedCommandInputKind.Argument)
+                {
+                    _source.Append("        if (!seen_").Append(index).AppendLine(")");
+                    _source.Append("            return CliUsageError(\"CLI_MISSING_ARGUMENT\", ")
+                        .Append(JsonSerializer.Serialize(input.Name)).AppendLine(");");
+                }
+            }
+
+            foreach (var input in inputs.Where(input => input.Kind == CheckedCommandInputKind.Option))
+            {
+                var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+                _source.Append("        if (!seen_").Append(index).AppendLine(")");
+                _source.AppendLine("        {");
+                _source.Append("            raw_").Append(index).Append(" = ")
+                    .Append(JsonSerializer.Serialize(CommandDefaultString(input))).AppendLine(";");
+                _source.AppendLine("        }");
+            }
+
+            foreach (var input in inputs.Where(input => input.Kind != CheckedCommandInputKind.Flag))
+                EmitCommandInputConversion(input);
+
+            var fields = string.Join(", ", inputs.Select(input =>
+                "Field_" + input.FieldIndex.ToString(CultureInfo.InvariantCulture) + ": input_" +
+                input.FieldIndex.ToString(CultureInfo.InvariantCulture)));
+            var resultType = "Result<string, " + EmitType(command.ErrorType) + ">";
+            _source.Append("        var result = Function_").Append(command.HandlerFunctionId.ToString(CultureInfo.InvariantCulture))
+                .Append("(new Struct_").Append(command.ArgsStructId.ToString(CultureInfo.InvariantCulture))
+                .Append('(').Append(fields).AppendLine("));");
+            _source.Append("        if (result is ").Append(resultType).AppendLine(".Ok success)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            Console.WriteLine(success.Value);");
+            _source.AppendLine("            return 0;");
+            _source.AppendLine("        }");
+            _source.Append("        if (result is ").Append(resultType).AppendLine(".Err failure)");
+            _source.AppendLine("        {");
+            _source.Append("            var message = Function_").Append(command.ErrorFunctionId.ToString(CultureInfo.InvariantCulture))
+                .AppendLine("(failure.Error);");
+            _source.AppendLine("            Console.Error.WriteLine(message);");
+            _source.AppendLine("            return 3;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        throw new InvalidOperationException(\"Invalid command handler result\");");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitCommandInputConversion(CheckedCommandInput input)
+        {
+            var index = input.FieldIndex.ToString(CultureInfo.InvariantCulture);
+            switch (input.Type.Kind)
+            {
+                case LangTypeKind.Text:
+                    _source.Append("        var input_").Append(index).Append(" = raw_").Append(index)
+                        .AppendLine(" ?? string.Empty;");
+                    break;
+                case LangTypeKind.I32:
+                    _source.Append("        if (!int.TryParse(raw_").Append(index)
+                        .AppendLine(", NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed_" + index + "))");
+                    _source.Append("            return CliUsageError(\"CLI_INVALID_VALUE\", ")
+                        .Append(JsonSerializer.Serialize(input.Name)).AppendLine(");");
+                    _source.Append("        var input_").Append(index).Append(" = parsed_").Append(index).AppendLine(";");
+                    break;
+                case LangTypeKind.FilePath:
+                    _source.Append("        var value_").Append(index).Append(" = raw_").Append(index).AppendLine(" ?? string.Empty;");
+                    _source.Append("        if (value_").Append(index).Append(".Length == 0 || value_").Append(index)
+                        .AppendLine(".IndexOf('\\0') >= 0)");
+                    _source.Append("            return CliUsageError(\"CLI_INVALID_VALUE\", ")
+                        .Append(JsonSerializer.Serialize(input.Name)).AppendLine(");");
+                    _source.Append("        var input_").Append(index).Append(" = new FilePath(value_").Append(index).AppendLine(");");
+                    break;
+                default:
+                    throw new InvalidOperationException("Unsupported checked command input type");
+            }
+        }
+
+        private static string CommandDefaultString(CheckedCommandInput input)
+        {
+            if (input.Default is null)
+                throw new InvalidOperationException("Checked command option is missing its default");
+            return input.Default.Kind switch
+            {
+                CheckedCommandLiteralKind.Text => input.Default.TextValue ?? string.Empty,
+                CheckedCommandLiteralKind.I32 => input.Default.IntegerValue!.Value.ToString(CultureInfo.InvariantCulture),
+                _ => throw new InvalidOperationException("Unsupported checked command default")
+            };
+        }
+
+        private string TopLevelHelp()
+        {
+            var lines = new List<string> { "Usage: <program> <command> [arguments]", "Commands:" };
+            foreach (var command in program.Commands.OrderBy(command => command.Id))
+                lines.Add("  " + command.Name + "  " + command.Help);
+            lines.Add("  --help  Show this help.");
+            return string.Join("\n", lines);
+        }
+
+        private static string CommandHelp(CheckedCommand command)
+        {
+            var lines = new List<string> { "Usage: " + command.Name + " <arguments>", command.Help };
+            var arguments = command.Inputs.Where(input => input.Kind == CheckedCommandInputKind.Argument)
+                .OrderBy(input => input.FieldIndex).ToArray();
+            if (arguments.Length != 0)
+            {
+                lines.Add("Arguments:");
+                lines.AddRange(arguments.Select(input => "  " + input.Name + "  " + input.Help));
+            }
+
+            var options = command.Inputs.Where(input => input.Kind == CheckedCommandInputKind.Option)
+                .OrderBy(input => input.FieldIndex).ToArray();
+            if (options.Length != 0)
+            {
+                lines.Add("Options:");
+                lines.AddRange(options.Select(input => "  --" + input.Name + " <" + CommandTypeName(input.Type) + ">  " + input.Help));
+            }
+
+            var flags = command.Inputs.Where(input => input.Kind == CheckedCommandInputKind.Flag)
+                .OrderBy(input => input.FieldIndex).ToArray();
+            if (flags.Length != 0)
+            {
+                lines.Add("Flags:");
+                lines.AddRange(flags.Select(input => "  --" + input.Name + "  " + input.Help));
+            }
+
+            lines.Add("  --help  Show this help.");
+            return string.Join("\n", lines);
+        }
+
+        private void EmitCliUsageError()
+        {
+            _source.AppendLine("    private static int CliUsageError(string code, string subject)");
+            _source.AppendLine("    {");
+            _source.AppendLine("""        Console.Error.WriteLine(code + ": \"" + EscapeCliSubject(subject) + "\"");""");
+            _source.AppendLine("        return 2;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    private static string EscapeCliSubject(string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var escaped = new StringBuilder(value.Length);");
+            _source.AppendLine("        foreach (var character in value)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            switch (character)");
+            _source.AppendLine("            {");
+            _source.AppendLine("""                case '\\': escaped.Append("\\\\"); break;""");
+            _source.AppendLine("""                case '"': escaped.Append("\\\""); break;""");
+            _source.AppendLine("                case '\\n': escaped.Append(\"\\\\n\"); break;");
+            _source.AppendLine("                case '\\r': escaped.Append(\"\\\\r\"); break;");
+            _source.AppendLine("                case '\\t': escaped.Append(\"\\\\t\"); break;");
+            _source.AppendLine("                case '\\0': escaped.Append(\"\\\\0\"); break;");
+            _source.AppendLine("                default:");
+            _source.AppendLine("                    var category = char.GetUnicodeCategory(character);");
+            _source.AppendLine("                    if (char.IsControl(character) || category is UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)");
+            _source.AppendLine("                        escaped.Append(\"\\\\u\").Append(((int)character).ToString(\"X4\", CultureInfo.InvariantCulture));");
+            _source.AppendLine("                    else");
+            _source.AppendLine("                        escaped.Append(character);");
+            _source.AppendLine("                    break;");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("        return escaped.ToString();");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
         private void EmitTestEntryPoint(IReadOnlyList<CheckedTest> tests)
         {
             _source.AppendLine("    public static int Main()");
@@ -560,6 +967,7 @@ internal static class Emitter
             LangTypeKind.I32 => "int",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
+            LangTypeKind.FilePath => "FilePath",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
@@ -582,6 +990,8 @@ internal static class Emitter
 
         private static string TypeParameterName(int ordinal) =>
             "T" + ordinal.ToString(CultureInfo.InvariantCulture);
+
+        private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
 
         private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText;
 

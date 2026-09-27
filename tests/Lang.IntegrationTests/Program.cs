@@ -69,6 +69,9 @@ internal static class IntegrationTests
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
+            ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
+            ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
+            ("typed CLI declarations validate entries, signatures, and parser spans", TestTypedCliCommandDiagnostics),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
             ("private struct and union access paths report package visibility", TestQualifiedPrivateTypeAccessPaths),
             ("qualified references enforce package visibility and resolution", TestPackageQualifiedReferenceDiagnostics),
@@ -96,6 +99,7 @@ internal static class IntegrationTests
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
             ("NativeAOT publishes and runs the current-host file executable", TestAotPublishAndRun),
             ("NativeAOT publishes and runs the current-host package executable", TestPackageAotPublishAndRun),
+            ("NativeAOT publishes and runs a typed command with its schema", TestCommandAotPublishAndRun),
             ("invalid main signatures receive an entrypoint diagnostic", TestInvalidEntrypoint),
             ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
@@ -1413,6 +1417,388 @@ internal static class IntegrationTests
         AssertRunOutput("ready" + Environment.NewLine, run);
     }
 
+    private static async Task TestTypedCliCommandRuntime(Harness harness)
+    {
+        const string main = """
+            module app::main;
+
+            command scan {
+                help "Scan a path.";
+                argument input: FilePath help "Path to scan.";
+                option label: Text = "ok" help "Output label.";
+                option limit: i32 = 1 help "Scan limit.";
+                option base: FilePath = "." help "Base directory.";
+                flag recursive help "Scan recursively.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+
+            pub union ScanError { Failed }
+
+            pub fn run(args: self::app::main::ScanArgs) -> Result<Text, self::handlers::ScanError> effects {} {
+                if args.label == "fail" { return Err(self::handlers::ScanError.Failed); }
+                if args.label == "fault" {
+                    let overflow: i32 = args.limit + 2147483647;
+                    return Ok(args.label);
+                }
+                return Ok(args.label);
+            }
+
+            pub fn describe(error: self::handlers::ScanError) -> Text effects {} {
+                return match error { self::handlers::ScanError.Failed => "scan failed" };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "typed-cli-runtime",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("typed-cli-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(string.Empty, check.StandardError, Describe(check));
+
+        var firstBuild = await harness.InvokePackageDirectoryAsync("typed-cli-build", packageRoot, "build");
+        AssertEqual(0, firstBuild.ExitCode, Describe(firstBuild));
+        AssertTrue(firstBuild.StandardOutput.StartsWith("Built executable: ", StringComparison.Ordinal), Describe(firstBuild));
+        var artifact = firstBuild.StandardOutput["Built executable: ".Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact) && File.Exists(artifact),
+            $"Expected the managed command executable at {artifact}. {Describe(firstBuild)}");
+        var schemaPath = Path.Combine(Path.GetDirectoryName(artifact)!, "command-schema.json");
+        AssertTrue(File.Exists(schemaPath), $"Expected command schema beside the executable: {schemaPath}");
+        var firstSchemaBytes = await File.ReadAllBytesAsync(schemaPath);
+        AssertTrue(firstSchemaBytes.Length > 0 && firstSchemaBytes[^1] == (byte)'\n'
+            && !firstSchemaBytes.Contains((byte)'\r'), "Command schema must be UTF-8 JSON with LF line endings and a final newline.");
+        using (var schemaDocument = JsonDocument.Parse(firstSchemaBytes))
+        {
+            var root = schemaDocument.RootElement;
+            AssertEqual(1, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 1.");
+            var commands = root.GetProperty("commands");
+            AssertEqual(1, commands.GetArrayLength(), "The entry module should define one command.");
+            var command = commands[0];
+            AssertEqual("scan", command.GetProperty("name").GetString(), "Schema command name mismatch.");
+            AssertEqual("Scan a path.", command.GetProperty("help").GetString(), "Schema command help mismatch.");
+            AssertEqual("self::handlers::run", command.GetProperty("handler").GetString(), "Schema handler must preserve its qualified reference.");
+            AssertEqual("self::handlers::describe", command.GetProperty("error_formatter").GetString(), "Schema error formatter must preserve its qualified reference.");
+
+            var arguments = command.GetProperty("arguments");
+            AssertEqual(1, arguments.GetArrayLength(), "Positional argument schema count mismatch.");
+            AssertEqual("input", arguments[0].GetProperty("name").GetString(), "Positional argument order/name mismatch.");
+            AssertEqual("FilePath", arguments[0].GetProperty("type").GetString(), "FilePath must remain explicit in the schema.");
+            AssertEqual("Path to scan.", arguments[0].GetProperty("help").GetString(), "Argument help mismatch.");
+
+            var options = command.GetProperty("options");
+            AssertEqual(3, options.GetArrayLength(), "Options must retain source declaration order.");
+            AssertEqual("label", options[0].GetProperty("name").GetString(), "First option name/order mismatch.");
+            AssertEqual("Text", options[0].GetProperty("type").GetString(), "Text option type mismatch.");
+            AssertEqual("ok", options[0].GetProperty("default").GetString(), "Text option default mismatch.");
+            AssertEqual("limit", options[1].GetProperty("name").GetString(), "Second option name/order mismatch.");
+            AssertEqual("i32", options[1].GetProperty("type").GetString(), "i32 option type mismatch.");
+            AssertEqual(1, options[1].GetProperty("default").GetInt32(), "i32 option default mismatch.");
+            AssertEqual("base", options[2].GetProperty("name").GetString(), "Third option name/order mismatch.");
+            AssertEqual("FilePath", options[2].GetProperty("type").GetString(), "FilePath option type mismatch.");
+            AssertEqual(".", options[2].GetProperty("default").GetString(), "FilePath option default mismatch.");
+
+            var flags = command.GetProperty("flags");
+            AssertEqual(1, flags.GetArrayLength(), "Flag schema count mismatch.");
+            AssertEqual("recursive", flags[0].GetProperty("name").GetString(), "Flag schema mismatch.");
+            AssertEqual("bool", flags[0].GetProperty("type").GetString(), "Flags must have boolean schema types.");
+        }
+
+        var secondBuild = await harness.InvokePackageDirectoryAsync("typed-cli-build-repeat", packageRoot, "build");
+        AssertEqual(0, secondBuild.ExitCode, Describe(secondBuild));
+        var secondArtifact = secondBuild.StandardOutput["Built executable: ".Length..].Trim();
+        var secondSchemaPath = Path.Combine(Path.GetDirectoryName(secondArtifact)!, "command-schema.json");
+        AssertTrue(File.Exists(secondSchemaPath), $"Repeated build did not emit {secondSchemaPath}.");
+        var secondSchemaBytes = await File.ReadAllBytesAsync(secondSchemaPath);
+        AssertTrue(firstSchemaBytes.SequenceEqual(secondSchemaBytes),
+            "Equivalent package builds must emit byte-for-byte deterministic command schemas.");
+
+        var topHelp = await harness.InvokePackageDirectoryAsync("typed-cli-top-help", packageRoot, "run", "--", "--help");
+        AssertEqual(0, topHelp.ExitCode, Describe(topHelp));
+        AssertTrue(topHelp.StandardOutput.Contains("scan", StringComparison.Ordinal)
+            && topHelp.StandardOutput.Contains("Scan a path.", StringComparison.Ordinal), Describe(topHelp));
+        var commandHelp = await harness.InvokePackageDirectoryAsync("typed-cli-command-help", packageRoot, "run", "--", "scan", "--help");
+        AssertEqual(0, commandHelp.ExitCode, Describe(commandHelp));
+        AssertTrue(commandHelp.StandardOutput.Contains("input", StringComparison.Ordinal)
+            && commandHelp.StandardOutput.Contains("--limit", StringComparison.Ordinal)
+            && commandHelp.StandardOutput.Contains("--recursive", StringComparison.Ordinal), Describe(commandHelp));
+
+        var success = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-success", packageRoot, "run", "--", "scan", "sample.txt", "--label", "ready", "--limit", "7", "--recursive");
+        AssertRunOutput("ready" + Environment.NewLine, success);
+        var defaults = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-defaults", packageRoot, "run", "--", "scan", "sample.txt");
+        AssertRunOutput("ok" + Environment.NewLine, defaults);
+        var leadingDash = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-leading-dash", packageRoot, "run", "--", "scan", "--", "--leading");
+        AssertRunOutput("ok" + Environment.NewLine, leadingDash);
+
+        var formattedError = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-formatted-error", packageRoot, "run", "--", "scan", "sample.txt", "--label", "fail");
+        AssertEqual(3, formattedError.ExitCode, Describe(formattedError));
+        AssertEqual(string.Empty, formattedError.StandardOutput, Describe(formattedError));
+        AssertEqual("scan failed" + Environment.NewLine, formattedError.StandardError, Describe(formattedError));
+
+        var runtimeFault = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-runtime-fault", packageRoot, "run", "--", "scan", "sample.txt", "--label", "fault");
+        AssertEqual(70, runtimeFault.ExitCode, Describe(runtimeFault));
+        AssertEqual(string.Empty, runtimeFault.StandardOutput, Describe(runtimeFault));
+        AssertEqual("Runtime fault" + Environment.NewLine, runtimeFault.StandardError, Describe(runtimeFault));
+
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-unknown-command", packageRoot, "run", "--", "bogus"),
+            "CLI_UNKNOWN_COMMAND");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-unknown-option", packageRoot, "run", "--", "scan", "sample.txt", "--unknown"),
+            "CLI_UNKNOWN_OPTION");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-missing-argument", packageRoot, "run", "--", "scan"),
+            "CLI_MISSING_ARGUMENT");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-missing-value", packageRoot, "run", "--", "scan", "sample.txt", "--limit"),
+            "CLI_MISSING_VALUE");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-duplicate-option", packageRoot, "run", "--", "scan", "sample.txt", "--limit", "1", "--limit", "2"),
+            "CLI_DUPLICATE_OPTION");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-invalid-i32", packageRoot, "run", "--", "scan", "sample.txt", "--limit", "one"),
+            "CLI_INVALID_VALUE");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync("typed-cli-invalid-filepath", packageRoot, "run", "--", "scan", string.Empty),
+            "CLI_INVALID_VALUE");
+
+        var escapedSubject = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-escaped-diagnostic", packageRoot, "run", "--", "unknown\n\tforged");
+        AssertEqual(2, escapedSubject.ExitCode, Describe(escapedSubject));
+        AssertEqual(string.Empty, escapedSubject.StandardOutput, Describe(escapedSubject));
+        AssertEqual("CLI_UNKNOWN_COMMAND: \"unknown\\n\\tforged\"" + Environment.NewLine, escapedSubject.StandardError,
+            "Control characters in CLI diagnostic subjects must be escaped on one physical stderr line.");
+    }
+
+    private static async Task TestCommandContextualIdentifiers(Harness harness)
+    {
+        const string main = """
+            module app::main;
+            command route {
+                help "Route a value.";
+                argument return: Text help "Value to route.";
+                option struct: i32 = 1 help "Contextual integer.";
+                flag assert help "Contextual flag.";
+                handler: self::handlers::route;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+            pub union RouteError { Failed }
+            pub fn route(args: self::app::main::RouteArgs) -> Result<Text, self::handlers::RouteError> effects {} {
+                let amount: i32 = args.struct;
+                if args.assert { return Ok(args.return); }
+                return Ok(args.return);
+            }
+            pub fn describe(error: self::handlers::RouteError) -> Text effects {} {
+                return match error { self::handlers::RouteError.Failed => "route failed" };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "typed-cli-contextual-identifiers",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("typed-cli-contextual-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var run = await harness.InvokePackageDirectoryAsync("typed-cli-contextual-run", packageRoot, "run", "--", "route", "contextual", "--assert");
+        AssertRunOutput("contextual" + Environment.NewLine, run);
+        var leadingDash = await harness.InvokePackageDirectoryAsync(
+            "typed-cli-contextual-leading-dash", packageRoot, "run", "--", "route", "--", "--leading");
+        AssertRunOutput("--leading" + Environment.NewLine, leadingDash);
+
+        const string standalone = """
+            module standalone;
+            pub union EchoError { Failed }
+            command echo {
+                help "Echo one value.";
+                argument value: Text help "Value to echo.";
+                handler: self::standalone::run;
+                error: self::standalone::describe;
+            }
+            pub fn run(args: self::standalone::EchoArgs) -> Result<Text, self::standalone::EchoError> effects {} {
+                return Ok(args.value);
+            }
+            pub fn describe(error: self::standalone::EchoError) -> Text effects {} {
+                return match error { self::standalone::EchoError.Failed => "echo failed" };
+            }
+            """;
+        var standaloneRun = await harness.InvokeAsync(
+            "typed-cli-standalone-file-run",
+            "run",
+            standalone,
+            "--",
+            "echo",
+            "--",
+            "--leading");
+        AssertRunOutput("--leading" + Environment.NewLine, standaloneRun);
+
+        const string legacyMain = "module standalone_main; pub fn main() -> Text effects {} { return \"legacy\"; }";
+        var legacyMainWithSeparator = await harness.InvokeAsync(
+            "typed-cli-legacy-main-separator",
+            "run",
+            legacyMain,
+            "--",
+            "unexpected");
+        AssertEqual(2, legacyMainWithSeparator.ExitCode, Describe(legacyMainWithSeparator));
+        AssertEqual(string.Empty, legacyMainWithSeparator.StandardOutput, Describe(legacyMainWithSeparator));
+        AssertTrue(legacyMainWithSeparator.StandardError.StartsWith("Usage: lang ", StringComparison.Ordinal),
+            "A separator must remain invalid for legacy main-based source execution.");
+    }
+
+    private static async Task TestTypedCliCommandDiagnostics(Harness harness)
+    {
+        const string main = """
+            module app::main;
+            command scan {
+                help "Scan a path.";
+                argument input: FilePath help "Path to scan.";
+                option limit: i32 = 1 help "Scan limit.";
+                flag recursive help "Scan recursively.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+            pub union ScanError { Failed }
+            pub fn run(args: self::app::main::ScanArgs) -> Result<Text, self::handlers::ScanError> effects {} { return Ok("done"); }
+            pub fn describe(error: self::handlers::ScanError) -> Text effects {} {
+                return match error { self::handlers::ScanError.Failed => "scan failed" };
+            }
+            """;
+
+        async Task ExpectError(string caseName, string mainSource, string handlerSource, string code) =>
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                caseName,
+                CliPackageManifest(),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = mainSource,
+                    ["src/handlers.lang"] = handlerSource
+                },
+                code,
+                "src/app/main.lang");
+
+        await ExpectError("typed-cli-duplicate-entry", main.Replace(
+            "argument input: FilePath help \"Path to scan.\";",
+            "argument input: FilePath help \"Path to scan.\";\n    argument input: Text help \"Second input.\";",
+            StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-duplicate-option", main.Replace(
+            "option limit: i32 = 1 help \"Scan limit.\";",
+            "option limit: i32 = 1 help \"Scan limit.\";\n    option limit: i32 = 2 help \"Second limit.\";",
+            StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-missing-entry", main.Replace(
+            "error: self::handlers::describe;\n", string.Empty, StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-unsupported-type", main.Replace(
+            "argument input: FilePath", "argument input: bool", StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-wrong-default", main.Replace(
+            "option limit: i32 = 1", "option limit: i32 = \"one\"", StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-empty-filepath-default", main.Replace(
+            "option limit: i32 = 1 help \"Scan limit.\";",
+            "option root: FilePath = \"\" help \"Root path.\";\n    option limit: i32 = 1 help \"Scan limit.\";",
+            StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-nul-filepath-default", main.Replace(
+            "option limit: i32 = 1 help \"Scan limit.\";",
+            "option root: FilePath = \"\\0\" help \"Root path.\";\n    option limit: i32 = 1 help \"Scan limit.\";",
+            StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-no-positional-arguments", main.Replace(
+            "argument input: FilePath help \"Path to scan.\";\n", string.Empty, StringComparison.Ordinal), handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-duplicate-command", main + "\n" + main[(main.IndexOf("command scan", StringComparison.Ordinal))..], handlers, "E_COMMAND_DECL");
+
+        await ExpectError("typed-cli-main-conflict", main + "\npub fn main() -> i32 effects {} { return 0; }\n", handlers, "E_COMMAND_DECL");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "typed-cli-library-command",
+            LibraryPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            },
+            "E_COMMAND_DECL",
+            "src/app/main.lang");
+
+        var wrongHandler = handlers.Replace(
+            "-> Result<Text, self::handlers::ScanError> effects {} { return Ok(\"done\"); }",
+            "-> Text effects {} { return \"done\"; }",
+            StringComparison.Ordinal);
+        await ExpectPackageJsonDiagnosticAtAsync(
+            harness,
+            "typed-cli-wrong-handler-signature",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = wrongHandler
+            },
+            "E_COMMAND_HANDLER",
+            "src/app/main.lang",
+            main,
+            "self");
+
+        var wrongFormatter = handlers.Replace(
+            "pub fn describe(error: self::handlers::ScanError) -> Text effects {} {\n    return match error { self::handlers::ScanError.Failed => \"scan failed\" };\n}",
+            "pub fn describe(error: Text) -> Text effects {} { return error; }",
+            StringComparison.Ordinal);
+        await ExpectError("typed-cli-wrong-formatter-signature", main, wrongFormatter, "E_COMMAND_HANDLER");
+
+        var effectfulFormatter = handlers.Replace(
+            "pub fn describe(error: self::handlers::ScanError) -> Text effects {} {",
+            "pub fn describe(error: self::handlers::ScanError) -> Text effects { fs.read } {",
+            StringComparison.Ordinal);
+        await ExpectError("typed-cli-effectful-formatter", main, effectfulFormatter, "E_COMMAND_HANDLER");
+
+        var privateHandler = handlers.Replace("pub fn run(", "fn run(", StringComparison.Ordinal);
+        await ExpectError("typed-cli-private-handler", main, privateHandler, "E_ACCESS_PRIVATE");
+
+        var malformed = main.Replace("help \"Scan a path.\";", "help \"Scan a path.\"", StringComparison.Ordinal);
+        var malformedPackage = await harness.WritePackageAsync(
+            "typed-cli-malformed-parser-entry",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = malformed,
+                ["src/handlers.lang"] = handlers
+            });
+        var parserFailure = await harness.InvokePackageDirectoryAsync("typed-cli-malformed-parser-check", malformedPackage, "check", "--json");
+        AssertTrue(parserFailure.ExitCode != 0, Describe(parserFailure));
+        using var parserDocument = JsonDocument.Parse(parserFailure.StandardOutput);
+        AssertTrue(parserDocument.RootElement.GetProperty("diagnostics").EnumerateArray().Any(diagnostic =>
+            diagnostic.GetProperty("code").GetString() == "E_COMMAND_DECL"
+            && Path.GetFullPath(diagnostic.GetProperty("file").GetString() ?? string.Empty)
+                == Path.GetFullPath(Path.Combine(malformedPackage, "src", "app", "main.lang"))),
+            $"Malformed command syntax should return a source-located E_COMMAND_DECL diagnostic. {parserFailure.StandardOutput}");
+    }
+
+    private static void AssertCliParseFailure(ProcessResult result, string code)
+    {
+        AssertEqual(2, result.ExitCode, Describe(result));
+        AssertEqual(string.Empty, result.StandardOutput, Describe(result));
+        AssertTrue(result.StandardError.Contains(code, StringComparison.Ordinal),
+            $"Expected stable CLI diagnostic {code}. {Describe(result)}");
+    }
+
     private static async Task TestPackagePrivateNameIsolation(Harness harness)
     {
         const string first = """
@@ -2694,7 +3080,7 @@ internal static class IntegrationTests
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(result));
-        AssertTrue(result.StandardOutput.EndsWith("5 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(result.StandardOutput.EndsWith("4 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(result));
         AssertEqual(string.Empty, result.StandardError, Describe(result));
     }
@@ -2867,6 +3253,60 @@ internal static class IntegrationTests
             $"Expected {expectedCode} in {expectedPath} with a structured range. {result.StandardOutput}");
     }
 
+    private static async Task ExpectPackageJsonDiagnosticAtAsync(
+        Harness harness,
+        string caseName,
+        string manifest,
+        IReadOnlyDictionary<string, string> sourceFiles,
+        string expectedCode,
+        string expectedFile,
+        string source,
+        string markedSpan)
+    {
+        var packageRoot = await harness.WritePackageAsync(caseName, manifest, sourceFiles);
+        var result = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, "check", "--json");
+        AssertTrue(result.ExitCode != 0, $"Invalid package unexpectedly succeeded. {Describe(result)}");
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var expectedPath = Path.GetFullPath(Path.Combine(packageRoot, expectedFile));
+        var diagnostic = document.RootElement.GetProperty("diagnostics").EnumerateArray().FirstOrDefault(item =>
+            item.GetProperty("code").GetString() == expectedCode
+            && Path.GetFullPath(item.GetProperty("file").GetString() ?? string.Empty) == expectedPath);
+        AssertTrue(diagnostic.ValueKind == JsonValueKind.Object,
+            $"Expected {expectedCode} in {expectedPath}. {result.StandardOutput}");
+
+        var index = source.IndexOf(markedSpan, StringComparison.Ordinal);
+        AssertTrue(index >= 0, $"Test marker was not found in the command source: {markedSpan}");
+        var (startLine, startColumn) = GetLineAndColumn(source, index);
+        var (endLine, endColumn) = GetLineAndColumn(source, index + markedSpan.Length);
+        var range = diagnostic.GetProperty("range");
+        AssertEqual(startLine, range.GetProperty("startLine").GetInt32(), "Diagnostic start line mismatch.");
+        AssertEqual(startColumn, range.GetProperty("startColumn").GetInt32(), "Diagnostic start column mismatch.");
+        AssertEqual(endLine, range.GetProperty("endLine").GetInt32(), "Diagnostic end line mismatch.");
+        AssertEqual(endColumn, range.GetProperty("endColumn").GetInt32(), "Diagnostic end column mismatch.");
+    }
+
+    private static (int Line, int Column) GetLineAndColumn(string source, int offset)
+    {
+        var line = 1;
+        var column = 1;
+        for (var index = 0; index < offset; index++)
+        {
+            if (source[index] == '\n')
+            {
+                line++;
+                column = 1;
+            }
+            else
+            {
+                column++;
+            }
+        }
+
+        return (line, column);
+    }
+
     private static async Task ExpectPackageTextDiagnosticAsync(
         Harness harness,
         string caseName,
@@ -3022,6 +3462,76 @@ internal static class IntegrationTests
         AssertRunOutput("41" + Environment.NewLine, execution);
     }
 
+    private static async Task TestCommandAotPublishAndRun(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The NativeAOT command smoke test targets x64 hosts only.");
+
+        const string source = """
+            module app::main;
+
+            pub union ScanError { Failed }
+
+            command scan {
+                help "Echo a value.";
+                argument input: Text help "Value to echo.";
+                handler: self::app::main::run;
+                error: self::app::main::describe_error;
+            }
+
+            pub fn run(args: self::app::main::ScanArgs) -> Result<Text, self::app::main::ScanError> effects {} {
+                return Ok(args.input);
+            }
+
+            pub fn describe_error(error: self::app::main::ScanError) -> Text effects {} {
+                return match error { self::app::main::ScanError.Failed => "scan failed" };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "command-aot-smoke",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source
+            });
+        var result = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "command-aot-smoke",
+            packageRoot,
+            "build",
+            AotPublishTimeout,
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+
+        AssertEqual(0, result.ExitCode, Describe(result));
+        const string prefix = "Built native executable: ";
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(result));
+        AssertTrue(result.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(result));
+        var executablePath = result.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertEqual(prefix + executablePath + Environment.NewLine, result.StandardOutput,
+            "Typed-command NativeAOT build output should contain only the documented artifact line.");
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected a native command executable at {executablePath}.");
+
+        var schemaPath = Path.Combine(Path.GetDirectoryName(executablePath)!, "command-schema.json");
+        AssertTrue(File.Exists(schemaPath), $"Expected command schema beside the NativeAOT executable: {schemaPath}");
+        using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
+        {
+            AssertEqual(1, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "The AOT command schema version must be 1.");
+            AssertEqual("scan", schema.RootElement.GetProperty("commands")[0].GetProperty("name").GetString(),
+                "The AOT command schema should retain its command declaration.");
+        }
+
+        var execution = await ExecuteNativeAsync(
+            executablePath,
+            TimeSpan.FromSeconds(30),
+            "scan",
+            "--",
+            "--leading");
+        AssertRunOutput("--leading" + Environment.NewLine, execution);
+    }
+
     private static string CurrentHostAotRid() => OperatingSystem.IsWindows()
         ? "win-x64"
         : OperatingSystem.IsLinux()
@@ -3040,7 +3550,7 @@ internal static class IntegrationTests
             $"The compiler should report a diagnostic instead of a backend stack trace. {Describe(result)}");
     }
 
-    private static async Task<ProcessResult> ExecuteNativeAsync(string executablePath, TimeSpan timeout)
+    private static async Task<ProcessResult> ExecuteNativeAsync(string executablePath, TimeSpan timeout, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -3053,6 +3563,8 @@ internal static class IntegrationTests
             StandardErrorEncoding = Encoding.UTF8,
             CreateNoWindow = true
         };
+        foreach (var argument in arguments)
+            startInfo.ArgumentList.Add(argument);
 
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start())

@@ -28,6 +28,28 @@ internal static class Driver
         if (args.Length != 0 && args[0] == "lock")
             return RunLock(args);
 
+        var hasApplicationSeparator = false;
+        string[] applicationArguments = [];
+        if (args.Length != 0 && args[0] == "run")
+        {
+            var separatorIndex = -1;
+            for (var index = 2; index < args.Length; index++)
+            {
+                if (args[index] == "--")
+                {
+                    separatorIndex = index;
+                    break;
+                }
+            }
+
+            if (separatorIndex >= 0)
+            {
+                hasApplicationSeparator = true;
+                applicationArguments = args[(separatorIndex + 1)..];
+                args = args[..separatorIndex];
+            }
+        }
+
         if (args.Length < 2)
         {
             PrintUsage();
@@ -116,7 +138,11 @@ internal static class Driver
         }
 
         if (Directory.Exists(file))
-            return await RunPackageAsync(args[0], file, json, isAotBuild ? rid : null);
+        {
+            return await RunPackageAsync(
+                args[0], file, json, isAotBuild ? rid : null,
+                hasApplicationSeparator, applicationArguments);
+        }
 
         string source;
         try
@@ -146,7 +172,10 @@ internal static class Driver
         if (args[0] == "test")
             return await BuildTestsAsync(result.Program!, file);
 
-        return await BuildCheckedAsync(result.Program!, file, args[0], isAotBuild ? rid : null);
+        return await BuildCheckedAsync(
+            result.Program!, file, args[0], isAotBuild ? rid : null,
+            hasApplicationSeparator: hasApplicationSeparator,
+            applicationArguments: applicationArguments);
     }
 
     private static int RunLock(string[] args)
@@ -198,7 +227,13 @@ internal static class Driver
         return 0;
     }
 
-    private static async Task<int> RunPackageAsync(string command, string packageDirectory, bool json, string? aotRid)
+    private static async Task<int> RunPackageAsync(
+        string command,
+        string packageDirectory,
+        bool json,
+        string? aotRid,
+        bool hasApplicationSeparator = false,
+        string[]? applicationArguments = null)
     {
         var resolved = PackageLoader.ResolveGraph(packageDirectory);
         if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
@@ -281,7 +316,9 @@ internal static class Driver
             package.ManifestFile,
             command,
             aotRid,
-            package);
+            package,
+            hasApplicationSeparator,
+            applicationArguments);
     }
 
     private static (List<PackageModuleInput> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
@@ -449,21 +486,32 @@ internal static class Driver
         string sourceFile,
         string command,
         string? aotRid,
-        LoadedPackage? package = null)
+        LoadedPackage? package = null,
+        bool hasApplicationSeparator = false,
+        string[]? applicationArguments = null)
     {
         var entry = package is null
             ? program.Functions.FirstOrDefault(IsRunnableEntryPoint)
             : program.EntryFunctionId is { } entryFunctionId
                 ? program.Functions.FirstOrDefault(function => function.Id == entryFunctionId)
                 : null;
-        if (aotRid is not null && entry is null)
+        var entryCommand = program.EntryCommandId is int entryCommandId
+            ? program.Commands.FirstOrDefault(command => command.Id == entryCommandId)
+            : null;
+        if (aotRid is not null && entry is null && entryCommand is null)
         {
             return ReportBuildTargetError(
-                "lang build --aot requires fn main() -> i32, bool, or Text with no parameters",
+                "lang build --aot requires fn main() -> i32, bool, or Text with no parameters, or a command entry",
                 sourceFile);
         }
 
-        if (command == "run" && entry is null)
+        if (command == "run" && hasApplicationSeparator && entryCommand is null)
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        if (command == "run" && entry is null && entryCommand is null)
         {
             PrintDiagnostics(
             [
@@ -476,7 +524,7 @@ internal static class Driver
             return 1;
         }
 
-        var executable = entry is not null;
+        var executable = entry is not null || entryCommand is not null;
         var assemblyName = package?.Manifest.Name ?? "Generated";
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -555,6 +603,13 @@ internal static class Driver
                 try
                 {
                     EnsurePackageOutputPathSafe(package);
+                    if (entryCommand is not null)
+                    {
+                        File.WriteAllText(
+                            Path.Combine(stagedPublishDirectory, "command-schema.json"),
+                            Emitter.EmitCommandSchema(program),
+                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    }
                     CopyBuildArtifacts(stagedPublishDirectory, outputDirectory);
                     if (!File.Exists(executablePath))
                     {
@@ -620,6 +675,13 @@ internal static class Driver
                 try
                 {
                     EnsurePackageOutputPathSafe(package);
+                    if (entryCommand is not null)
+                    {
+                        File.WriteAllText(
+                            Path.Combine(Path.GetDirectoryName(stagedAssemblyFile)!, "command-schema.json"),
+                            Emitter.EmitCommandSchema(program),
+                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    }
                     CopyBuildArtifacts(
                         Path.GetDirectoryName(stagedAssemblyFile)!,
                         outputDirectory);
@@ -643,7 +705,7 @@ internal static class Driver
 
             var run = await ExecAsync(
                 dotnet,
-                [stagedAssemblyFile],
+                BuildApplicationArguments(stagedAssemblyFile, applicationArguments),
                 package?.Root ?? Directory.GetCurrentDirectory(),
                 sourceFile,
                 forwardOutput: true);
@@ -654,6 +716,14 @@ internal static class Driver
         {
             TryCleanupGeneratedDirectory(generatedDirectory, sourceFile);
         }
+    }
+
+    private static List<string> BuildApplicationArguments(string executable, IReadOnlyList<string>? arguments)
+    {
+        var result = new List<string> { executable };
+        if (arguments is not null)
+            result.AddRange(arguments);
+        return result;
     }
 
     private static bool IsRunnableEntryPoint(CheckedFunction function) =>

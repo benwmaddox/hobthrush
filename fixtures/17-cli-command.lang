@@ -1,2 +1,19 @@
 module fixture::cli;
-command scan { argument input: FilePath; flag recursive; handler: scan_files; }
+
+pub union ScanError { Failed }
+
+pub fn run(args: self::fixture::cli::ScanArgs) -> Result<Text, self::fixture::cli::ScanError> effects {} {
+    return Ok("checked");
+}
+
+pub fn describe_error(error: self::fixture::cli::ScanError) -> Text effects {} {
+    return match error { self::fixture::cli::ScanError.Failed => "scan failed" };
+}
+
+command scan {
+    help "Scan a file path.";
+    argument input: FilePath help "Path to scan.";
+    flag recursive help "Scan directories recursively.";
+    handler: self::fixture::cli::run;
+    error: self::fixture::cli::describe_error;
+}

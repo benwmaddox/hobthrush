@@ -21,7 +21,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_MATCH_NONEXHAUSTIVE | One or more union variants are missing from a match | Implemented |
 | E_MATCH_ARM_DUPLICATE | A match arm is duplicated or follows a wildcard | Implemented |
 | E_UNREACHABLE | A statement follows a statement or `if` whose every path returns | Implemented |
-| E_ENTRYPOINT | `lang run` has no supported zero-argument `main`, or a CLI package's entry module is absent or lacks that signature | Implemented |
+| E_ENTRYPOINT | `lang run` has neither a supported zero-argument `main` nor a typed command entry, or a CLI package's entry module is absent or has neither supported entry form | Implemented |
 | E_IO | Source, fixture, or generated build files could not be read or written | Implemented |
 | E_PROCESS | The .NET build or run process could not be started or waited on | Implemented |
 | E_BUILD | The generated C# project failed to compile | Implemented |
@@ -30,7 +30,11 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_EFFECT_UNKNOWN | Effect annotation names a value outside the closed effect vocabulary | Implemented |
 | E_EFFECT_DUPLICATE | Effect annotation repeats a value | Implemented |
 | E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent or has the wrong type | Implemented for `FsRead.read_text` |
+| E_COMMAND_DECL | Typed CLI command declaration is malformed, duplicated, uses an unsupported type/default (including empty or NUL `FilePath` option defaults), appears in a library package, conflicts with `main`, or violates the command-count/argument requirements | Implemented for PR1 typed commands |
+| E_COMMAND_HANDLER | Command handler or error formatter is not a fully qualified function with the required generated argument/result signature | Implemented for PR1 typed commands |
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
 | E_RESOURCE_ESCAPE | Scoped resource escapes its lexical scope | Planned |
+
+Typed CLI runtime parsing reports stable stderr codes and exits 2: `CLI_UNKNOWN_COMMAND`, `CLI_UNKNOWN_OPTION`, `CLI_MISSING_ARGUMENT`, `CLI_MISSING_VALUE`, `CLI_DUPLICATE_OPTION`, or `CLI_INVALID_VALUE`. Empty or NUL `FilePath` arguments and invalid `i32` values report `CLI_INVALID_VALUE`. Control characters in diagnostic subjects are escaped so each parse error stays on one physical stderr line. These are runtime results, not compiler diagnostics. `Ok(Text)` writes stdout and exits 0; formatted `Err(E)` writes stderr and exits 3; unexpected runtime faults exit 70. Top-level and command help exit 0.
 
 An unsupported feature is a compilation failure. It never passes as an unchecked construct. Bare `lang test` compares each active fixture's complete ordered diagnostic-code list; pending fixtures are skipped. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.

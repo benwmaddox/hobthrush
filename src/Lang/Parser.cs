@@ -358,6 +358,7 @@ internal sealed class Parser
             var functions = new List<FunctionDecl>();
             var structs = new List<StructDecl>();
             var tests = new List<TestDecl>();
+            var commands = new List<CommandDecl>();
             while (Current.Kind != "eof")
             {
                 var isPublic = false;
@@ -385,6 +386,10 @@ internal sealed class Parser
                         Fail(Current, "E_SYNTAX", "Test declarations cannot be public");
                     tests.Add(ParseTest());
                 }
+                else if (Is("command"))
+                {
+                    commands.Add(ParseCommand(isPublic));
+                }
                 else
                 {
                     var declaration = Current;
@@ -396,12 +401,150 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests);
+            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests, commands);
         }
         catch (ParseFailure)
         {
             return null;
         }
+    }
+
+    private CommandDecl ParseCommand(bool isPublic)
+    {
+        if (isPublic)
+            Fail(Current, "E_COMMAND_DECL", "Commands cannot be public");
+
+        Expect("command");
+        var name = ExpectBareIdentifier();
+        if (Is("<"))
+            Fail(Current, "E_COMMAND_DECL", "Command declarations do not accept type parameters");
+        if (!Is("{"))
+            Fail(Current, "E_COMMAND_DECL", "Expected '{' to begin command declaration");
+        Take();
+
+        var entries = new List<CommandEntrySyntax>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof")
+                Fail(Current, "E_COMMAND_DECL", "Unclosed command declaration");
+
+            var entryAt = Current;
+            if (Is("help"))
+            {
+                Take();
+                var help = ParseCommandText("command help");
+                ExpectCommandPunctuation(";");
+                entries.Add(new CommandHelpSyntax(entryAt, help));
+            }
+            else if (Is("argument"))
+            {
+                Take();
+                var argumentName = ExpectCommandIdentifier("argument name");
+                ExpectCommandPunctuation(":");
+                var type = ParseType();
+                ExpectCommandKeyword("help");
+                var help = ParseCommandText("argument help");
+                ExpectCommandPunctuation(";");
+                entries.Add(new CommandArgumentSyntax(entryAt, argumentName.Text, type, help));
+            }
+            else if (Is("option"))
+            {
+                Take();
+                var optionName = ExpectCommandIdentifier("option name");
+                ExpectCommandPunctuation(":");
+                var type = ParseType();
+                ExpectCommandPunctuation("=");
+                var defaultValue = ParseCommandLiteral();
+                ExpectCommandKeyword("help");
+                var help = ParseCommandText("option help");
+                ExpectCommandPunctuation(";");
+                entries.Add(new CommandOptionSyntax(entryAt, optionName.Text, type, defaultValue, help));
+            }
+            else if (Is("flag"))
+            {
+                Take();
+                var flagName = ExpectCommandIdentifier("flag name");
+                ExpectCommandKeyword("help");
+                var help = ParseCommandText("flag help");
+                ExpectCommandPunctuation(";");
+                entries.Add(new CommandFlagSyntax(entryAt, flagName.Text, help));
+            }
+            else if (Is("handler") || Is("error"))
+            {
+                var entryKind = Take();
+                ExpectCommandPunctuation(":");
+                var reference = ParseSourceDeclarationRef();
+                if (!reference.IsQualified)
+                    Fail(reference.At, "E_COMMAND_DECL", $"The command {entryKind.Text} must be a qualified function reference");
+                ExpectCommandPunctuation(";");
+                entries.Add(entryKind.Text == "handler"
+                    ? new CommandHandlerSyntax(entryAt, reference)
+                    : new CommandErrorSyntax(entryAt, reference));
+            }
+            else
+            {
+                Fail(Current, "E_COMMAND_DECL", $"Unsupported command entry '{Current.Text}'");
+            }
+        }
+
+        Take();
+        return new CommandDecl(name.Text, entries, name);
+    }
+
+    private Token ExpectCommandIdentifier(string description)
+    {
+        if (IsBareIdentifier(Current)) return Take();
+        Fail(Current, "E_COMMAND_DECL", $"Expected {description}");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectCommandKeyword(string keyword)
+    {
+        if (Is(keyword)) return Take();
+        Fail(Current, "E_COMMAND_DECL", $"Expected '{keyword}' in command declaration");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectCommandPunctuation(string punctuation)
+    {
+        if (Is(punctuation)) return Take();
+        Fail(Current, "E_COMMAND_DECL", $"Expected '{punctuation}' in command declaration");
+        throw new ParseFailure();
+    }
+
+    private string ParseCommandText(string description)
+    {
+        if (Current.Kind != "text")
+            Fail(Current, "E_COMMAND_DECL", $"Expected a text literal for {description}");
+        return DecodeText(Take());
+    }
+
+    private CommandLiteralSyntax ParseCommandLiteral()
+    {
+        if (Current.Kind == "text")
+        {
+            var text = Take();
+            return new CommandTextLiteralSyntax(text, DecodeText(text));
+        }
+        if (Is("true") || Is("false"))
+        {
+            var boolean = Take();
+            return new CommandBooleanLiteralSyntax(boolean, boolean.Text == "true");
+        }
+
+        var negative = Is("-");
+        var at = negative ? Take() : Current;
+        if (Current.Kind == "number")
+        {
+            var number = Take();
+            var spelling = (negative ? "-" : string.Empty) + number.Text;
+            if (!int.TryParse(spelling, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var value))
+                Fail(number, "E_COMMAND_DECL", "Command integer default is outside i32 range");
+            return new CommandIntegerLiteralSyntax(at, value);
+        }
+
+        Fail(Current, "E_COMMAND_DECL", "Expected a literal command option default");
+        throw new ParseFailure();
     }
 
     private FunctionDecl ParseFunction(bool isPublic)

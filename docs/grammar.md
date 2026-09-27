@@ -157,8 +157,33 @@ The only effectful built-in operation in this slice is `FsRead.read_text(path: T
 
 The filesystem adapter is a trusted runtime boundary. It currently calls `File.ReadAllBytes` on the supplied path, maps recognized file/path/permission/I/O failures to those `FsError` cases, and decodes bytes with strict UTF-8, mapping invalid text to `InvalidText`. `FsRead` is an opaque marker, not a path-root restriction or security sandbox; the checks do not prove the adapter's internal behavior. A library may accept and use `FsRead`, and builds as a managed library, but no application manifest grant or injection exists yet. `lang inspect effects`, build receipts, and adapters for the other vocabulary entries are deferred. Function bodies accept typed `let` declarations, `return` statements, and bounded `if`/`else` blocks.
 
+## Typed CLI command declarations (PR1)
+
+A standalone source module or a `cli` package's entry module may contain either its existing supported `main() -> i32|bool|Text` or exactly one command declaration. Existing main-based sources and packages keep their behavior. Command handlers use normal function effect annotations and inference; only the error formatter must be pure. PR1 does not grant or inject capabilities, and a command handler's args-only signature cannot receive `FsRead`.
+
+```text
+command_declaration ::= "command" identifier "{" command_item* "}"
+command_item ::= "help" text_literal ";"
+                | "argument" identifier ":" command_type "help" text_literal ";"
+                | "option" identifier ":" command_type "=" literal "help" text_literal ";"
+                | "flag" identifier "help" text_literal ";"
+                | "handler" ":" qualified_ref ";"
+                | "error" ":" qualified_ref ";"
+command_type ::= "FilePath" | "Text" | "i32"
+```
+
+Items may appear in any order. The declaration has exactly one command-level `help`, `handler`, and `error`, at least one positional `argument`, and at most one command is accepted in the entry module. Command and argument/option/flag names are identifiers in contextual grammar positions. Options accept only matching literal defaults: `FilePath` and `Text` use text literals, and `i32` uses an integer literal. A `FilePath` default must be nonempty and contain no NUL. `FilePath` is opaque to source code and is decoded by the CLI parser.
+
+For command `scan`, the compiler generates a nominal `ScanArgs` struct in that module. The fully qualified `handler` reference must name a function with signature `ScanArgs -> Result<Text, E>`; the fully qualified `error` reference must name a pure function with signature `E -> Text`. `E` is the handler's error type. User handler and formatter references must be fully qualified.
+
+`lang run FILE_OR_PACKAGE -- APPLICATION_ARGS` forwards all arguments after the separator to a typed command parser in a standalone source module or CLI package entry module. Legacy main-based source and package runs do not accept this application-argument separator. Within command arguments, a standalone `--` ends option parsing; subsequent tokens are positional values even when they begin with `-`, for example `lang run PACKAGE -- scan -- --leading`. Top-level `--help` and `scan --help` print generated help and exit 0. Unknown commands/options, missing required arguments or option values, duplicate options, and invalid `i32` values or empty/NUL `FilePath` values print the stable codes `CLI_UNKNOWN_COMMAND`, `CLI_UNKNOWN_OPTION`, `CLI_MISSING_ARGUMENT`, `CLI_MISSING_VALUE`, `CLI_DUPLICATE_OPTION`, and `CLI_INVALID_VALUE` respectively, then exit 2. Diagnostic subjects escape control characters so one parse error stays on one physical stderr line. A handler `Ok(Text)` writes the text to stdout and exits 0. `Err(E)` is passed to the formatter, written to stderr, and exits 3. Unexpected runtime faults exit 70.
+
+When the executable source module or CLI package entry module declares a typed command, managed and Native AOT builds write deterministic UTF-8 `command-schema.json` beside the executable artifact. The JSON uses schema version 1, snake_case property names, declaration/source order for argument, option, and flag arrays, and JSON-native default values. Each command record contains `name`, `help`, `handler`, `error_formatter`, `arguments`, `options`, and `flags`; flag records use the type `bool`. PR1 does not inject `FsRead` or other capabilities; manifest grants/injection, the maintained scan example, and an effect audit remain later work.
+
 ## Build and run entrypoints
 
-`lang build FILE` emits an executable when the source contains `fn main()` with no parameters and a return type of `i32`, `bool`, or `Text`. Otherwise it emits a library, including when a function named `main` has another signature. Build artifacts are saved under an `out/<stem>-<id>/` directory beside the source file.
+`lang build FILE` emits an executable when the source contains `fn main()` with no parameters and a return type of `i32`, `bool`, or `Text`, or one typed command declaration. Otherwise it emits a library, including when a function named `main` has another signature. Typed-command builds also write `command-schema.json` beside the executable. Build artifacts are saved under an `out/<stem>-<id>/` directory beside the source file.
 
-`lang run FILE` requires that executable entry signature. The program prints its returned value followed by a newline; `i32`, lowercase `bool`, and `Text` values are printed directly. Successful runs exit 0. Checked i32 arithmetic overflow prints a generic runtime-fault message and exits 70.
+`lang run FILE` requires a supported main entry. The program prints its returned value followed by a newline; `i32`, lowercase `bool`, and `Text` values are printed directly. `lang run FILE -- APPLICATION_ARGS` instead dispatches to a typed command declared in the source. Successful runs exit 0. Checked i32 arithmetic overflow prints a generic runtime-fault message and exits 70.
+
+For `cli` packages, the entry module may instead provide one typed command declaration; `lang run PACKAGE -- APPLICATION_ARGS` dispatches those arguments to its parser. Command parsing and handler result mapping are described above. Both supported entry forms are accepted by Native AOT publishing on the matching host.
