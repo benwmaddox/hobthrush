@@ -20,6 +20,9 @@ internal static class Driver
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private static readonly UTF8Encoding StrictLabelUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private const string LabelHexDigits = "0123456789ABCDEF";
+
     public static async Task<int> RunAsync(string[] args)
     {
         if (args.Length == 1 && args[0] == "test")
@@ -27,6 +30,9 @@ internal static class Driver
 
         if (args.Length != 0 && args[0] == "lock")
             return RunLock(args);
+
+        if (args.Length != 0 && args[0] == "inspect")
+            return InspectEffects(args);
 
         var hasApplicationSeparator = false;
         string[] applicationArguments = [];
@@ -235,7 +241,7 @@ internal static class Driver
         bool hasApplicationSeparator = false,
         string[]? applicationArguments = null)
     {
-        var resolved = PackageLoader.ResolveGraph(packageDirectory);
+        var resolved = ResolvePackageGraph(packageDirectory);
         if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
         {
             List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
@@ -247,16 +253,6 @@ internal static class Driver
 
         var graph = resolved.Graph!;
         var package = graph.Root.Package;
-        if (package.Manifest.Dependencies.Count != 0)
-        {
-            var lockDiagnostics = PackageLock.Validate(graph);
-            if (lockDiagnostics.Count != 0)
-            {
-                PrintDiagnostics(lockDiagnostics, json);
-                return 1;
-            }
-        }
-
         if (aotRid is not null && package.Manifest.IsLibrary)
         {
             return ReportBuildTargetError(
@@ -264,36 +260,10 @@ internal static class Driver
                 package.ManifestFile);
         }
 
-        var parsed = ParsePackageSources(graph);
-        if (parsed.Diagnostics.Count != 0)
+        var checkedPackage = CheckPackageGraph(graph);
+        if (checkedPackage.Diagnostics.Count != 0)
         {
-            PrintDiagnostics(parsed.Diagnostics, json);
-            return 1;
-        }
-
-        var entryModule = package.Manifest.EntryModule;
-        var entryModuleExists = entryModule is null ||
-            parsed.Modules.Any(module =>
-                string.Equals(module.PackageId, graph.Root.Id, StringComparison.Ordinal) &&
-                string.Equals(module.Program.Module, entryModule, StringComparison.Ordinal));
-        var checkedPackage = Compiler.CheckPackage(
-            parsed.Modules,
-            graph.Root.Id,
-            entryModuleExists ? entryModule : null,
-            package.Manifest.Capabilities,
-            rootIsCliPackage: !package.Manifest.IsLibrary);
-        if (checkedPackage.Diagnostics.Count != 0 || !entryModuleExists)
-        {
-            var diagnostics = checkedPackage.Diagnostics.ToList();
-            if (!entryModuleExists)
-            {
-                diagnostics.Add(AtStart(
-                    "E_ENTRYPOINT",
-                    $"Entry module '{entryModule}' is not present under source_root",
-                    package.ManifestFile));
-            }
-
-            PrintDiagnostics(diagnostics, json);
+            PrintDiagnostics(checkedPackage.Diagnostics, json);
             return 1;
         }
 
@@ -322,6 +292,225 @@ internal static class Driver
             hasApplicationSeparator,
             applicationArguments);
     }
+
+    private static (PackageDependencyGraph? Graph, List<Diagnostic> Diagnostics) ResolvePackageGraph(
+        string packageDirectory)
+    {
+        var resolved = PackageLoader.ResolveGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
+                ? resolved.Diagnostics
+                : [AtStart("E_DEPENDENCY", "Could not resolve package dependency graph", packageDirectory)];
+            return (null, diagnostics);
+        }
+
+        var graph = resolved.Graph!;
+        if (graph.Root.Package.Manifest.Dependencies.Count != 0)
+        {
+            var lockDiagnostics = PackageLock.Validate(graph);
+            if (lockDiagnostics.Count != 0)
+                return (null, lockDiagnostics);
+        }
+
+        return (graph, []);
+    }
+
+    private static CheckResult CheckPackageGraph(PackageDependencyGraph graph)
+    {
+        var parsed = ParsePackageSources(graph);
+        if (parsed.Diagnostics.Count != 0)
+            return new CheckResult(null, parsed.Diagnostics);
+
+        var package = graph.Root.Package;
+        var entryModule = package.Manifest.EntryModule;
+        var entryModuleExists = entryModule is null ||
+            parsed.Modules.Any(module =>
+                string.Equals(module.PackageId, graph.Root.Id, StringComparison.Ordinal) &&
+                string.Equals(module.Program.Module, entryModule, StringComparison.Ordinal));
+        var checkedPackage = Compiler.CheckPackage(
+            parsed.Modules,
+            graph.Root.Id,
+            entryModuleExists ? entryModule : null,
+            package.Manifest.Capabilities,
+            rootIsCliPackage: !package.Manifest.IsLibrary);
+        if (checkedPackage.Diagnostics.Count == 0 && entryModuleExists)
+            return checkedPackage;
+
+        var diagnostics = checkedPackage.Diagnostics.ToList();
+        if (!entryModuleExists)
+        {
+            diagnostics.Add(AtStart(
+                "E_ENTRYPOINT",
+                $"Entry module '{entryModule}' is not present under source_root",
+                package.ManifestFile));
+        }
+
+        return new CheckResult(null, diagnostics);
+    }
+
+    private static int InspectEffects(string[] args)
+    {
+        if (args.Length != 5 || args[1] != "effects" || args[4] != "--json")
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
+        try
+        {
+            packageDirectory = Path.GetFullPath(args[2]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Invalid package directory: {error.Message}", args[2])
+            ],
+            json: true);
+            return 1;
+        }
+
+        var resolved = ResolvePackageGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            PrintDiagnostics(resolved.Diagnostics, json: true);
+            return 1;
+        }
+
+        var graph = resolved.Graph!;
+        var checkedPackage = CheckPackageGraph(graph);
+        if (checkedPackage.Diagnostics.Count != 0 || checkedPackage.Program is null)
+        {
+            PrintDiagnostics(checkedPackage.Diagnostics, json: true);
+            return 1;
+        }
+
+        if (!TryParseInspectSymbol(args[3], out var module, out var functionName))
+        {
+            PrintDiagnostics(
+            [
+                AtStart(
+                    "E_NAME_UNRESOLVED",
+                    $"Function symbol '{args[3]}' is not a supported self root-package symbol",
+                    graph.Root.Package.ManifestFile)
+            ],
+            json: true);
+            return 1;
+        }
+
+        var sourceFile = graph.Root.Package.Sources
+            .FirstOrDefault(source => string.Equals(source.Module, module, StringComparison.Ordinal))?.File;
+        var function = sourceFile is null
+            ? null
+            : checkedPackage.Program.Functions.FirstOrDefault(candidate =>
+                string.Equals(candidate.Module, module, StringComparison.Ordinal) &&
+                string.Equals(candidate.Name, functionName, StringComparison.Ordinal) &&
+                string.Equals(candidate.At.File, sourceFile, StringComparison.Ordinal));
+        if (function is null)
+        {
+            PrintDiagnostics(
+            [
+                AtStart(
+                    "E_NAME_UNRESOLVED",
+                    $"Function symbol '{args[3]}' could not be resolved in the root package",
+                    graph.Root.Package.ManifestFile)
+            ],
+            json: true);
+            return 1;
+        }
+
+        var inferredEffects = function.InferredEffects;
+        var requiredCapabilities = inferredEffects
+            .Where(effect => string.Equals(effect, "fs.read", StringComparison.Ordinal))
+            .Select(_ => "fs.read")
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(effect => effect, StringComparer.Ordinal)
+            .ToArray();
+        var manifestGrants = graph.Root.Package.Manifest.Capabilities
+            .OrderBy(capability => capability, StringComparer.Ordinal)
+            .ToArray();
+        var trustedOperations = new List<TrustedOperation>();
+        if (checkedPackage.Program.Commands.Any(command =>
+                string.Equals(command.PackageId, graph.Root.Id, StringComparison.Ordinal) &&
+                command.HandlerFunctionId == function.Id))
+        {
+            trustedOperations.Add(new TrustedOperation("cli.argument_decode", "trusted_host", []));
+            trustedOperations.Add(new TrustedOperation("cli.output", "trusted_host", []));
+        }
+
+        if (inferredEffects.Contains("fs.read", StringComparer.Ordinal))
+        {
+            trustedOperations.Add(new TrustedOperation("FsRead.read_text", "trusted_adapter", ["fs.read"]));
+        }
+
+        var output = new
+        {
+            schema_version = 1,
+            symbol = args[3],
+            declared_effects = function.DeclaredEffects,
+            inferred_effects = inferredEffects,
+            effect_paths = function.InferredEffectPaths
+                .Select(path => new { effect = path.Effect, steps = path.Steps })
+                .ToArray(),
+            required_capabilities = requiredCapabilities,
+            manifest_grants = manifestGrants,
+            trusted_operations = trustedOperations
+        };
+        Console.WriteLine(JsonSerializer.Serialize(output, JsonOptions));
+        return 0;
+    }
+
+    private static bool TryParseInspectSymbol(string symbol, out string module, out string function)
+    {
+        module = string.Empty;
+        function = string.Empty;
+        var segments = symbol.Split("::", StringSplitOptions.None);
+        if (segments.Length < 3 || segments[0] != "self" || !segments.Skip(1).All(IsLanguageIdentifier))
+            return false;
+
+        module = string.Join("::", segments.Skip(1).SkipLast(1));
+        function = segments[^1];
+        return true;
+    }
+
+    private static bool IsLanguageIdentifier(string identifier) =>
+        identifier.Length != 0 &&
+        (char.IsLetter(identifier[0]) || identifier[0] == '_') &&
+        identifier.Skip(1).All(character => char.IsLetterOrDigit(character) || character == '_');
+
+    private static string PackageDisplayLabel(LoadedPackage package) =>
+        $"{PercentEncodeLabelComponent(package.Manifest.Name)}@{PercentEncodeLabelComponent(package.Manifest.Version)}";
+
+    private static string PercentEncodeLabelComponent(string value)
+    {
+        // Preserve RFC 3986 unreserved bytes and percent-encode all others with uppercase hex.
+        var bytes = StrictLabelUtf8.GetBytes(value);
+        var encoded = new StringBuilder(bytes.Length);
+        foreach (var valueByte in bytes)
+        {
+            if (IsUnreservedLabelByte(valueByte))
+            {
+                encoded.Append((char)valueByte);
+                continue;
+            }
+
+            encoded.Append('%');
+            encoded.Append(LabelHexDigits[valueByte >> 4]);
+            encoded.Append(LabelHexDigits[valueByte & 0x0F]);
+        }
+
+        return encoded.ToString();
+    }
+
+    private static bool IsUnreservedLabelByte(byte value) =>
+        (value >= (byte)'A' && value <= (byte)'Z') ||
+        (value >= (byte)'a' && value <= (byte)'z') ||
+        (value >= (byte)'0' && value <= (byte)'9') ||
+        value == (byte)'-' || value == (byte)'.' || value == (byte)'_' || value == (byte)'~';
+
+    private sealed record TrustedOperation(string Operation, string Trust, IReadOnlyList<string> Effects);
 
     private static (List<PackageModuleInput> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
         PackageDependencyGraph graph)
@@ -364,7 +553,11 @@ internal static class Driver
 
                 diagnostics.AddRange(sourceDiagnostics);
                 if (parsed is not null)
-                    modules.Add(new PackageModuleInput(package.Id, parsed, package.DependencyIds));
+                    modules.Add(new PackageModuleInput(
+                        package.Id,
+                        parsed,
+                        package.DependencyIds,
+                        PackageDisplayLabel(package.Package)));
             }
         }
 
@@ -372,7 +565,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang test [FILE_OR_PACKAGE]");
 
     private static int ReportBuildTargetError(string message, string file)
     {

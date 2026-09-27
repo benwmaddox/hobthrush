@@ -119,6 +119,17 @@ internal sealed record CheckedStructField(string Name, LangType Type, int Index,
 internal sealed record CheckedStruct(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 internal sealed record CheckedTest(string Name, string PackageId, string Module, int FunctionId, Token At);
+internal sealed record CheckedEffectPath
+{
+    internal CheckedEffectPath(string effect, IEnumerable<string> steps)
+    {
+        Effect = effect;
+        Steps = Array.AsReadOnly(steps.ToArray());
+    }
+
+    public string Effect { get; }
+    public IReadOnlyList<string> Steps { get; }
+}
 internal enum CheckedCommandInputKind { Argument, Option, Flag }
 internal enum CheckedCommandLiteralKind { Text, I32, Boolean }
 internal sealed record CheckedCommandLiteral(
@@ -262,6 +273,7 @@ internal sealed class CheckedFunction
         Body = ReadOnly(body);
         DeclaredEffects = ReadOnly(declaredEffects);
         InferredEffects = [];
+        InferredEffectPaths = [];
         At = at;
     }
 
@@ -273,9 +285,18 @@ internal sealed class CheckedFunction
     public IReadOnlyList<LangType> TypeParameters { get; }
     public LangType ReturnType { get; }
     public IReadOnlyList<string> DeclaredEffects { get; }
-    public IReadOnlyList<string> InferredEffects { get; internal set; }
+    public IReadOnlyList<string> InferredEffects { get; private set; }
+    public IReadOnlyList<CheckedEffectPath> InferredEffectPaths { get; private set; }
     internal IReadOnlyList<TypedStmt> Body { get; }
     internal Token At { get; }
+
+    internal void SetInferredEffects(
+        IEnumerable<string> effects,
+        IEnumerable<CheckedEffectPath> paths)
+    {
+        InferredEffects = ReadOnly(effects);
+        InferredEffectPaths = ReadOnly(paths);
+    }
 
     private static IReadOnlyList<T> ReadOnly<T>(IEnumerable<T> items) => Array.AsReadOnly(items.ToArray());
 }
@@ -322,7 +343,8 @@ internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Dia
 internal sealed record PackageModuleInput(
     string PackageId,
     ParsedProgram Program,
-    IReadOnlyDictionary<string, string> DirectDependencies);
+    IReadOnlyDictionary<string, string> DirectDependencies,
+    string PackageDisplayLabel);
 
 internal readonly record struct ModuleIdentity(string PackageId, string ModuleName);
 
@@ -355,7 +377,8 @@ internal static class Compiler
         var inputs = modules.Select(module => new PackageModuleInput(
             SinglePackageId,
             module,
-            new Dictionary<string, string>(StringComparer.Ordinal))).ToArray();
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "self")).ToArray();
         return CheckPackage(inputs, SinglePackageId, entryModule);
     }
 
@@ -395,12 +418,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         "secret.reveal"
     ];
     private const string SinglePackageId = "<single-package>";
+    private string _rootPackageId = SinglePackageId;
     private readonly List<UnionSymbol> _unions = [];
     private readonly List<StructSymbol> _structs = [];
     private readonly List<FunctionSymbol> _functions = [];
     private readonly List<CheckedTest> _tests = [];
     private readonly List<CommandSymbol> _commands = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
+    private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
@@ -408,7 +433,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     public CheckResult CheckSingle(ParsedProgram program) =>
         CheckPackage(
-            [new PackageModuleInput(SinglePackageId, program, new Dictionary<string, string>(StringComparer.Ordinal))],
+            [new PackageModuleInput(SinglePackageId, program, new Dictionary<string, string>(StringComparer.Ordinal), "self")],
             SinglePackageId,
             program.Module,
             requireEntry: false);
@@ -422,6 +447,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         bool rootIsCliPackage = false)
     {
         _rootCapabilities = rootCapabilities ?? new HashSet<string>(StringComparer.Ordinal);
+        _rootPackageId = rootPackageId;
+        BuildPackageDisplayLabels(inputs);
         var orderedModules = new List<ModuleSymbols>(inputs.Count);
         foreach (var input in inputs)
         {
@@ -528,6 +555,29 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             _tests,
             commands,
             entryCommand?.Id), diagnostics);
+    }
+
+    private void BuildPackageDisplayLabels(IReadOnlyList<PackageModuleInput> inputs)
+    {
+        _packageDisplayLabels.Clear();
+        foreach (var input in inputs)
+        {
+            var label = input.PackageDisplayLabel;
+            if (string.IsNullOrWhiteSpace(label) || label.Any(character =>
+                    char.IsControl(character) || character is '/' or '\\'))
+            {
+                throw new InvalidOperationException("Package display labels must be nonempty path-free labels");
+            }
+
+            if (_packageDisplayLabels.TryGetValue(input.PackageId, out var existing))
+            {
+                if (!string.Equals(existing, label, StringComparison.Ordinal))
+                    throw new InvalidOperationException("A package ID was associated with inconsistent display labels");
+                continue;
+            }
+
+            _packageDisplayLabels.Add(input.PackageId, label);
+        }
     }
 
     private static bool IsRunnableEntry(FunctionSymbol function) =>
@@ -1240,23 +1290,25 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var function in _functions)
         {
             var orderedEffects = EffectVocabulary.Where(inferred[function.Id].Contains).ToArray();
-            if (function.CheckedFunction is { } checkedFunction)
-                checkedFunction.InferredEffects = ReadOnly(orderedEffects);
+            var effectPaths = orderedEffects
+                .Select(effect => FindShortestEffectPath(function, effect))
+                .ToArray();
+            function.CheckedFunction?.SetInferredEffects(orderedEffects, effectPaths);
 
             var declared = new HashSet<string>(function.DeclaredEffects, StringComparer.Ordinal);
-            foreach (var effect in orderedEffects)
+            foreach (var effectPath in effectPaths)
             {
+                var effect = effectPath.Effect;
                 if (declared.Contains(effect)) continue;
-                var path = FindShortestEffectPath(function, effect);
                 Add(
                     "E_EFFECT_EXCEEDED",
-                    $"Effect '{effect}' is not declared by function '{FormatFunctionName(function)}'; shortest call path: {path}",
+                    $"Effect '{effect}' is not declared by function '{FormatFunctionName(function)}'; shortest call path: {string.Join(" -> ", effectPath.Steps)}",
                     function.Declaration.At);
             }
         }
     }
 
-    private string FindShortestEffectPath(FunctionSymbol root, string effect)
+    private CheckedEffectPath FindShortestEffectPath(FunctionSymbol root, string effect)
     {
         var queue = new Queue<(FunctionSymbol Function, FunctionSymbol[] Path)>();
         var visited = new HashSet<int> { root.Id };
@@ -1273,8 +1325,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 .FirstOrDefault();
             if (direct is not null)
             {
-                var parts = current.Path.Select(FormatFunctionName).Append(direct.IntrinsicName);
-                return string.Join(" -> ", parts);
+                var steps = current.Path.Select(FormatFunctionName).Append(direct.IntrinsicName);
+                return new CheckedEffectPath(effect, steps);
             }
 
             foreach (var call in current.Function.Calls
@@ -1290,13 +1342,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
         }
 
-        return FormatFunctionName(root) + " -> fs.read_text";
+        throw new InvalidOperationException(
+            $"Inferred effect '{effect}' has no direct intrinsic path from '{FormatFunctionName(root)}'");
     }
 
-    private string FormatFunctionName(FunctionSymbol function) =>
-        function.TestName is { } testName
-            ? $"{FormatModuleIdentity(function.ModuleIdentity)}.test({testName})"
-            : $"{FormatModuleIdentity(function.ModuleIdentity)}.{function.Declaration.Name}";
+    private string FormatFunctionName(FunctionSymbol function)
+    {
+        var functionName = function.TestName is { } testName
+            ? $"test({testName})"
+            : function.Declaration.Name;
+        var moduleName = FormatModuleIdentity(function.ModuleIdentity);
+        if (function.PackageId == _rootPackageId)
+            return $"{moduleName}::{functionName}";
+        if (!_packageDisplayLabels.TryGetValue(function.PackageId, out var packageDisplayLabel))
+            throw new InvalidOperationException("A function package ID has no validated display label");
+        return $"{packageDisplayLabel}::{moduleName}::{functionName}";
+    }
 
     private static string FormatModuleIdentity(ModuleIdentity identity) => identity.ModuleName;
 

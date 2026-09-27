@@ -30,7 +30,7 @@ The M0 all-fixtures acceptance remains incomplete: fixtures 16, 18, and 19 are s
 
 The active compiler-fixture set covers fixtures 01-15, 17, and 20-42. Fixtures 16, 18, and 19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, pure package tests, and the typed CLI layer are implemented bounded slices; they do not complete the M1 library, generic types, traits, the complete capability model, or V1 package requirements.
 
-[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained [`examples/scan-cli`](../examples/scan-cli) package consumes this library through a local path dependency and exercises the `fs.read` grant, typed command injection, and error mapping. Effect inspection and audit remain future work; the adapter is not a sandbox.
+[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained [`examples/scan-cli`](../examples/scan-cli) package consumes this library through a local path dependency and exercises the `fs.read` grant, typed command injection, and error mapping. Narrow compiler-derived effect inspection is implemented; the full audit remains future work, and the adapter is not a sandbox.
 
 ## M2 - effects and capabilities (partial)
 
@@ -39,7 +39,8 @@ The active compiler-fixture set covers fixtures 01-15, 17, and 20-42. Fixtures 1
 - [x] Add opaque `FsRead.read_text(Text) -> Result<Text, FsError>` with the `fs.read` effect and exhaustive typed filesystem errors.
 - [x] Allow effectful library functions to be checked and built as managed libraries without constructing capabilities in source.
 - [x] Grant `fs.read` from CLI package manifests, inject `FsRead` into typed command handlers, include handler-required injected capabilities in schema version 2 and grant edits in lock freshness, and reject an ungranted handler.
-- [ ] Add `lang inspect effects`, build receipts, and adapters for other effect classes.
+- [x] Add the narrow compiler-derived `lang inspect effects PACKAGE SYMBOL --json` report, including declared/inferred effects, shortest paths, required capabilities, manifest grants, and trusted operation metadata.
+- [ ] Add the full `lang audit`, build receipts, and adapters for other effect classes.
 
 This is a partial M2 foundation, not M2 completion. The filesystem adapter is a trusted boundary; it reads the supplied path with `File.ReadAllBytes`, maps recognized failures into `FsError`, and uses strict UTF-8 so invalid input maps to `FsError.InvalidText`. `FsRead` is not a path-root restriction or security sandbox.
 
@@ -53,7 +54,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-Other application-level grants and capability injection beyond `fs.read` for CLI commands, scoped resources, typed web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, an effect inspection/audit command, and the complete maintained V1 library/CLI/web example projects remain future work. The maintained scan CLI is functional, but it does not provide an audit or sandbox. Handlers retain normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
+Other application-level grants and capability injection beyond `fs.read` for CLI commands, scoped resources, typed web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, the full `lang audit`, and the complete maintained V1 library/CLI/web example projects remain future work. `lang inspect effects` reports compiler-derived function metadata, but does not audit or prove trusted runtime code and is not a sandbox. The maintained scan CLI is functional. Handlers retain normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
 
 ## MS1 - memory-semantics design (not started)
 
