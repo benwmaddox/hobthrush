@@ -9,7 +9,9 @@ internal enum LangTypeKind
     Union,
     Struct,
     Option,
-    Result
+    Result,
+    FsRead,
+    FsError
 }
 
 internal sealed class LangType : IEquatable<LangType>
@@ -36,6 +38,8 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsI32 => Kind == LangTypeKind.I32;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
+    public bool IsFsRead => Kind == LangTypeKind.FsRead;
+    public bool IsFsError => Kind == LangTypeKind.FsError;
     internal int UnionId { get; }
     internal int StructId { get; }
     internal bool IsError => Kind == LangTypeKind.Error;
@@ -44,6 +48,8 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType I32 { get; } = new(LangTypeKind.I32, "i32");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
+    internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
+    internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
 
     internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId);
     internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
@@ -102,12 +108,28 @@ internal sealed record TypedLocalExpr(LangType Type, int LocalId, Token At) : Ty
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCallExpr(LangType Type, int FunctionId, IReadOnlyList<TypedExpr> Arguments, Token At) : TypedExpr(Type, At);
 
+internal enum BuiltinIntrinsic
+{
+    FsReadText
+}
+
+internal sealed record TypedIntrinsicCallExpr(
+    LangType Type,
+    BuiltinIntrinsic Intrinsic,
+    IReadOnlyList<TypedExpr> Arguments,
+    Token At) : TypedExpr(Type, At);
+
 internal enum BuiltinVariant
 {
     Some,
     None,
     Ok,
-    Err
+    Err,
+    FsErrorNotFound,
+    FsErrorPermissionDenied,
+    FsErrorInvalidPath,
+    FsErrorInvalidText,
+    FsErrorIo
 }
 
 internal sealed record TypedBuiltinConstructExpr(
@@ -163,6 +185,7 @@ internal sealed class CheckedFunction
         IReadOnlyList<CheckedParameter> parameters,
         LangType returnType,
         IReadOnlyList<TypedStmt> body,
+        IReadOnlyList<string> declaredEffects,
         Token at)
     {
         Id = id;
@@ -172,6 +195,8 @@ internal sealed class CheckedFunction
         Parameters = ReadOnly(parameters);
         ReturnType = returnType;
         Body = ReadOnly(body);
+        DeclaredEffects = ReadOnly(declaredEffects);
+        InferredEffects = [];
         At = at;
     }
 
@@ -181,6 +206,8 @@ internal sealed class CheckedFunction
     public bool Public { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
     public LangType ReturnType { get; }
+    public IReadOnlyList<string> DeclaredEffects { get; }
+    public IReadOnlyList<string> InferredEffects { get; internal set; }
     internal IReadOnlyList<TypedStmt> Body { get; }
     internal Token At { get; }
 
@@ -249,6 +276,20 @@ internal static class Compiler
 internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 {
     private const int MaximumSemanticDepth = 192;
+    private static readonly string[] EffectVocabulary =
+    [
+        "fs.read",
+        "fs.write",
+        "process.spawn",
+        "net.client",
+        "net.listen",
+        "db.read",
+        "db.write",
+        "env.read",
+        "clock.read",
+        "log.write",
+        "secret.reveal"
+    ];
     private readonly Dictionary<(string Module, string Name), UnionSymbol> _unionsByModuleAndName = new();
     private readonly List<UnionSymbol> _unions = [];
     private readonly Dictionary<(string Module, string Name), StructSymbol> _structsByModuleAndName = new();
@@ -257,6 +298,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<FunctionSymbol> _functions = [];
     private readonly Dictionary<string, ModuleSymbols> _modulesByName = new(StringComparer.Ordinal);
     private string _currentModule = string.Empty;
+    private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
 
     public CheckResult CheckSingle(ParsedProgram program) =>
@@ -296,6 +338,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         foreach (var function in _functions)
             CheckFunctionBody(function);
+
+        InferEffectsAndValidateBounds();
 
         FunctionSymbol? entry = null;
         if (entryModule is not null)
@@ -350,7 +394,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         _currentModule = module.Program.Module;
         foreach (var declaration in module.Program.Unions)
         {
-            if (declaration.Name is "i32" or "bool" or "Text" or "Option" or "Result")
+            if (IsReservedTypeName(declaration.Name))
             {
                 Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is reserved", declaration.At);
                 continue;
@@ -376,7 +420,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         _currentModule = module.Program.Module;
         foreach (var declaration in module.Program.Structs)
         {
-            if (declaration.Name is "i32" or "bool" or "Text" or "Option" or "Result")
+            if (IsReservedTypeName(declaration.Name))
             {
                 Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is reserved", declaration.At);
                 continue;
@@ -628,8 +672,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             symbol.Parameters = ReadOnly(parameters);
             symbol.ReturnType = ResolveType(declaration.ReturnType, 0);
+            var declaredEffects = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var effect in declaration.Effects)
+            {
+                if (!EffectVocabulary.Contains(effect.Name, StringComparer.Ordinal))
+                {
+                    Add("E_EFFECT_UNKNOWN", $"Unknown effect '{effect.Name}'", effect.At);
+                    continue;
+                }
+                if (!declaredEffects.Add(effect.Name))
+                    Add("E_EFFECT_DUPLICATE", $"Effect '{effect.Name}' is declared more than once", effect.At);
+            }
+            symbol.DeclaredEffects = EffectVocabulary.Where(declaredEffects.Contains).ToArray();
         }
     }
+
+    private static bool IsReservedTypeName(string name) =>
+        name is "i32" or "bool" or "Text" or "Option" or "Result" or "FsRead" or "FsError";
 
     private void ValidatePublicSignatures()
     {
@@ -680,6 +739,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private void CheckFunctionBody(FunctionSymbol function)
     {
         _currentModule = function.Module;
+        _currentFunction = function;
         _nextLocalId = function.Parameters.Count;
         var locals = new Dictionary<string, LocalSymbol>(StringComparer.Ordinal);
         foreach (var parameter in function.Parameters)
@@ -732,8 +792,86 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.Parameters,
             function.ReturnType,
             ReadOnly(body),
+            function.DeclaredEffects,
             function.Declaration.At);
     }
+
+    private void InferEffectsAndValidateBounds()
+    {
+        var inferred = _functions.ToDictionary(
+            function => function.Id,
+            function => new HashSet<string>(function.DirectEffects.Select(call => call.Effect), StringComparer.Ordinal));
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var function in _functions)
+            {
+                var functionEffects = inferred[function.Id];
+                foreach (var call in function.Calls)
+                foreach (var effect in inferred[call.Target.Id])
+                    if (functionEffects.Add(effect)) changed = true;
+            }
+        }
+
+        foreach (var function in _functions)
+        {
+            var orderedEffects = EffectVocabulary.Where(inferred[function.Id].Contains).ToArray();
+            if (function.CheckedFunction is { } checkedFunction)
+                checkedFunction.InferredEffects = ReadOnly(orderedEffects);
+
+            var declared = new HashSet<string>(function.DeclaredEffects, StringComparer.Ordinal);
+            foreach (var effect in orderedEffects)
+            {
+                if (declared.Contains(effect)) continue;
+                var path = FindShortestEffectPath(function, effect);
+                Add(
+                    "E_EFFECT_EXCEEDED",
+                    $"Effect '{effect}' is not declared by function '{FormatFunctionName(function)}'; shortest call path: {path}",
+                    function.Declaration.At);
+            }
+        }
+    }
+
+    private string FindShortestEffectPath(FunctionSymbol root, string effect)
+    {
+        var queue = new Queue<(FunctionSymbol Function, FunctionSymbol[] Path)>();
+        var visited = new HashSet<int> { root.Id };
+        queue.Enqueue((root, [root]));
+
+        while (queue.Count != 0)
+        {
+            var current = queue.Dequeue();
+            var direct = current.Function.DirectEffects
+                .Where(call => call.Effect == effect)
+                .OrderBy(call => call.At.File, StringComparer.Ordinal)
+                .ThenBy(call => call.At.Line)
+                .ThenBy(call => call.At.Column)
+                .FirstOrDefault();
+            if (direct is not null)
+            {
+                var parts = current.Path.Select(FormatFunctionName).Append(direct.IntrinsicName);
+                return string.Join(" -> ", parts);
+            }
+
+            foreach (var call in current.Function.Calls
+                         .OrderBy(call => call.Target.Module, StringComparer.Ordinal)
+                         .ThenBy(call => call.Target.Declaration.Name, StringComparer.Ordinal)
+                         .ThenBy(call => call.At.File, StringComparer.Ordinal)
+                         .ThenBy(call => call.At.Line)
+                         .ThenBy(call => call.At.Column))
+            {
+                if (!visited.Add(call.Target.Id)) continue;
+                queue.Enqueue((call.Target, current.Path.Append(call.Target).ToArray()));
+            }
+        }
+
+        return FormatFunctionName(root) + " -> fs.read_text";
+    }
+
+    private static string FormatFunctionName(FunctionSymbol function) =>
+        $"{function.Module}.{function.Declaration.Name}";
 
     private TypedExpr CheckExpr(
         Expr expression,
@@ -759,7 +897,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             NameExpr name => CheckName(name, expected, locals),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1),
-            VariantExpr variant => CheckVariantConstruction(variant, locals, depth + 1),
+            QualifiedCallExpr call => CheckQualifiedCall(call, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
@@ -857,9 +995,20 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             CurrentModule.VisibleUnions.ContainsKey(typeName.Name))
         {
             return CheckVariantConstruction(
-                new VariantExpr(expression.At, typeName.Name, expression.Field, []),
+                new QualifiedCallExpr(expression.At, typeName.Name, expression.Field, expression.At, []),
                 locals,
                 depth);
+        }
+
+        if (expression.Target is NameExpr fsErrorName &&
+            !locals.ContainsKey(fsErrorName.Name) &&
+            fsErrorName.Name == "FsError")
+        {
+            if (IsFsErrorVariant(expression.Field))
+                Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on FsError", expression.At);
+            return new TypedErrorExpr(expression.At);
         }
 
         var target = CheckExpr(expression.Target, null, locals, depth);
@@ -905,11 +1054,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 Add("E_TYPE_MISMATCH", $"Function '{expression.Name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}", expression.At);
 
             var arguments = new List<TypedExpr>();
+            var diagnosticsBeforeArguments = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == function.Parameters.Count;
             for (var i = 0; i < expression.Arguments.Count; i++)
             {
                 var argumentType = i < function.Parameters.Count ? function.Parameters[i].Type : null;
                 arguments.Add(CheckExpr(expression.Arguments[i], argumentType, locals, depth));
             }
+            var signatureTypesValid = !function.ReturnType.IsError && function.Parameters.All(parameter => !parameter.Type.IsError);
+            if (hasCorrectArity && signatureTypesValid && diagnostics.Count == diagnosticsBeforeArguments)
+                _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
             return new TypedCallExpr(function.ReturnType, function.Id, ReadOnly(arguments), expression.At);
         }
 
@@ -919,6 +1073,81 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var argument in expression.Arguments)
             _ = CheckExpr(argument, null, locals, depth);
         Add("E_NAME_UNRESOLVED", $"Function '{expression.Name}' is not declared", expression.At);
+        return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckQualifiedCall(
+        QualifiedCallExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (locals.TryGetValue(expression.Qualifier, out var receiverLocal))
+        {
+            if (expression.Member == "read_text" && !receiverLocal.Type.IsFsRead)
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add(
+                    "E_CAPABILITY_MISSING",
+                    $"Local '{expression.Qualifier}' of type '{receiverLocal.Type.DisplayName}' cannot provide capability member 'read_text'",
+                    expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (receiverLocal.Type.IsFsRead && expression.Member == "read_text")
+            {
+                var diagnosticsBeforeArguments = diagnostics.Count;
+                var hasCorrectArity = expression.Arguments.Count == 1;
+                if (expression.Arguments.Count != 1)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+
+                var receiver = new TypedLocalExpr(receiverLocal.Type, receiverLocal.Id, expression.At);
+                var arguments = new List<TypedExpr> { receiver };
+                if (expression.Arguments.Count > 0)
+                    arguments.Add(CheckExpr(expression.Arguments[0], LangType.Text, locals, depth));
+                else
+                    arguments.Add(new TypedErrorExpr(expression.MemberAt));
+                for (var i = 1; i < expression.Arguments.Count; i++)
+                    _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+                var resultType = LangType.Result(LangType.Text, LangType.FsError);
+                if (hasCorrectArity && diagnostics.Count == diagnosticsBeforeArguments)
+                    _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.read", "fs.read_text", expression.MemberAt));
+                return new TypedIntrinsicCallExpr(
+                    resultType,
+                    BuiltinIntrinsic.FsReadText,
+                    ReadOnly(arguments),
+                    expression.At);
+            }
+
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_UNSUPPORTED", $"Member calls on local values are not implemented for '{expression.Qualifier}.{expression.Member}'", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (CurrentModule.VisibleUnions.ContainsKey(expression.Qualifier))
+            return CheckVariantConstruction(expression, locals, depth);
+
+        if (expression.Qualifier == "FsError")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            if (IsFsErrorVariant(expression.Member))
+                Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.MemberAt);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on FsError", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        foreach (var argument in expression.Arguments)
+            _ = CheckExpr(argument, null, locals, depth);
+        if (expression.Qualifier == "fs" && expression.Member == "read_text")
+        {
+            Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+        Add("E_NAME_UNRESOLVED", $"Union '{expression.Qualifier}' is not declared", expression.At);
         return new TypedErrorExpr(expression.At);
     }
 
@@ -984,37 +1213,29 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private TypedExpr CheckVariantConstruction(
-        VariantExpr expression,
+        QualifiedCallExpr expression,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (locals.ContainsKey(expression.UnionName))
+        if (!CurrentModule.VisibleUnions.TryGetValue(expression.Qualifier, out var union))
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_UNSUPPORTED", $"Member calls on local values are not implemented for '{expression.UnionName}.{expression.VariantName}'", expression.At);
+            Add("E_NAME_UNRESOLVED", $"Union '{expression.Qualifier}' is not declared", expression.At);
             return new TypedErrorExpr(expression.At);
         }
 
-        if (!CurrentModule.VisibleUnions.TryGetValue(expression.UnionName, out var union))
-        {
-            foreach (var argument in expression.Arguments)
-                _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Union '{expression.UnionName}' is not declared", expression.At);
-            return new TypedErrorExpr(expression.At);
-        }
-
-        var variant = union.Variants.FirstOrDefault(item => item.Name == expression.VariantName);
+        var variant = union.Variants.FirstOrDefault(item => item.Name == expression.Member);
         if (variant is null)
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Variant '{expression.VariantName}' is not declared on union '{expression.UnionName}'", expression.At);
+            Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on union '{expression.Qualifier}'", expression.MemberAt);
             return new TypedErrorExpr(expression.At);
         }
 
         if (expression.Arguments.Count != variant.Fields.Count)
-            Add("E_TYPE_MISMATCH", $"Variant '{expression.UnionName}.{variant.Name}' expects {variant.Fields.Count} payload values, got {expression.Arguments.Count}", expression.At);
+            Add("E_TYPE_MISMATCH", $"Variant '{expression.Qualifier}.{variant.Name}' expects {variant.Fields.Count} payload values, got {expression.Arguments.Count}", expression.MemberAt);
 
         var arguments = new List<TypedExpr>();
         for (var i = 0; i < expression.Arguments.Count; i++)
@@ -1066,7 +1287,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     if (!covered.Add(shape.Key))
                         Add("E_MATCH_ARM_DUPLICATE", $"Variant arm '{shape.Name}' is duplicated", variantPattern.At);
                     if (variantPattern.Bindings.Count != shape.PayloadTypes.Count)
+                    {
                         Add("E_TYPE_MISMATCH", $"Pattern '{shape.Name}' expects {shape.PayloadTypes.Count} bindings, got {variantPattern.Bindings.Count}", variantPattern.At);
+                        invalidPatternSeen = true;
+                    }
 
                     var boundNames = new HashSet<string>(StringComparer.Ordinal);
                     for (var i = 0; i < variantPattern.Bindings.Count; i++)
@@ -1137,6 +1361,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("Err", "result:Err", null, 1, BuiltinVariant.Err, ReadOnly([type.Arguments[1]]))
             ]);
         }
+        if (type.IsFsError)
+        {
+            return ReadOnly<VariantShape>([
+                new("FsError.NotFound", "fserror:NotFound", null, 0, BuiltinVariant.FsErrorNotFound, []),
+                new("FsError.PermissionDenied", "fserror:PermissionDenied", null, 1, BuiltinVariant.FsErrorPermissionDenied, []),
+                new("FsError.InvalidPath", "fserror:InvalidPath", null, 2, BuiltinVariant.FsErrorInvalidPath, []),
+                new("FsError.InvalidText", "fserror:InvalidText", null, 3, BuiltinVariant.FsErrorInvalidText, []),
+                new("FsError.Io", "fserror:Io", null, 4, BuiltinVariant.FsErrorIo, [])
+            ]);
+        }
         return null;
     }
 
@@ -1167,15 +1401,24 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
+        else if (scrutineeType.IsFsError)
+        {
+            if (pattern.UnionName != "FsError")
+            {
+                Add("E_TYPE_MISMATCH", $"Expected pattern from 'FsError.<variant>', found '{pattern.VariantName}'", pattern.At);
+                return null;
+            }
+        }
         else if (pattern.UnionName is not null)
         {
             Add("E_TYPE_MISMATCH", $"Qualified pattern '{pattern.UnionName}.{pattern.VariantName}' does not match '{scrutineeType.DisplayName}'", pattern.At);
             return null;
         }
 
-        var shape = shapes.FirstOrDefault(item => item.Name == (scrutineeType.Kind == LangTypeKind.Union
+        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError
             ? $"{pattern.UnionName}.{pattern.VariantName}"
-            : pattern.VariantName));
+            : pattern.VariantName;
+        var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
         if (shape is null)
         {
             Add("E_NAME_UNRESOLVED", $"Variant '{pattern.VariantName}' is not valid for '{scrutineeType.DisplayName}'", pattern.At);
@@ -1204,6 +1447,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":
                 return NoTypeArguments(syntax, LangType.Text);
+            case "FsRead":
+                return NoTypeArguments(syntax, LangType.FsRead);
+            case "FsError":
+                return NoTypeArguments(syntax, LangType.FsError);
             case "Option":
                 if (syntax.Args.Count != 1)
                 {
@@ -1251,6 +1498,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
         return type;
     }
+
+    private static bool IsFsErrorVariant(string name) =>
+        name is "NotFound" or "PermissionDenied" or "InvalidPath" or "InvalidText" or "Io";
 
 
     private void AddMismatch(LangType expected, LangType actual, Token at) =>
@@ -1306,8 +1556,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public FunctionDecl Declaration { get; } = declaration;
         public IReadOnlyList<CheckedParameter> Parameters { get; set; } = [];
         public LangType ReturnType { get; set; } = LangType.Error;
+        public IReadOnlyList<string> DeclaredEffects { get; set; } = [];
+        public List<FunctionCallSite> Calls { get; } = [];
+        public List<DirectEffectCall> DirectEffects { get; } = [];
         public CheckedFunction? CheckedFunction { get; set; }
     }
+
+    private sealed record FunctionCallSite(FunctionSymbol Target, Token At);
+    private sealed record DirectEffectCall(string Effect, string IntrinsicName, Token At);
 
     private sealed record LocalSymbol(int Id, LangType Type);
 

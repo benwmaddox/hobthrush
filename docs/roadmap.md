@@ -19,9 +19,20 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Add strict same-package manifests, explicit imports, and multi-file module resolution for the implemented pure-language slice.
 - [ ] Add user-defined generics, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 14-19 are still pending. M1 is also incomplete; external dependencies and lockfiles, user-defined generics, traits, effects, and the maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; external dependencies and lockfiles, user-defined generics, traits, application capability grants, and the maintained library/CLI/web project set remain future work.
 
-The active compiler-fixture set covers fixtures 01-13 and 20-25. Fixtures 14-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external package dependencies or locking. Struct support and package resolution are bounded pure-language slices and do not complete the M1 library, generics, traits, effects, or package requirements.
+The active compiler-fixture set covers fixtures 01-14 and 20-25. Fixtures 15-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external package dependencies or locking. Struct support, package resolution, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generics, traits, or V1 package requirements.
+
+## M2 - effects and capabilities (partial)
+
+- [x] Define a closed effect vocabulary and require every function to declare an upper bound.
+- [x] Infer direct and transitive effects across calls, imports, and recursive call cycles; report a shortest call path when a bound is exceeded.
+- [x] Add opaque `FsRead.read_text(Text) -> Result<Text, FsError>` with the `fs.read` effect and exhaustive typed filesystem errors.
+- [x] Allow effectful library functions to be checked and built as managed libraries without constructing capabilities in source.
+- [ ] Grant and inject capabilities from the application manifest.
+- [ ] Add `lang inspect effects`, build receipts, and adapters for other effect classes.
+
+This is a partial M2 foundation, not M2 completion. The filesystem adapter is a trusted boundary; it reads the supplied path with `File.ReadAllBytes`, maps recognized failures into `FsError`, and uses strict UTF-8 so invalid input maps to `FsError.InvalidText`. `FsRead` is not a path-root restriction or security sandbox.
 
 ## Executable deployment options (implemented)
 
@@ -33,7 +44,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-Effect inference and capability checks, scoped resources, typed CLI and web declarations, package locking, SQLite, and the maintained V1 library/CLI/web example projects remain future work. The V1 promise in the PRD is not complete.
+Application-level effect and capability enforcement, scoped resources, typed CLI and web declarations, package locking, SQLite, and the maintained V1 library/CLI/web example projects remain future work. The V1 promise in the PRD is not complete.
 
 ## MS1 - memory-semantics design (not started)
 

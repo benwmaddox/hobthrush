@@ -25,8 +25,10 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_PROCESS | The .NET build or run process could not be started or waited on | Implemented |
 | E_BUILD | The generated C# project failed to compile | Implemented |
 | E_BUILD_TARGET | A recognized `--aot` or `--rid` option is malformed or used outside the supported build form, the RID is unsupported or targets a different host OS, or the program lacks an executable entrypoint | Implemented |
-| E_EFFECT_EXCEEDED | Inferred effect exceeds public declaration | Planned |
-| E_CAPABILITY_MISSING | Required capability absent | Planned |
+| E_EFFECT_EXCEEDED | Inferred direct or transitive effect exceeds a function's declared upper bound; the message includes the shortest known call path | Implemented for the `FsRead` slice |
+| E_EFFECT_UNKNOWN | Effect annotation names a value outside the closed effect vocabulary | Implemented |
+| E_EFFECT_DUPLICATE | Effect annotation repeats a value | Implemented |
+| E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent or has the wrong type | Implemented for `FsRead.read_text` |
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
 | E_RESOURCE_ESCAPE | Scoped resource escapes its lexical scope | Planned |
 | E_PACKAGE_LOCK_MISMATCH | Pinned content differs from lockfile | Planned |

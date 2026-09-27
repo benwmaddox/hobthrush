@@ -12,6 +12,7 @@ internal sealed record Token(string Kind, string Text, int Line, int Column, str
 
 internal sealed record TypeSyntax(string Name, IReadOnlyList<TypeSyntax> Args, Token At);
 internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
+internal sealed record EffectSyntax(string Name, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
 internal sealed record VariantDecl(string Name, IReadOnlyList<VariantFieldDecl> Fields, Token At);
 internal sealed record UnionDecl(string Name, bool Public, IReadOnlyList<VariantDecl> Variants, Token At);
@@ -22,6 +23,7 @@ internal sealed record FunctionDecl(
     bool Public,
     IReadOnlyList<ParameterDecl> Parameters,
     TypeSyntax ReturnType,
+    IReadOnlyList<EffectSyntax> Effects,
     IReadOnlyList<Stmt> Body,
     Token At);
 internal sealed record ImportSymbol(string Name, Token At);
@@ -46,10 +48,11 @@ internal sealed record TextExpr(Token At, string Value) : Expr(At);
 internal sealed record NameExpr(Token At, string Name) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
 internal sealed record CallExpr(Token At, string Name, IReadOnlyList<Expr> Arguments) : Expr(At);
-internal sealed record VariantExpr(
+internal sealed record QualifiedCallExpr(
     Token At,
-    string UnionName,
-    string VariantName,
+    string Qualifier,
+    string Member,
+    Token MemberAt,
     IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record StructFieldValue(string Name, Expr Value, Token At);
 internal sealed record StructConstructExpr(Token At, string Name, IReadOnlyList<StructFieldValue> Fields) : Expr(At);

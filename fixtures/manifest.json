@@ -66,7 +66,7 @@
   },
   {
     "file": "14-effect-transitive.lang",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_EFFECT_EXCEEDED"
   },
   {
