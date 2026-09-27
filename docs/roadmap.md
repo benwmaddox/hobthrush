@@ -26,11 +26,11 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Add the PR1 typed CLI command contract for one command in an executable entry module, including generated arguments, parsing/help, typed result mapping, and deterministic command schema output.
 - [ ] Add generic structs and unions, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 15, 16, 18, and 19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, application capability grants, and the final maintained library/CLI/web project set remain future work. Broader test features, including property-based testing, JSON test results, executing dependency package tests, and an AOT test runner, remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 16, 18, and 19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, and the final maintained library/CLI/web project set remain future work. Broader test features, including property-based testing, JSON test results, executing dependency package tests, and an AOT test runner, remain future work.
 
-The active compiler-fixture set covers fixtures 01-14, 17, and 20-42. Fixtures 15, 16, 18, and 19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, pure package tests, and the PR1 typed CLI layer are implemented bounded slices; they do not complete the M1 library, generic types, traits, capability-backed application CLI, or V1 package requirements.
+The active compiler-fixture set covers fixtures 01-15, 17, and 20-42. Fixtures 16, 18, and 19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, pure package tests, and the typed CLI layer are implemented bounded slices; they do not complete the M1 library, generic types, traits, the complete capability model, or V1 package requirements.
 
-[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained CLI example consumes the sibling library through a local path dependency; broader package source support remains future work.
+[`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained [`examples/scan-cli`](../examples/scan-cli) package consumes this library through a local path dependency and exercises the `fs.read` grant, typed command injection, and error mapping. Effect inspection and audit remain future work; the adapter is not a sandbox.
 
 ## M2 - effects and capabilities (partial)
 
@@ -38,7 +38,7 @@ The active compiler-fixture set covers fixtures 01-14, 17, and 20-42. Fixtures 1
 - [x] Infer direct and transitive effects across qualified calls and recursive call cycles; report a shortest call path when a bound is exceeded.
 - [x] Add opaque `FsRead.read_text(Text) -> Result<Text, FsError>` with the `fs.read` effect and exhaustive typed filesystem errors.
 - [x] Allow effectful library functions to be checked and built as managed libraries without constructing capabilities in source.
-- [ ] Grant and inject capabilities from the application manifest.
+- [x] Grant `fs.read` from CLI package manifests, inject `FsRead` into typed command handlers, include handler-required injected capabilities in schema version 2 and grant edits in lock freshness, and reject an ungranted handler.
 - [ ] Add `lang inspect effects`, build receipts, and adapters for other effect classes.
 
 This is a partial M2 foundation, not M2 completion. The filesystem adapter is a trusted boundary; it reads the supplied path with `File.ReadAllBytes`, maps recognized failures into `FsError`, and uses strict UTF-8 so invalid input maps to `FsError.InvalidText`. `FsRead` is not a path-root restriction or security sandbox.
@@ -53,7 +53,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-Application-level effect grants and capability injection for commands, scoped resources, typed web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, the maintained file-scanning CLI example and its effect audit, and the complete maintained V1 library/CLI/web example projects remain future work. PR1 implements typed command declarations and dispatch without application capability injection; handlers still use normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
+Other application-level grants and capability injection beyond `fs.read` for CLI commands, scoped resources, typed web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, an effect inspection/audit command, and the complete maintained V1 library/CLI/web example projects remain future work. The maintained scan CLI is functional, but it does not provide an audit or sandbox. Handlers retain normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
 
 ## MS1 - memory-semantics design (not started)
 

@@ -147,6 +147,7 @@ internal sealed record CheckedCommand(
     int ErrorFunctionId,
     string ErrorReference,
     LangType ErrorType,
+    bool RequiresFsRead,
     Token At);
 
 internal abstract record TypedExpr(LangType Type, Token At);
@@ -361,14 +362,18 @@ internal static class Compiler
     public static CheckResult CheckPackage(
         IReadOnlyList<PackageModuleInput> modules,
         string rootPackageId,
-        string? entryModule)
+        string? entryModule,
+        IReadOnlySet<string>? rootCapabilities = null,
+        bool rootIsCliPackage = false)
     {
         var diagnostics = new List<Diagnostic>();
         return new SemanticChecker(diagnostics).CheckPackage(
             modules,
             rootPackageId,
             entryModule,
-            requireEntry: entryModule is not null);
+            requireEntry: entryModule is not null,
+            rootCapabilities,
+            rootIsCliPackage);
     }
 }
 
@@ -396,6 +401,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<CheckedTest> _tests = [];
     private readonly List<CommandSymbol> _commands = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
+    private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
@@ -411,8 +417,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         IReadOnlyList<PackageModuleInput> inputs,
         string rootPackageId,
         string? entryModule,
-        bool requireEntry)
+        bool requireEntry,
+        IReadOnlySet<string>? rootCapabilities = null,
+        bool rootIsCliPackage = false)
     {
+        _rootCapabilities = rootCapabilities ?? new HashSet<string>(StringComparer.Ordinal);
         var orderedModules = new List<ModuleSymbols>(inputs.Count);
         foreach (var input in inputs)
         {
@@ -432,7 +441,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var module in orderedModules) RegisterUnionHeaders(module);
         foreach (var module in orderedModules) RegisterStructHeaders(module);
         foreach (var module in orderedModules) RegisterFunctionHeaders(module);
-        foreach (var module in orderedModules) RegisterCommandHeaders(module, rootPackageId, entryModule);
+        foreach (var module in orderedModules)
+            RegisterCommandHeaders(module, rootPackageId, entryModule, rootIsCliPackage || entryModule is not null);
 
         foreach (var module in orderedModules) PopulateUnionVariants(module);
         foreach (var module in orderedModules) PopulateStructFields(module);
@@ -587,7 +597,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
     }
 
-    private void RegisterCommandHeaders(ModuleSymbols module, string rootPackageId, string? entryModule)
+    private void RegisterCommandHeaders(
+        ModuleSymbols module,
+        string rootPackageId,
+        string? entryModule,
+        bool rootIsCliPackage)
     {
         _currentModule = module.Identity;
         if (module.Program.Commands.Count == 0) return;
@@ -595,7 +609,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var duplicate in module.Program.Commands.Skip(1))
             Add("E_COMMAND_DECL", "A module may declare at most one command", duplicate.At);
 
-        if (entryModule is null && module.PackageId != SinglePackageId)
+        if (module.PackageId != SinglePackageId && module.PackageId != rootPackageId)
+        {
+            foreach (var declaration in module.Program.Commands)
+                Add("E_COMMAND_DECL", "Commands must be declared in the root CLI package", declaration.At);
+            return;
+        }
+
+        if (module.PackageId != SinglePackageId && !rootIsCliPackage)
         {
             foreach (var declaration in module.Program.Commands)
                 Add("E_COMMAND_DECL", "Library packages cannot declare commands", declaration.At);
@@ -779,12 +800,21 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     IsConcreteSupportedCommandError(handler.ReturnType.Arguments[1]);
                 if (validReturn)
                     command.ErrorType = handler.ReturnType.Arguments[1];
-                if (handler.TypeParameters.Count != 0 || handler.Parameters.Count != 1 ||
-                    handler.Parameters.Count == 1 && handler.Parameters[0].Type != command.ArgsStruct.Type ||
-                    !validReturn)
+
+                var hasGeneratedArgs = handler.Parameters.Count > 0 &&
+                    handler.Parameters[0].Type == command.ArgsStruct.Type;
+                var requiresFsRead = handler.Parameters.Count > 1 && handler.Parameters[1].Type.IsFsRead;
+                command.RequiresFsRead = requiresFsRead;
+                var validParameters = hasGeneratedArgs &&
+                    (handler.Parameters.Count == 1 ||
+                     handler.Parameters.Count == 2 && requiresFsRead);
+                if (handler.TypeParameters.Count != 0 || !validParameters || !validReturn)
                 {
-                    Add("E_COMMAND_HANDLER", "Command handler must take exactly the generated args type and return Result<Text, E> for a concrete error type", command.HandlerSyntax.Reference.At);
+                    Add("E_COMMAND_HANDLER", "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type", command.HandlerSyntax.Reference.At);
                 }
+
+                if (requiresFsRead && !_rootCapabilities.Contains("fs.read"))
+                    Add("E_CAPABILITY_MISSING", "Command handler requires the root package's fs.read capability grant", command.HandlerSyntax.Reference.At);
             }
         }
 
@@ -1701,21 +1731,28 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (receiver.Type.IsFsRead && expression.Member == "read_text")
         {
-            var diagnosticsBeforeCall = diagnosticsBeforeReceiver;
+            var diagnosticsBeforeCall = diagnostics.Count;
             var hasCorrectArity = expression.Arguments.Count == 1;
             if (!hasCorrectArity)
                 Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
 
             var arguments = new List<TypedExpr> { receiver };
+            var hasSupportedPathType = false;
             if (expression.Arguments.Count > 0)
-                arguments.Add(CheckExpr(expression.Arguments[0], LangType.Text, locals, depth));
+            {
+                var path = CheckExpr(expression.Arguments[0], null, locals, depth);
+                hasSupportedPathType = path.Type.IsText || path.Type.IsFilePath;
+                if (!path.Type.IsError && !hasSupportedPathType)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text' expects a Text or FilePath argument, found '{path.Type.DisplayName}'", expression.Arguments[0].At);
+                arguments.Add(path);
+            }
             else
                 arguments.Add(new TypedErrorExpr(expression.MemberAt));
             for (var i = 1; i < expression.Arguments.Count; i++)
                 _ = CheckExpr(expression.Arguments[i], null, locals, depth);
 
             var resultType = LangType.Result(LangType.Text, LangType.FsError);
-            if (hasCorrectArity && diagnostics.Count == diagnosticsBeforeCall)
+            if (hasCorrectArity && hasSupportedPathType && diagnostics.Count == diagnosticsBeforeCall)
                 _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.read", "fs.read_text", expression.MemberAt));
             return new TypedIntrinsicCallExpr(
                 resultType,
@@ -2256,6 +2293,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public FunctionSymbol? HandlerFunction { get; set; }
         public FunctionSymbol? ErrorFormatter { get; set; }
         public LangType ErrorType { get; set; } = LangType.Error;
+        public bool RequiresFsRead { get; set; }
 
         public CheckedCommand ToCheckedCommand() => new(
             Id,
@@ -2271,6 +2309,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             ErrorFormatter!.Id,
             SemanticChecker.FormatReference(ErrorSyntax!.Reference),
             ErrorType,
+            RequiresFsRead,
             Declaration.At);
     }
 

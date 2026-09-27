@@ -9,7 +9,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_NAME_UNRESOLVED | Name is not declared in scope, or a qualified reference names an unknown alias, module, or declaration | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
 | E_ACCESS_PRIVATE | A qualified reference crosses a module or package boundary to a private declaration | Implemented |
-| E_MANIFEST | Package manifest file, schema, key, or value is invalid | Implemented |
+| E_MANIFEST | Package manifest file, schema, key, or value is invalid, including an unsupported, duplicate, or wrong CLI capability grant or any capability declaration in a library package | Implemented |
 | E_DEPENDENCY | A local dependency path, package kind, package identity, or dependency graph is invalid | Implemented |
 | E_LOCK | A required dependency lock is missing, malformed, unreadable, or stale | Implemented |
 | E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
@@ -29,7 +29,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_EFFECT_EXCEEDED | Inferred direct or transitive effect exceeds a function's declared upper bound; the message includes the shortest known call path | Implemented for the `FsRead` slice |
 | E_EFFECT_UNKNOWN | Effect annotation names a value outside the closed effect vocabulary | Implemented |
 | E_EFFECT_DUPLICATE | Effect annotation repeats a value | Implemented |
-| E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent or has the wrong type | Implemented for `FsRead.read_text` |
+| E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent, has the wrong type, or is not granted to the executable CLI command | Implemented for `FsRead.read_text` and the `fs.read` CLI manifest grant |
 | E_COMMAND_DECL | Typed CLI command declaration is malformed, duplicated, uses an unsupported type/default (including empty or NUL `FilePath` option defaults), appears in a library package, conflicts with `main`, or violates the command-count/argument requirements | Implemented for PR1 typed commands |
 | E_COMMAND_HANDLER | Command handler or error formatter is not a fully qualified function with the required generated argument/result signature | Implemented for PR1 typed commands |
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |

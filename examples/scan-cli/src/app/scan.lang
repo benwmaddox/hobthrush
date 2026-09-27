@@ -1,0 +1,54 @@
+module app::scan;
+
+pub fn run(
+    args: self::app::main::ScanArgs,
+    fs: FsRead,
+) -> Result<Text, self::app::main::ScanError> effects { fs.read } {
+    return match fs.read_text(args.input) {
+        Ok(contents) => self::app::scan::normalize_if_requested(contents, args.normalize),
+        Err(error) => Err(self::app::scan::map_fs_error(error)),
+    };
+}
+
+fn normalize_if_requested(
+    contents: Text,
+    requested: bool,
+) -> Result<Text, self::app::main::ScanError> effects {} {
+    if requested {
+        return match validation::text::validation::normalize(contents) {
+            Ok(normalized) => Ok(normalized),
+            Err(error) => Err(self::app::scan::map_normalize_error(error)),
+        };
+    } else {
+        return Ok(contents);
+    }
+}
+
+fn map_fs_error(error: FsError) -> self::app::main::ScanError effects {} {
+    return match error {
+        FsError.NotFound => self::app::main::ScanError.NotFound,
+        FsError.PermissionDenied => self::app::main::ScanError.PermissionDenied,
+        FsError.InvalidPath => self::app::main::ScanError.InvalidPath,
+        FsError.InvalidText => self::app::main::ScanError.InvalidText,
+        FsError.Io => self::app::main::ScanError.Io,
+    };
+}
+
+fn map_normalize_error(
+    error: validation::text::validation::NormalizeError,
+) -> self::app::main::ScanError effects {} {
+    return match error {
+        validation::text::validation::NormalizeError.Empty => self::app::main::ScanError.EmptyInput,
+    };
+}
+
+pub fn describe_error(error: self::app::main::ScanError) -> Text effects {} {
+    return match error {
+        self::app::main::ScanError.NotFound => "File not found",
+        self::app::main::ScanError.PermissionDenied => "Permission denied",
+        self::app::main::ScanError.InvalidPath => "Invalid file path",
+        self::app::main::ScanError.InvalidText => "File is not valid UTF-8",
+        self::app::main::ScanError.Io => "File read failed",
+        self::app::main::ScanError.EmptyInput => "File contains no text to normalize",
+    };
+}

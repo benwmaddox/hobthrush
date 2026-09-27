@@ -28,7 +28,7 @@ internal static class Emitter
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
         {
             writer.WriteStartObject();
-            writer.WriteNumber("schema_version", 1);
+            writer.WriteNumber("schema_version", 2);
             writer.WriteStartArray("commands");
             foreach (var command in program.Commands.OrderBy(command => command.Id))
             {
@@ -37,6 +37,10 @@ internal static class Emitter
                 writer.WriteString("help", command.Help);
                 writer.WriteString("handler", command.HandlerReference);
                 writer.WriteString("error_formatter", command.ErrorReference);
+                writer.WriteStartArray("capabilities");
+                if (command.RequiresFsRead)
+                    writer.WriteStringValue("fs.read");
+                writer.WriteEndArray();
                 WriteCommandInputs(writer, command, CheckedCommandInputKind.Argument, includeDefault: false);
                 WriteCommandInputs(writer, command, CheckedCommandInputKind.Option, includeDefault: true);
                 WriteCommandInputs(writer, command, CheckedCommandInputKind.Flag, includeDefault: false);
@@ -363,11 +367,21 @@ internal static class Emitter
         private string EmitIntrinsicCall(TypedIntrinsicCallExpr expression) => expression.Intrinsic switch
         {
             BuiltinIntrinsic.FsReadText when expression.Arguments.Count == 2 =>
-                "ReadText(" + string.Join(", ", expression.Arguments.Select(EmitExpr)) + ")",
+                EmitFsReadText(expression),
             BuiltinIntrinsic.FsReadText =>
                 throw new InvalidOperationException("FsRead.read_text requires a receiver and a path"),
             _ => throw new InvalidOperationException("Unknown builtin intrinsic")
         };
+
+        private string EmitFsReadText(TypedIntrinsicCallExpr expression)
+        {
+            var receiver = EmitExpr(expression.Arguments[0]);
+            var path = expression.Arguments[1];
+            var emittedPath = path.Type.IsFilePath
+                ? "(" + EmitExpr(path) + ").Value"
+                : EmitExpr(path);
+            return "ReadText(" + receiver + ", " + emittedPath + ")";
+        }
 
         private string EmitBinary(TypedBinaryExpr expression)
         {
@@ -738,7 +752,10 @@ internal static class Emitter
             var resultType = "Result<string, " + EmitType(command.ErrorType) + ">";
             _source.Append("        var result = Function_").Append(command.HandlerFunctionId.ToString(CultureInfo.InvariantCulture))
                 .Append("(new Struct_").Append(command.ArgsStructId.ToString(CultureInfo.InvariantCulture))
-                .Append('(').Append(fields).AppendLine("));");
+                .Append('(').Append(fields).Append(')');
+            if (command.RequiresFsRead)
+                _source.Append(", new FsRead()");
+            _source.AppendLine(");");
             _source.Append("        if (result is ").Append(resultType).AppendLine(".Ok success)");
             _source.AppendLine("        {");
             _source.AppendLine("            Console.WriteLine(success.Value);");
@@ -993,7 +1010,8 @@ internal static class Emitter
 
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
 
-        private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText;
+        private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText ||
+            program.Commands.Any(command => command.RequiresFsRead);
 
         private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
 

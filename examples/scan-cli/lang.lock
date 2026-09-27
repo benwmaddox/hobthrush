@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "root": {
+    "name": "scan-cli",
+    "version": "0.1.0",
+    "manifest_sha256": "2c1be1c2d9854b05630b2e5e7ec47237e07e3a29d6dd31f3fe8083449f478e76",
+    "dependencies": {
+      "validation": "../text-validation"
+    }
+  },
+  "packages": [
+    {
+      "path": "../text-validation",
+      "name": "text-validation",
+      "version": "0.1.0",
+      "content_sha256": "86033f1b38ab1ea423816dd60d8b6df0547579b94a358ba744f96d8779389e14",
+      "dependencies": {}
+    }
+  ]
+}

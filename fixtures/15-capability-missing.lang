@@ -1,2 +1,22 @@
 module fixture::capability;
-pub fn bad() -> Text effects { net.client } { return http.get("https://example.org"); }
+
+command scan {
+    help "Read a file.";
+    argument input: FilePath help "Path to the file.";
+    handler: self::fixture::capability::read;
+    error: self::fixture::capability::describe_error;
+}
+
+pub fn read(args: self::fixture::capability::ScanArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+    return fs.read_text(args.input);
+}
+
+pub fn describe_error(error: FsError) -> Text effects {} {
+    return match error {
+        FsError.NotFound => "not found",
+        FsError.PermissionDenied => "permission denied",
+        FsError.InvalidPath => "invalid path",
+        FsError.InvalidText => "invalid text",
+        FsError.Io => "I/O error",
+    };
+}

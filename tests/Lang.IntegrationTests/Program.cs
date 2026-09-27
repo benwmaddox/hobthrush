@@ -68,6 +68,7 @@ internal static class IntegrationTests
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
+            ("CLI capability grants are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
             ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
@@ -89,6 +90,7 @@ internal static class IntegrationTests
             ("dependency source roots and reparse paths stay inside package boundaries", TestDependencyFilesystemSafety),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
+            ("maintained scan CLI receives FsRead and handles typed file and normalization results", TestScanCliExample),
             ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
             ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
@@ -100,6 +102,7 @@ internal static class IntegrationTests
             ("NativeAOT publishes and runs the current-host file executable", TestAotPublishAndRun),
             ("NativeAOT publishes and runs the current-host package executable", TestPackageAotPublishAndRun),
             ("NativeAOT publishes and runs a typed command with its schema", TestCommandAotPublishAndRun),
+            ("NativeAOT publishes and runs the maintained FsRead scan CLI", TestScanCliAotPublishAndRun),
             ("invalid main signatures receive an entrypoint diagnostic", TestInvalidEntrypoint),
             ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
@@ -1286,6 +1289,168 @@ internal static class IntegrationTests
         Directory.Delete(probeDirectory, recursive: true);
     }
 
+    private static async Task TestCliCapabilityManifestAndLock(Harness harness)
+    {
+        const string source = """
+            module app::main;
+            command read {
+                help "Read a file.";
+                argument input: FilePath help "File to read.";
+                handler: self::app::main::read_file;
+                error: self::app::main::describe_error;
+            }
+            pub fn read_file(args: self::app::main::ReadArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return fs.read_text(args.input);
+            }
+            pub fn describe_error(error: FsError) -> Text effects {} {
+                return match error {
+                    FsError.NotFound => "not found",
+                    FsError.PermissionDenied => "permission denied",
+                    FsError.InvalidPath => "invalid path",
+                    FsError.InvalidText => "invalid text",
+                    FsError.Io => "I/O error",
+                };
+            }
+            """;
+        var sources = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = source
+        };
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "cli-fsread-missing-grant",
+            CliPackageManifest(),
+            sources,
+            "E_CAPABILITY_MISSING",
+            "src/app/main.lang");
+
+        var noFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "cli-capability-unknown-manifest",
+            CliPackageManifest() + "\n[capabilities]\nnet.client = \"allow\"\n",
+            noFiles,
+            "E_MANIFEST",
+            "lang.toml");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "cli-capability-wrong-grant-manifest",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"deny\"\n",
+            noFiles,
+            "E_MANIFEST",
+            "lang.toml");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "cli-capability-duplicate-grant-manifest",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\nfs.read = \"allow\"\n",
+            noFiles,
+            "E_MANIFEST",
+            "lang.toml");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "library-capability-grant-manifest",
+            LibraryPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\n",
+            noFiles,
+            "E_MANIFEST",
+            "lang.toml");
+
+        const string argsOnlySource = """
+            module app::main;
+            pub union EchoError { Failed }
+            command echo {
+                help "Echo one value.";
+                argument input: Text help "Value to echo.";
+                handler: self::app::main::echo;
+                error: self::app::main::describe_error;
+            }
+            pub fn echo(args: self::app::main::EchoArgs) -> Result<Text, self::app::main::EchoError> effects {} {
+                return Ok(args.input);
+            }
+            pub fn describe_error(error: self::app::main::EchoError) -> Text effects {} {
+                return match error { self::app::main::EchoError.Failed => "failed" };
+            }
+            """;
+        var argsOnlyRoot = await harness.WritePackageAsync(
+            "cli-fsread-grant-not-used",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = argsOnlySource
+            });
+        var unusedGrantBuild = await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-not-used-build", argsOnlyRoot, "build");
+        AssertEqual(0, unusedGrantBuild.ExitCode, Describe(unusedGrantBuild));
+        var unusedGrantArtifact = unusedGrantBuild.StandardOutput["Built executable: ".Length..].Trim();
+        var unusedGrantSchemaPath = Path.Combine(Path.GetDirectoryName(unusedGrantArtifact)!, "command-schema.json");
+        using (var unusedGrantSchema = JsonDocument.Parse(await File.ReadAllBytesAsync(unusedGrantSchemaPath)))
+        {
+            AssertEqual(2, unusedGrantSchema.RootElement.GetProperty("schema_version").GetInt32(),
+                "Command schemas with the capabilities field must use version 2.");
+            AssertEqual(0, unusedGrantSchema.RootElement.GetProperty("commands")[0]
+                    .GetProperty("capabilities").GetArrayLength(),
+                "A manifest grant unused by an args-only handler must not appear as an injected capability.");
+        }
+
+        const string withGrant = "name = \"harness-package\"\n"
+            + "version = \"0.1.0\"\n"
+            + "kind = \"cli\"\n"
+            + "source_root = \"src\"\n"
+            + "entry_module = \"app::main\"\n"
+            + "\n[capabilities]\nfs.read = \"allow\"\n"
+            + "\n[dependencies]\nvalidation = \"../validation\"\n";
+        const string withoutGrant = "name = \"harness-package\"\n"
+            + "version = \"0.1.0\"\n"
+            + "kind = \"cli\"\n"
+            + "source_root = \"src\"\n"
+            + "entry_module = \"app::main\"\n"
+            + "\n[dependencies]\nvalidation = \"../validation\"\n";
+        var graphRoot = await harness.WritePackageGraphAsync(
+            "cli-fsread-grant-lock",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(withGrant, sources),
+                ["validation"] = new PackageFixture(
+                    LibraryPackageManifest("validation-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/validation.lang"] = "module validation; pub fn marker() -> i32 effects {} { return 1; }"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-lock-create", graphRoot, "lock"));
+        var rootManifestPath = Path.Combine(graphRoot, "lang.toml");
+        var lockPath = Path.Combine(graphRoot, "lang.lock");
+        AssertTrue(File.Exists(lockPath), "The dependency lock should exist before changing the app grant.");
+
+        await File.WriteAllTextAsync(rootManifestPath, withoutGrant);
+        var staleAfterRemovingGrant = await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-lock-stale-remove", graphRoot, "check", "--json");
+        AssertTrue(staleAfterRemovingGrant.ExitCode != 0
+            && staleAfterRemovingGrant.StandardOutput.Contains("E_LOCK", StringComparison.Ordinal),
+            $"Changing a capability grant must stale the package lock. {Describe(staleAfterRemovingGrant)}");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-lock-refresh-remove", graphRoot, "lock"));
+        var missingAfterRefresh = await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-no-grant-after-refresh", graphRoot, "check", "--json");
+        AssertTrue(missingAfterRefresh.ExitCode != 0
+            && missingAfterRefresh.StandardOutput.Contains("E_CAPABILITY_MISSING", StringComparison.Ordinal),
+            $"After refreshing the lock, the absent grant should fail capability checking. {Describe(missingAfterRefresh)}");
+
+        await File.WriteAllTextAsync(rootManifestPath, withGrant);
+        var staleAfterAddingGrant = await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-lock-stale-add", graphRoot, "check", "--json");
+        AssertTrue(staleAfterAddingGrant.ExitCode != 0
+            && staleAfterAddingGrant.StandardOutput.Contains("E_LOCK", StringComparison.Ordinal),
+            $"Adding a capability grant must also stale the package lock. {Describe(staleAfterAddingGrant)}");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-lock-refresh-add", graphRoot, "lock"));
+        var grantedAfterRefresh = await harness.InvokePackageDirectoryAsync(
+            "cli-fsread-grant-check-after-refresh", graphRoot, "check", "--json");
+        AssertEqual(0, grantedAfterRefresh.ExitCode, Describe(grantedAfterRefresh));
+        AssertEqual(0, ParseDiagnosticSnapshots(grantedAfterRefresh.StandardOutput).Length, Describe(grantedAfterRefresh));
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference ProbeFsReadRuntimeMappings(
         string dllPath,
@@ -1478,7 +1643,7 @@ internal static class IntegrationTests
         using (var schemaDocument = JsonDocument.Parse(firstSchemaBytes))
         {
             var root = schemaDocument.RootElement;
-            AssertEqual(1, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 1.");
+            AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 2 after adding capabilities.");
             var commands = root.GetProperty("commands");
             AssertEqual(1, commands.GetArrayLength(), "The entry module should define one command.");
             var command = commands[0];
@@ -1509,6 +1674,8 @@ internal static class IntegrationTests
             AssertEqual(1, flags.GetArrayLength(), "Flag schema count mismatch.");
             AssertEqual("recursive", flags[0].GetProperty("name").GetString(), "Flag schema mismatch.");
             AssertEqual("bool", flags[0].GetProperty("type").GetString(), "Flags must have boolean schema types.");
+            AssertEqual(0, command.GetProperty("capabilities").GetArrayLength(),
+                "An args-only handler should require no injected capabilities.");
         }
 
         var secondBuild = await harness.InvokePackageDirectoryAsync("typed-cli-build-repeat", packageRoot, "build");
@@ -2742,6 +2909,107 @@ internal static class IntegrationTests
         AssertRunOutput("ready" + Environment.NewLine, run);
     }
 
+    private static async Task TestScanCliExample(Harness harness)
+    {
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "scan-cli");
+        var manifest = await File.ReadAllTextAsync(Path.Combine(packageRoot, "lang.toml"));
+        var normalizedManifest = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        AssertTrue(normalizedManifest.Contains("[capabilities]\nfs.read = \"allow\"\n", StringComparison.Ordinal),
+            "The maintained scanner must explicitly grant fs.read to its CLI application.");
+        AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
+            "The scanner must use text-validation through its local dependency alias.");
+        AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
+            "The maintained scanner path dependency should have a canonical lockfile.");
+
+        var check = await harness.InvokePackageDirectoryAsync("scan-cli-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("scan-cli-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        AssertTrue(build.StandardOutput.StartsWith("Built executable: ", StringComparison.Ordinal), Describe(build));
+        var executablePath = build.StandardOutput["Built executable: ".Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the managed scan CLI executable at {executablePath}.");
+        var schemaPath = Path.Combine(Path.GetDirectoryName(executablePath)!, "command-schema.json");
+        AssertTrue(File.Exists(schemaPath), $"Expected scan CLI command schema beside its executable: {schemaPath}");
+        using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
+        {
+            var root = schema.RootElement;
+            AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "Scan CLI schema version mismatch.");
+            var command = root.GetProperty("commands")[0];
+            AssertEqual("scan", command.GetProperty("name").GetString(), "Scan CLI command schema name mismatch.");
+            var capabilities = command.GetProperty("capabilities");
+            AssertEqual(1, capabilities.GetArrayLength(), "The scanner schema must report one required capability.");
+            AssertEqual("fs.read", capabilities[0].GetString(), "The scanner schema must declare its filesystem read requirement.");
+            AssertEqual("FilePath", command.GetProperty("arguments")[0].GetProperty("type").GetString(),
+                "The scan input must remain an opaque FilePath in the command schema.");
+            AssertEqual("bool", command.GetProperty("flags")[0].GetProperty("type").GetString(),
+                "The normalize flag must be represented as a bool input.");
+        }
+
+        var temporaryDirectory = Path.Combine(harness.TemporaryRoot, $"scan-cli-files-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryDirectory);
+        var textPath = Path.Combine(temporaryDirectory, "input.txt");
+        var emptyPath = Path.Combine(temporaryDirectory, "empty.txt");
+        var invalidUtf8Path = Path.Combine(temporaryDirectory, "invalid-utf8.txt");
+        await File.WriteAllTextAsync(textPath, "  scan λ 😀  ", new UTF8Encoding(false, true));
+        await File.WriteAllTextAsync(emptyPath, string.Empty, new UTF8Encoding(false, true));
+        await File.WriteAllBytesAsync(invalidUtf8Path, [0xC3, 0x28]);
+
+        var raw = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-raw", packageRoot, "run", "--", "scan", textPath);
+        AssertRunOutput("  scan λ 😀  " + Environment.NewLine, raw);
+        var normalized = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-normalized", packageRoot, "run", "--", "scan", textPath, "--normalize");
+        AssertRunOutput("scan λ 😀" + Environment.NewLine, normalized);
+
+        var topHelp = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-top-help", packageRoot, "run", "--", "--help");
+        AssertEqual(0, topHelp.ExitCode, Describe(topHelp));
+        AssertTrue(topHelp.StandardOutput.Contains("scan", StringComparison.Ordinal)
+            && topHelp.StandardOutput.Contains("Read a UTF-8 text file", StringComparison.Ordinal), Describe(topHelp));
+        var commandHelp = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-command-help", packageRoot, "run", "--", "scan", "--help");
+        AssertEqual(0, commandHelp.ExitCode, Describe(commandHelp));
+        AssertTrue(commandHelp.StandardOutput.Contains("input", StringComparison.Ordinal)
+            && commandHelp.StandardOutput.Contains("--normalize", StringComparison.Ordinal), Describe(commandHelp));
+
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync(
+            "scan-cli-unknown-command", packageRoot, "run", "--", "unknown"), "CLI_UNKNOWN_COMMAND");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync(
+            "scan-cli-missing-argument", packageRoot, "run", "--", "scan"), "CLI_MISSING_ARGUMENT");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync(
+            "scan-cli-empty-filepath", packageRoot, "run", "--", "scan", string.Empty), "CLI_INVALID_VALUE");
+        AssertCliParseFailure(await harness.InvokePackageDirectoryAsync(
+            "scan-cli-duplicate-flag", packageRoot, "run", "--", "scan", textPath, "--normalize", "--normalize"),
+            "CLI_DUPLICATE_OPTION");
+
+        async Task AssertTypedFailure(string caseName, string path, string expectedMessage)
+        {
+            await AssertTypedFailureWithMessages(caseName, path, expectedMessage);
+        }
+
+        async Task AssertTypedFailureWithMessages(string caseName, string path, params string[] expectedMessages)
+        {
+            var result = await harness.InvokePackageDirectoryAsync(caseName, packageRoot, "run", "--", "scan", path, "--normalize");
+            AssertEqual(3, result.ExitCode, Describe(result));
+            AssertEqual(string.Empty, result.StandardOutput, Describe(result));
+            AssertTrue(expectedMessages.Any(message => result.StandardError == message + Environment.NewLine),
+                $"Expected one typed filesystem/domain error from [{string.Join(", ", expectedMessages)}]. {Describe(result)}");
+        }
+
+        await AssertTypedFailure("scan-cli-missing-file", Path.Combine(temporaryDirectory, "missing.txt"), "File not found");
+        await AssertTypedFailure("scan-cli-empty-normalized-content", emptyPath, "File contains no text to normalize");
+        await AssertTypedFailure("scan-cli-invalid-utf8", invalidUtf8Path, "File is not valid UTF-8");
+        await AssertTypedFailureWithMessages(
+            "scan-cli-directory-path",
+            temporaryDirectory,
+            "Permission denied",
+            "File read failed",
+            "Invalid file path");
+    }
+
     private static async Task TestTextValidationExample(Harness harness)
     {
         var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "text-validation");
@@ -3080,7 +3348,7 @@ internal static class IntegrationTests
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(result));
-        AssertTrue(result.StandardOutput.EndsWith("4 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(result.StandardOutput.EndsWith("39 active, 3 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(result));
         AssertEqual(string.Empty, result.StandardError, Describe(result));
     }
@@ -3517,8 +3785,8 @@ internal static class IntegrationTests
         AssertTrue(File.Exists(schemaPath), $"Expected command schema beside the NativeAOT executable: {schemaPath}");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
-            AssertEqual(1, schema.RootElement.GetProperty("schema_version").GetInt32(),
-                "The AOT command schema version must be 1.");
+            AssertEqual(2, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "The AOT command schema version must be 2.");
             AssertEqual("scan", schema.RootElement.GetProperty("commands")[0].GetProperty("name").GetString(),
                 "The AOT command schema should retain its command declaration.");
         }
@@ -3530,6 +3798,57 @@ internal static class IntegrationTests
             "--",
             "--leading");
         AssertRunOutput("--leading" + Environment.NewLine, execution);
+    }
+
+    private static async Task TestScanCliAotPublishAndRun(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The maintained scan CLI NativeAOT smoke test targets x64 hosts only.");
+
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "scan-cli");
+        var temporaryDirectory = Path.Combine(harness.TemporaryRoot, $"scan-cli-aot-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryDirectory);
+        var inputPath = Path.Combine(temporaryDirectory, "aot-input.txt");
+        await File.WriteAllTextAsync(inputPath, "  Native AOT λ  ", new UTF8Encoding(false, true));
+
+        var result = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "scan-cli-aot-build",
+            packageRoot,
+            "build",
+            AotPublishTimeout,
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+        AssertEqual(0, result.ExitCode, Describe(result));
+        const string prefix = "Built native executable: ";
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(result));
+        AssertTrue(result.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(result));
+        var executablePath = result.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertEqual(prefix + executablePath + Environment.NewLine, result.StandardOutput,
+            "Maintained scan CLI AOT build output should contain only the executable path line.");
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the NativeAOT scan CLI executable at {executablePath}.");
+
+        var schemaPath = Path.Combine(Path.GetDirectoryName(executablePath)!, "command-schema.json");
+        AssertTrue(File.Exists(schemaPath), $"Expected scan CLI AOT schema beside the executable: {schemaPath}");
+        using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
+        {
+            AssertEqual(2, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "AOT scan command schema version mismatch.");
+            var command = schema.RootElement.GetProperty("commands")[0];
+            AssertEqual("scan", command.GetProperty("name").GetString(), "AOT scan schema command mismatch.");
+            var capabilities = command.GetProperty("capabilities");
+            AssertEqual(1, capabilities.GetArrayLength(), "AOT schema must retain required capabilities.");
+            AssertEqual("fs.read", capabilities[0].GetString(), "AOT schema must record the FsRead grant requirement.");
+        }
+
+        var execution = await ExecuteNativeAsync(
+            executablePath,
+            TimeSpan.FromSeconds(30),
+            "scan",
+            inputPath,
+            "--normalize");
+        AssertRunOutput("Native AOT λ" + Environment.NewLine, execution);
     }
 
     private static string CurrentHostAotRid() => OperatingSystem.IsWindows()
