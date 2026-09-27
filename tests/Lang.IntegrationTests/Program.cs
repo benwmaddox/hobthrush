@@ -65,6 +65,7 @@ internal static class IntegrationTests
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
             ("effect annotations are closed upper bounds and enforce FsRead capabilities", TestEffectAnnotationsAndCapabilities),
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
+            ("inspect effects reports deterministic compiler-derived paths and trusted boundaries", TestInspectEffects),
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
@@ -1075,7 +1076,7 @@ internal static class IntegrationTests
         AssertEqual(1, directExceeded.Length, "A direct effect outside its upper bound should produce one diagnostic.");
         AssertRangeAtToken(directExceededSource, directExceeded.Single(), "bad", 1);
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness::effect_direct_exceeded.bad'; shortest call path: harness::effect_direct_exceeded.bad -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_direct_exceeded::bad'; shortest call path: harness::effect_direct_exceeded::bad -> fs.read_text",
             directExceeded.Single().Message,
             "A direct-effect diagnostic should show the shortest path to the operation.");
 
@@ -1148,7 +1149,7 @@ internal static class IntegrationTests
 
         var firstRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-first", source, "E_EFFECT_EXCEEDED");
         var secondRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-second", source, "E_EFFECT_EXCEEDED");
-        const string expectedMessage = "Effect 'fs.read' is not declared by function 'harness::effect_paths.bad'; shortest call path: harness::effect_paths.bad -> harness::effect_paths.near -> harness::effect_paths.leaf -> fs.read_text";
+        const string expectedMessage = "Effect 'fs.read' is not declared by function 'harness::effect_paths::bad'; shortest call path: harness::effect_paths::bad -> harness::effect_paths::near -> harness::effect_paths::leaf -> fs.read_text";
         AssertEqual(expectedMessage, firstRun.Single().Message, "The checker should choose the shortest call path.");
         AssertEqual(firstRun.Single().Message, secondRun.Single().Message,
             "Call-path diagnostic content should be deterministic across runs.");
@@ -1164,7 +1165,7 @@ internal static class IntegrationTests
             + "}\n";
         var tiedPaths = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-tie", tiedPathsSource, "E_EFFECT_EXCEEDED");
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness::effect_tie.bad'; shortest call path: harness::effect_tie.bad -> harness::effect_tie.alpha -> harness::effect_tie.leaf -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_tie::bad'; shortest call path: harness::effect_tie::bad -> harness::effect_tie::alpha -> harness::effect_tie::leaf -> fs.read_text",
             tiedPaths.Single().Message,
             "Equal-length effect paths should use canonical function ordering, independent of call source order.");
 
@@ -1178,9 +1179,300 @@ internal static class IntegrationTests
         var recursiveDiagnostics = await ExpectDiagnosticsAsync(
             harness, "effect-recursive-cycle", recursiveSource, "E_EFFECT_EXCEEDED");
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness::effect_recursive.bad'; shortest call path: harness::effect_recursive.bad -> harness::effect_recursive.second -> harness::effect_recursive.first -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_recursive::bad'; shortest call path: harness::effect_recursive::bad -> harness::effect_recursive::second -> harness::effect_recursive::first -> fs.read_text",
             recursiveDiagnostics.Single().Message,
             "Effect inference should converge through recursive call cycles and retain the shortest path.");
+    }
+
+    private static async Task TestInspectEffects(Harness harness)
+    {
+        var scanPackage = Path.Combine(harness.RepositoryRoot, "examples", "scan-cli");
+        var scan = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", scanPackage, "self::app::scan::run", "--json");
+        AssertEqual(0, scan.ExitCode, Describe(scan));
+        AssertEqual(string.Empty, scan.StandardError, Describe(scan));
+        using var scanJson = JsonDocument.Parse(scan.StandardOutput);
+        var scanReport = scanJson.RootElement;
+        AssertEqual(1, scanReport.GetProperty("schema_version").GetInt32(),
+            "Inspect-effects JSON schema version must be 1.");
+        AssertEqual("self::app::scan::run", scanReport.GetProperty("symbol").GetString(),
+            "The report should identify the requested function symbol.");
+        AssertJsonStringArray(scanReport.GetProperty("declared_effects"), ["fs.read"]);
+        AssertJsonStringArray(scanReport.GetProperty("inferred_effects"), ["fs.read"]);
+        AssertJsonStringArray(scanReport.GetProperty("required_capabilities"), ["fs.read"]);
+        AssertJsonStringArray(scanReport.GetProperty("manifest_grants"), ["fs.read"]);
+        AssertEffectPath(scanReport, "fs.read", "app::scan::run -> fs.read_text");
+
+        var trustedOperations = scanReport.GetProperty("trusted_operations").EnumerateArray().ToArray();
+        AssertEqual(3, trustedOperations.Length,
+            "The scan report should identify the two CLI host operations and the FsRead adapter.");
+        AssertTrustedOperation(trustedOperations[0], "cli.argument_decode", "trusted_host", []);
+        AssertTrustedOperation(trustedOperations[1], "cli.output", "trusted_host", []);
+        AssertTrustedOperation(trustedOperations[2], "FsRead.read_text", "trusted_adapter", ["fs.read"]);
+
+        var repeatedScan = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", scanPackage, "self::app::scan::run", "--json");
+        AssertEqual(0, repeatedScan.ExitCode, Describe(repeatedScan));
+        AssertEqual(scan.StandardOutput, repeatedScan.StandardOutput,
+            "Repeated inspect-effects calls must produce byte-identical JSON.");
+
+        var pure = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", scanPackage, "self::app::scan::describe_error", "--json");
+        AssertEqual(0, pure.ExitCode, Describe(pure));
+        using (var pureJson = JsonDocument.Parse(pure.StandardOutput))
+        {
+            var pureReport = pureJson.RootElement;
+            AssertJsonStringArray(pureReport.GetProperty("declared_effects"), []);
+            AssertJsonStringArray(pureReport.GetProperty("inferred_effects"), []);
+            AssertEqual(0, pureReport.GetProperty("effect_paths").GetArrayLength(),
+                "A pure function should have no effect paths.");
+            AssertJsonStringArray(pureReport.GetProperty("required_capabilities"), []);
+            AssertJsonStringArray(pureReport.GetProperty("manifest_grants"), ["fs.read"]);
+        }
+
+        var malformedInvocation = await harness.InvokeCompilerCommandAsync("inspect", "effects");
+        AssertEqual(2, malformedInvocation.ExitCode, Describe(malformedInvocation));
+        AssertEqual(string.Empty, malformedInvocation.StandardOutput, Describe(malformedInvocation));
+        AssertTrue(malformedInvocation.StandardError.StartsWith("Usage: lang ", StringComparison.Ordinal)
+            && malformedInvocation.StandardError.Contains("inspect effects", StringComparison.Ordinal),
+            $"A malformed inspect invocation should show its usage. {Describe(malformedInvocation)}");
+
+        await AssertInspectUnresolvedSymbolAsync(scanPackage, "validation::text::validation::normalize");
+        await AssertInspectUnresolvedSymbolAsync(scanPackage, "self::app");
+        await AssertInspectUnresolvedSymbolAsync(scanPackage, "self::app::scan::missing");
+
+        const string pathsSource = """
+            module app::effects;
+            fn leaf(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return fs.read_text("path");
+            }
+            fn zeta(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return self::app::effects::leaf(fs);
+            }
+            fn alpha(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return self::app::effects::leaf(fs);
+            }
+            pub fn transitive(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                let first: Result<Text, FsError> = self::app::effects::zeta(fs);
+                return self::app::effects::alpha(fs);
+            }
+            fn cycle_first(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return self::app::effects::cycle_second(fs);
+            }
+            fn cycle_second(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                let prior: Result<Text, FsError> = self::app::effects::cycle_first(fs);
+                return fs.read_text("path");
+            }
+            pub fn recursive(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return self::app::effects::cycle_first(fs);
+            }
+            fn private_root() -> i32 effects {} { return 23; }
+            """;
+        var pathPackage = await harness.WritePackageAsync(
+            "inspect-effects-transitive-recursive",
+            LibraryPackageManifest("inspect-effects-paths"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/effects.lang"] = pathsSource
+            });
+        var transitive = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", pathPackage,
+            "self::app::effects::transitive", "--json");
+        AssertEqual(0, transitive.ExitCode, Describe(transitive));
+        using (var transitiveJson = JsonDocument.Parse(transitive.StandardOutput))
+            AssertEffectPath(transitiveJson.RootElement, "fs.read",
+                "app::effects::transitive -> app::effects::alpha -> app::effects::leaf -> fs.read_text");
+        var repeatedTransitive = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", pathPackage,
+            "self::app::effects::transitive", "--json");
+        AssertEqual(0, repeatedTransitive.ExitCode, Describe(repeatedTransitive));
+        AssertEqual(transitive.StandardOutput, repeatedTransitive.StandardOutput,
+            "Repeated inspection must preserve the canonical transitive shortest path byte-for-byte.");
+
+        var recursive = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", pathPackage,
+            "self::app::effects::recursive", "--json");
+        AssertEqual(0, recursive.ExitCode, Describe(recursive));
+        using (var recursiveJson = JsonDocument.Parse(recursive.StandardOutput))
+            AssertEffectPath(recursiveJson.RootElement, "fs.read",
+                "app::effects::recursive -> app::effects::cycle_first -> app::effects::cycle_second -> fs.read_text");
+        var repeatedRecursive = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", pathPackage,
+            "self::app::effects::recursive", "--json");
+        AssertEqual(0, repeatedRecursive.ExitCode, Describe(repeatedRecursive));
+        AssertEqual(recursive.StandardOutput, repeatedRecursive.StandardOutput,
+            "Repeated inspection must preserve the canonical recursive shortest path byte-for-byte.");
+
+        var privateRoot = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", pathPackage, "self::app::effects::private_root", "--json");
+        AssertEqual(0, privateRoot.ExitCode, Describe(privateRoot));
+        using (var privateRootJson = JsonDocument.Parse(privateRoot.StandardOutput))
+        {
+            AssertEqual("self::app::effects::private_root",
+                privateRootJson.RootElement.GetProperty("symbol").GetString(),
+                "Inspection should resolve a private root-package function by its fully qualified symbol.");
+            AssertJsonStringArray(privateRootJson.RootElement.GetProperty("inferred_effects"), []);
+        }
+
+        const string labelRootManifest = "name = \"inspect-effect-label-root\"\n"
+            + "version = \"0.1.0\"\n"
+            + "kind = \"lib\"\n"
+            + "source_root = \"src\"\n"
+            + "\n[dependencies]\nhelper = \"../helper\"\n";
+        var labelPackage = await harness.WritePackageGraphAsync(
+            "inspect-effect-dependency-label",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(labelRootManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/shared.lang"] = "module app::shared;\n"
+                            + "pub fn scan(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {\n"
+                            + "    return helper::app::shared::scan(fs);\n"
+                            + "}\n"
+                    }),
+                ["helper"] = new PackageFixture(LibraryPackageManifest("inspect-effect-label-helper"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/shared.lang"] = "module app::shared;\n"
+                            + "pub fn scan(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {\n"
+                            + "    return fs.read_text(\"path\");\n"
+                            + "}\n"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "inspect-effect-dependency-label-lock", labelPackage, "lock"));
+        var labeledDependency = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", labelPackage, "self::app::shared::scan", "--json");
+        AssertEqual(0, labeledDependency.ExitCode, Describe(labeledDependency));
+        using (var labeledJson = JsonDocument.Parse(labeledDependency.StandardOutput))
+        {
+            var path = labeledJson.RootElement.GetProperty("effect_paths").EnumerateArray()
+                .Single(candidate => candidate.GetProperty("effect").GetString() == "fs.read");
+            var steps = path.GetProperty("steps").EnumerateArray()
+                .Select(step => step.GetString() ?? string.Empty)
+                .ToArray();
+            AssertTrue(steps.SequenceEqual(
+                    [
+                        "app::shared::scan",
+                        "inspect-effect-label-helper@0.1.0::app::shared::scan",
+                        "fs.read_text"
+                    ],
+                    StringComparer.Ordinal),
+                $"Dependency calls should use stable package labels even when module/function names collide. Steps: {string.Join(" -> ", steps)}");
+            AssertTrue(steps[0] != steps[1],
+                "A dependency step must remain distinguishable from the root step with the same module/function name.");
+            AssertTrue(steps.All(step => !Path.IsPathRooted(step)
+                    && !step.Contains(labelPackage, StringComparison.Ordinal)),
+                "Effect paths must not expose package directories or absolute filesystem paths.");
+        }
+
+        const string invalidSource = "module app::broken; pub fn broken() -> i32 effects {} { return true; }";
+        var invalidPackage = await harness.WritePackageAsync(
+            "inspect-effects-compiler-errors",
+            LibraryPackageManifest("inspect-effects-invalid"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/broken.lang"] = invalidSource
+            });
+        var compilerError = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", invalidPackage,
+            "self::app::broken::broken", "--json");
+        AssertTrue(compilerError.ExitCode != 0, "Inspection must reject a source package with compiler errors.");
+        AssertEqual(string.Empty, compilerError.StandardError, Describe(compilerError));
+        var compilerDiagnostics = ParseDiagnosticSnapshots(compilerError.StandardOutput);
+        AssertTrue(compilerDiagnostics.Any(diagnostic => diagnostic.Code == "E_TYPE_MISMATCH"),
+            $"The compiler diagnostic should be returned before an effects report. {compilerError.StandardOutput}");
+        using (var compilerJson = JsonDocument.Parse(compilerError.StandardOutput))
+            AssertTrue(!compilerJson.RootElement.TryGetProperty("declared_effects", out _),
+                "A compiler error must prevent a partial effect report.");
+
+        const string rootManifest = "name = \"inspect-lock-root\"\n"
+            + "version = \"0.1.0\"\n"
+            + "kind = \"lib\"\n"
+            + "source_root = \"src\"\n"
+            + "\n[dependencies]\nvalidation = \"../validation\"\n";
+        var lockPackage = await harness.WritePackageGraphAsync(
+            "inspect-effects-lock",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(rootManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/effects.lang"] = "module app::effects; pub fn pure() -> i32 effects {} { return 1; }"
+                    }),
+                ["validation"] = new PackageFixture(
+                    LibraryPackageManifest("inspect-validation"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/validation.lang"] = "module validation; pub fn marker() -> i32 effects {} { return 1; }"
+                    })
+            });
+        var missingLock = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", lockPackage,
+            "self::app::effects::pure", "--json");
+        AssertInspectLockFailure(missingLock, "A missing dependency lock must stop inspection before a report.");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "inspect-effects-create-lock", lockPackage, "lock"));
+        var dependencyFile = Path.GetFullPath(Path.Combine(lockPackage, "..", "validation", "src", "validation.lang"));
+        await File.WriteAllTextAsync(dependencyFile,
+            "module validation; pub fn marker() -> i32 effects {} { return 2; }");
+        var staleLock = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", lockPackage,
+            "self::app::effects::pure", "--json");
+        AssertInspectLockFailure(staleLock, "A stale dependency lock must stop inspection before a report.");
+
+        async Task AssertInspectUnresolvedSymbolAsync(string package, string symbol)
+        {
+            var result = await harness.InvokeCompilerCommandAsync(
+                "inspect", "effects", package, symbol, "--json");
+            AssertEqual(1, result.ExitCode,
+                $"Inspecting unresolved symbol '{symbol}' should return a compiler diagnostic. {Describe(result)}");
+            AssertEqual(string.Empty, result.StandardError, Describe(result));
+            using var diagnosticsJson = JsonDocument.Parse(result.StandardOutput);
+            AssertEqual(1, diagnosticsJson.RootElement.GetProperty("schemaVersion").GetInt32(),
+                "Symbol lookup errors should use the stable diagnostics JSON schema.");
+            var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
+            AssertEqual(1, diagnostics.Length, "Each unresolved symbol should produce one structured diagnostic.");
+            AssertEqual("E_NAME_UNRESOLVED", diagnostics[0].Code,
+                $"Expected E_NAME_UNRESOLVED for inspect symbol '{symbol}'. {result.StandardOutput}");
+        }
+
+        static void AssertJsonStringArray(JsonElement element, string[] expected)
+        {
+            var actual = element.EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray();
+            AssertTrue(expected.SequenceEqual(actual, StringComparer.Ordinal),
+                $"Expected JSON string array [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
+        }
+
+        static void AssertEffectPath(JsonElement report, string effect, string expectedSteps)
+        {
+            var matching = report.GetProperty("effect_paths").EnumerateArray()
+                .Single(path => path.GetProperty("effect").GetString() == effect);
+            var steps = matching.GetProperty("steps").EnumerateArray()
+                .Select(step => step.GetString() ?? string.Empty);
+            AssertEqual(expectedSteps, string.Join(" -> ", steps),
+                $"Unexpected shortest path for effect '{effect}'.");
+        }
+
+        static void AssertTrustedOperation(JsonElement operation, string expectedOperation, string expectedTrust, string[] expectedEffects)
+        {
+            AssertEqual(expectedOperation, operation.GetProperty("operation").GetString(),
+                "Trusted operation names and order should be stable.");
+            AssertEqual(expectedTrust, operation.GetProperty("trust").GetString(),
+                $"Unexpected trust classification for {expectedOperation}.");
+            AssertJsonStringArray(operation.GetProperty("effects"), expectedEffects);
+        }
+
+        static void AssertInspectLockFailure(ProcessResult result, string message)
+        {
+            AssertTrue(result.ExitCode != 0, message + " " + Describe(result));
+            AssertTrue(result.StandardOutput.Contains("E_LOCK", StringComparison.Ordinal)
+                || result.StandardError.Contains("E_LOCK", StringComparison.Ordinal),
+                message + " Expected E_LOCK. " + Describe(result));
+            AssertTrue(!result.StandardOutput.Contains("declared_effects", StringComparison.Ordinal),
+                message + " A report must not be emitted for a stale or missing lock.");
+        }
     }
 
     private static async Task TestQualifiedEffects(Harness harness)
@@ -1204,7 +1496,7 @@ internal static class IntegrationTests
         AssertEqual(wrapperPath, Path.GetFullPath(exceeded.File), "The effect diagnostic should identify the caller module.");
         AssertRangeAtToken(wrapperWithoutEffect, exceeded, "bad", 1);
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'app::reader.bad'; shortest call path: app::reader.bad -> io::files.load -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'app::reader::bad'; shortest call path: app::reader::bad -> io::files::load -> fs.read_text",
             exceeded.Message,
             "The path should include the qualified function and the filesystem operation.");
 
