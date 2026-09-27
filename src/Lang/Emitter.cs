@@ -25,14 +25,23 @@ internal static class Emitter
         {
             _source.AppendLine("using System;");
             _source.AppendLine("using System.Globalization;");
+            if (UsesFsReadText)
+            {
+                _source.AppendLine("using System.IO;");
+                _source.AppendLine("using System.Security;");
+                _source.AppendLine("using System.Text;");
+            }
             _source.AppendLine();
             _source.AppendLine("public static class LangModule");
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
+            if (NeedsFsReadType) EmitFsReadType();
+            if (NeedsFsErrorType) EmitFsErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in program.Functions) EmitFunction(function);
+            if (UsesFsReadText) EmitFsReadTextHelper();
             EmitArithmeticHelpers();
             if (executable) EmitEntryPoint(entry!);
 
@@ -52,6 +61,28 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        public sealed record Ok(T Value) : Result<T, E>;");
             _source.AppendLine("        public sealed record Err(E Error) : Result<T, E>;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsReadType()
+        {
+            _source.AppendLine("    public sealed class FsRead");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal FsRead() { }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsErrorType()
+        {
+            _source.AppendLine("    public abstract record FsError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        public sealed record NotFound() : FsError;");
+            _source.AppendLine("        public sealed record PermissionDenied() : FsError;");
+            _source.AppendLine("        public sealed record InvalidPath() : FsError;");
+            _source.AppendLine("        public sealed record InvalidText() : FsError;");
+            _source.AppendLine("        public sealed record Io() : FsError;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -135,6 +166,7 @@ internal static class Emitter
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCallExpr call => "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture) +
                 "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")",
+            TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
             TypedStructConstructExpr structure => EmitStructConstruct(structure),
@@ -142,6 +174,15 @@ internal static class Emitter
                 field.FieldIndex.ToString(CultureInfo.InvariantCulture),
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
+        };
+
+        private string EmitIntrinsicCall(TypedIntrinsicCallExpr expression) => expression.Intrinsic switch
+        {
+            BuiltinIntrinsic.FsReadText when expression.Arguments.Count == 2 =>
+                "ReadText(" + string.Join(", ", expression.Arguments.Select(EmitExpr)) + ")",
+            BuiltinIntrinsic.FsReadText =>
+                throw new InvalidOperationException("FsRead.read_text requires a receiver and a path"),
+            _ => throw new InvalidOperationException("Unknown builtin intrinsic")
         };
 
         private string EmitBinary(TypedBinaryExpr expression)
@@ -164,6 +205,11 @@ internal static class Emitter
                 BuiltinVariant.None => "None",
                 BuiltinVariant.Ok => "Ok",
                 BuiltinVariant.Err => "Err",
+                BuiltinVariant.FsErrorNotFound or
+                BuiltinVariant.FsErrorPermissionDenied or
+                BuiltinVariant.FsErrorInvalidPath or
+                BuiltinVariant.FsErrorInvalidText or
+                BuiltinVariant.FsErrorIo => throw new InvalidOperationException("FsError variants cannot be constructed from source"),
                 _ => throw new InvalidOperationException("Unknown builtin union variant")
             };
             return "new " + EmitType(expression.Type) + "." + variant + "(" +
@@ -207,6 +253,11 @@ internal static class Emitter
                     BuiltinVariant.None => "None",
                     BuiltinVariant.Ok => "Ok",
                     BuiltinVariant.Err => "Err",
+                    BuiltinVariant.FsErrorNotFound => "NotFound",
+                    BuiltinVariant.FsErrorPermissionDenied => "PermissionDenied",
+                    BuiltinVariant.FsErrorInvalidPath => "InvalidPath",
+                    BuiltinVariant.FsErrorInvalidText => "InvalidText",
+                    BuiltinVariant.FsErrorIo => "Io",
                     _ => throw new InvalidOperationException("Unknown builtin pattern")
                 };
                 variantType = EmitType(scrutineeType) + "." + variantName;
@@ -229,6 +280,56 @@ internal static class Emitter
             _source.AppendLine("    private static int CheckedAdd(int left, int right) => checked(left + right);");
             _source.AppendLine("    private static int CheckedSubtract(int left, int right) => checked(left - right);");
             _source.AppendLine("    private static int CheckedMultiply(int left, int right) => checked(left * right);");
+            _source.AppendLine();
+        }
+
+        private void EmitFsReadTextHelper()
+        {
+            _source.AppendLine("    private static Result<string, FsError> ReadText(FsRead receiver, string path)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(receiver);");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var bytes = File.ReadAllBytes(path);");
+            _source.AppendLine("            return new Result<string, FsError>.Ok(new UTF8Encoding(false, true).GetString(bytes));");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (FileNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DirectoryNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (SecurityException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (UnauthorizedAccessException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DecoderFallbackException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidText());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (ArgumentException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (NotSupportedException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (PathTooLongException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (IOException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.Io());");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
             _source.AppendLine();
         }
 
@@ -266,8 +367,46 @@ internal static class Emitter
             LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
+            LangTypeKind.FsRead => "FsRead",
+            LangTypeKind.FsError => "FsError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
+
+        private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText;
+
+        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
+
+        private bool UsesFsReadText => program.Functions
+            .Any(function => function.InferredEffects.Contains("fs.read", StringComparer.Ordinal));
+
+        private bool UsesTypeKind(LangTypeKind kind) => EnumerateDeclaredTypes()
+            .Any(type => ContainsTypeKind(type, kind));
+
+        private IEnumerable<LangType> EnumerateDeclaredTypes()
+        {
+            foreach (var union in program.Unions)
+            foreach (var variant in union.Variants)
+            foreach (var field in variant.Fields)
+                yield return field.Type;
+
+            foreach (var structure in program.Structs)
+            foreach (var field in structure.Fields)
+                yield return field.Type;
+
+            foreach (var function in program.Functions)
+            {
+                foreach (var parameter in function.Parameters)
+                    yield return parameter.Type;
+                yield return function.ReturnType;
+
+                foreach (var statement in function.Body)
+                    if (statement is TypedLetStmt let)
+                        yield return let.Type;
+            }
+        }
+
+        private static bool ContainsTypeKind(LangType type, LangTypeKind kind) =>
+            type.Kind == kind || type.Arguments.Any(argument => ContainsTypeKind(argument, kind));
 
         private void Indent(int level) => _source.Append(' ', level * 4);
     }

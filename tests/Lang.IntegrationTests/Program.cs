@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text;
 
@@ -57,6 +60,11 @@ internal static class IntegrationTests
             ("signed i32 literals and unary negation are checked", TestSignedI32),
             ("checked i32 overflow exits through the generic runtime fault contract", TestCheckedOverflow),
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
+            ("effect annotations are closed upper bounds and enforce FsRead capabilities", TestEffectAnnotationsAndCapabilities),
+            ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
+            ("imported calls carry effects into exact JSON diagnostics", TestImportedEffects),
+            ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
+            ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
             ("same-package CLI package checks, builds, and runs imported public values", TestPackageCliRoundTrip),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
             ("package imports enforce module and symbol visibility and conflicts", TestPackageImportDiagnostics),
@@ -745,16 +753,7 @@ internal static class IntegrationTests
         AssertTrue(result.ExitCode != 0, $"Invalid source unexpectedly succeeded. {Describe(result)}");
         AssertEqual(string.Empty, result.StandardError, Describe(result));
 
-        using var document = JsonDocument.Parse(result.StandardOutput);
-        var diagnosticsElement = document.RootElement.GetProperty("diagnostics");
-        var diagnostics = diagnosticsElement.EnumerateArray().Select(item => new DiagnosticSnapshot(
-            item.GetProperty("code").GetString() ?? string.Empty,
-            item.GetProperty("message").GetString() ?? string.Empty,
-            item.GetProperty("file").GetString() ?? string.Empty,
-            item.GetProperty("range").GetProperty("startLine").GetInt32(),
-            item.GetProperty("range").GetProperty("startColumn").GetInt32(),
-            item.GetProperty("range").GetProperty("endLine").GetInt32(),
-            item.GetProperty("range").GetProperty("endColumn").GetInt32())).ToArray();
+        var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
         AssertTrue(diagnostics.Any(diagnostic => expectedCodes.Contains(diagnostic.Code, StringComparer.Ordinal)),
             $"Expected one of [{string.Join(", ", expectedCodes)}]; got {string.Join(", ", diagnostics.Select(diagnostic => diagnostic.Code))}.");
         AssertTrue(diagnostics.All(diagnostic => diagnostic.File == harness.LastSourcePath
@@ -762,6 +761,19 @@ internal static class IntegrationTests
             && diagnostic.EndLine > 0 && diagnostic.EndColumn > diagnostic.StartColumn),
             "Every diagnostic should include the temporary source path and a non-empty range.");
         return diagnostics;
+    }
+
+    private static DiagnosticSnapshot[] ParseDiagnosticSnapshots(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.GetProperty("diagnostics").EnumerateArray().Select(item => new DiagnosticSnapshot(
+            item.GetProperty("code").GetString() ?? string.Empty,
+            item.GetProperty("message").GetString() ?? string.Empty,
+            item.GetProperty("file").GetString() ?? string.Empty,
+            item.GetProperty("range").GetProperty("startLine").GetInt32(),
+            item.GetProperty("range").GetProperty("startColumn").GetInt32(),
+            item.GetProperty("range").GetProperty("endLine").GetInt32(),
+            item.GetProperty("range").GetProperty("endColumn").GetInt32())).ToArray();
     }
 
     private static void AssertRangeAtToken(string source, DiagnosticSnapshot diagnostic, string tokenText, int occurrence)
@@ -883,6 +895,301 @@ internal static class IntegrationTests
         AssertEqual(70, negatedMinimum.ExitCode, Describe(negatedMinimum));
         AssertEqual("Runtime fault" + Environment.NewLine, negatedMinimum.StandardError, Describe(negatedMinimum));
     }
+    private static async Task TestEffectAnnotationsAndCapabilities(Harness harness)
+    {
+        const string pureSource = "module harness.effect_pure;\n"
+            + "pub fn main() -> i32 effects {} { return 42; }\n";
+        AssertRunOutput("42" + Environment.NewLine, await harness.InvokeAsync("effect-pure-success", "run", pureSource));
+
+        const string directSource = "module harness.effect_direct;\n"
+            + "pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
+        var directCheck = await harness.InvokeAsync("effect-direct-success", "check", directSource, "--json");
+        AssertEqual(0, directCheck.ExitCode, Describe(directCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(directCheck.StandardOutput).Length,
+            "A direct fs.read operation inside its declared upper bound should check cleanly.");
+
+        const string directExceededSource = "module harness.effect_direct_exceeded;\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(\"x\"); }\n";
+        var directExceeded = await ExpectDiagnosticsAsync(
+            harness, "effect-direct-exceeded", directExceededSource, "E_EFFECT_EXCEEDED");
+        AssertEqual(1, directExceeded.Length, "A direct effect outside its upper bound should produce one diagnostic.");
+        AssertRangeAtToken(directExceededSource, directExceeded.Single(), "bad", 1);
+        AssertEqual(
+            "Effect 'fs.read' is not declared by function 'harness.effect_direct_exceeded.bad'; shortest call path: harness.effect_direct_exceeded.bad -> fs.read_text",
+            directExceeded.Single().Message,
+            "A direct-effect diagnostic should show the shortest path to the operation.");
+
+        const string unknownEffectSource = "module harness.effect_unknown_annotation;\n"
+            + "pub fn bad() -> i32 effects { fs.unknown } { return 1; }\n";
+        var unknownEffect = await ExpectDiagnosticsAsync(
+            harness, "effect-unknown-annotation", unknownEffectSource, "E_EFFECT_UNKNOWN");
+        AssertEqual(1, unknownEffect.Length, "An unknown annotation should produce one diagnostic.");
+
+        const string duplicateEffectSource = "module harness.effect_duplicate_annotation;\n"
+            + "pub fn bad() -> i32 effects { fs.read, fs.read } { return 1; }\n";
+        var duplicateEffect = await ExpectDiagnosticsAsync(
+            harness, "effect-duplicate-annotation", duplicateEffectSource, "E_EFFECT_DUPLICATE");
+        AssertEqual(1, duplicateEffect.Length, "A repeated annotation should produce one diagnostic.");
+
+        const string missingCapabilitySource = "module harness.effect_missing_capability;\n"
+            + "pub fn bad() -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
+        var missingCapability = await ExpectDiagnosticsAsync(
+            harness, "effect-missing-capability", missingCapabilitySource, "E_CAPABILITY_MISSING");
+        AssertRangeAtToken(missingCapabilitySource, missingCapability.Single(), "fs", 2);
+
+        const string wrongCapabilitySource = "module harness.effect_wrong_capability;\n"
+            + "pub fn bad(value: Text) -> Result<Text, FsError> effects { fs.read } { return value.read_text(\"x\"); }\n";
+        var wrongCapability = await ExpectDiagnosticsAsync(
+            harness, "effect-wrong-capability", wrongCapabilitySource, "E_CAPABILITY_MISSING");
+        AssertRangeAtToken(wrongCapabilitySource, wrongCapability.Single(), "value", 2);
+
+        const string invalidFunctionCallSource = "module harness.effect_invalid_function_call;\n"
+            + "fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return read(); }\n";
+        var invalidFunctionCall = await ExpectDiagnosticsAsync(
+            harness, "effect-invalid-function-call", invalidFunctionCallSource, "E_TYPE_MISMATCH");
+        AssertTrue(invalidFunctionCall.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "An invalid-arity function call must not add a transitive effect diagnostic.");
+
+        const string invalidIntrinsicAritySource = "module harness.effect_invalid_intrinsic_arity;\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(); }\n";
+        var invalidIntrinsicArity = await ExpectDiagnosticsAsync(
+            harness, "effect-invalid-intrinsic-arity", invalidIntrinsicAritySource, "E_TYPE_MISMATCH");
+        AssertTrue(invalidIntrinsicArity.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "An invalid-arity filesystem operation must not seed an inferred effect.");
+
+        const string invalidIntrinsicPathSource = "module harness.effect_invalid_intrinsic_path;\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(1); }\n";
+        var invalidIntrinsicPath = await ExpectDiagnosticsAsync(
+            harness, "effect-invalid-intrinsic-path", invalidIntrinsicPathSource, "E_TYPE_MISMATCH");
+        AssertTrue(invalidIntrinsicPath.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "A wrong-typed filesystem path must not seed an inferred effect.");
+
+        const string localReceiverSource = "module harness.effect_local_receiver;\n"
+            + "pub fn read(FsRead: FsRead) -> Result<Text, FsError> effects { fs.read } { return FsRead.read_text(\"x\"); }\n";
+        var localReceiver = await harness.InvokeAsync("effect-local-receiver", "check", localReceiverSource, "--json");
+        AssertEqual(0, localReceiver.ExitCode, Describe(localReceiver));
+        AssertEqual(0, ParseDiagnosticSnapshots(localReceiver.StandardOutput).Length,
+            "The local receiver named FsRead should take precedence over the type name.");
+    }
+
+    private static async Task TestEffectInferencePaths(Harness harness)
+    {
+        const string source = "module harness.effect_paths;\n"
+            + "fn leaf(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
+            + "fn deep_three(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "fn deep_two(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return deep_three(fs); }\n"
+            + "fn deep_one(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return deep_two(fs); }\n"
+            + "fn near(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} {\n"
+            + "    let nearer: Result<Text, FsError> = near(fs);\n"
+            + "    return deep_one(fs);\n"
+            + "}\n";
+
+        var firstRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-first", source, "E_EFFECT_EXCEEDED");
+        var secondRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-second", source, "E_EFFECT_EXCEEDED");
+        const string expectedMessage = "Effect 'fs.read' is not declared by function 'harness.effect_paths.bad'; shortest call path: harness.effect_paths.bad -> harness.effect_paths.near -> harness.effect_paths.leaf -> fs.read_text";
+        AssertEqual(expectedMessage, firstRun.Single().Message, "The checker should choose the shortest call path.");
+        AssertEqual(firstRun.Single().Message, secondRun.Single().Message,
+            "Call-path diagnostic content should be deterministic across runs.");
+        AssertRangeAtToken(source, firstRun.Single(), "bad", 1);
+
+        const string tiedPathsSource = "module harness.effect_tie;\n"
+            + "fn leaf(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
+            + "fn zeta(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "fn alpha(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} {\n"
+            + "    let first: Result<Text, FsError> = zeta(fs);\n"
+            + "    return alpha(fs);\n"
+            + "}\n";
+        var tiedPaths = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-tie", tiedPathsSource, "E_EFFECT_EXCEEDED");
+        AssertEqual(
+            "Effect 'fs.read' is not declared by function 'harness.effect_tie.bad'; shortest call path: harness.effect_tie.bad -> harness.effect_tie.alpha -> harness.effect_tie.leaf -> fs.read_text",
+            tiedPaths.Single().Message,
+            "Equal-length effect paths should use canonical function ordering, independent of call source order.");
+
+        const string recursiveSource = "module harness.effect_recursive;\n"
+            + "fn first(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {\n"
+            + "    let next: Result<Text, FsError> = second(fs);\n"
+            + "    return fs.read_text(\"x\");\n"
+            + "}\n"
+            + "fn second(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return first(fs); }\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return second(fs); }\n";
+        var recursiveDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "effect-recursive-cycle", recursiveSource, "E_EFFECT_EXCEEDED");
+        AssertEqual(
+            "Effect 'fs.read' is not declared by function 'harness.effect_recursive.bad'; shortest call path: harness.effect_recursive.bad -> harness.effect_recursive.second -> harness.effect_recursive.first -> fs.read_text",
+            recursiveDiagnostics.Single().Message,
+            "Effect inference should converge through recursive call cycles and retain the shortest path.");
+    }
+
+    private static async Task TestImportedEffects(Harness harness)
+    {
+        const string library = "module io.files;\n"
+            + "pub fn load(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
+        const string wrapperWithoutEffect = "module app.reader;\n"
+            + "import io.files { load };\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return load(fs); }\n";
+        var files = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/reader.lang"] = wrapperWithoutEffect,
+            ["src/io/files.lang"] = library
+        };
+        var packageRoot = await harness.WritePackageAsync("effect-imported-exceeded", LibraryPackageManifest(), files);
+        var wrapperPath = Path.GetFullPath(Path.Combine(packageRoot, "src", "app", "reader.lang"));
+        var result = await harness.InvokePackageDirectoryAsync("effect-imported-exceeded", packageRoot, "check", "--json");
+        AssertTrue(result.ExitCode != 0, $"An imported effect outside its upper bound unexpectedly passed. {Describe(result)}");
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
+        var exceeded = diagnostics.Single(diagnostic => diagnostic.Code == "E_EFFECT_EXCEEDED");
+        AssertEqual(wrapperPath, Path.GetFullPath(exceeded.File), "The effect diagnostic should identify the caller module.");
+        AssertRangeAtToken(wrapperWithoutEffect, exceeded, "bad", 1);
+        AssertEqual(
+            "Effect 'fs.read' is not declared by function 'app.reader.bad'; shortest call path: app.reader.bad -> io.files.load -> fs.read_text",
+            exceeded.Message,
+            "The path should include the imported function and the filesystem operation.");
+
+        var repeat = await harness.InvokePackageDirectoryAsync("effect-imported-exceeded-repeat", packageRoot, "check", "--json");
+        var repeated = ParseDiagnosticSnapshots(repeat.StandardOutput).Single(diagnostic => diagnostic.Code == "E_EFFECT_EXCEEDED");
+        AssertEqual(exceeded.Message, repeated.Message, "Imported call paths should be stable across repeated checks.");
+
+        const string wrapperWithEffect = "module app.reader;\n"
+            + "import io.files { load };\n"
+            + "pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return load(fs); }\n";
+        var allowedPackage = await harness.WritePackageAsync(
+            "effect-imported-allowed",
+            LibraryPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/reader.lang"] = wrapperWithEffect,
+                ["src/io/files.lang"] = library
+            });
+        var allowed = await harness.InvokePackageDirectoryAsync("effect-imported-allowed", allowedPackage, "check", "--json");
+        AssertEqual(0, allowed.ExitCode, Describe(allowed));
+        AssertEqual(0, ParseDiagnosticSnapshots(allowed.StandardOutput).Length,
+            "An imported effect inside the caller's upper bound should check cleanly.");
+    }
+
+    private static async Task TestFsErrorExhaustiveness(Harness harness)
+    {
+        const string exhaustiveSource = "module harness.fs_error_exhaustive;\n"
+            + "pub fn display(error: FsError) -> Text effects {} {\n"
+            + "    return match error {\n"
+            + "        FsError.NotFound => \"not found\",\n"
+            + "        FsError.PermissionDenied => \"permission denied\",\n"
+            + "        FsError.InvalidPath => \"invalid path\",\n"
+            + "        FsError.InvalidText => \"invalid text\",\n"
+            + "        FsError.Io => \"I/O error\",\n"
+            + "    };\n"
+            + "}\n";
+        var valid = await harness.InvokeAsync("fs-error-exhaustive", "check", exhaustiveSource, "--json");
+        AssertEqual(0, valid.ExitCode, Describe(valid));
+        AssertEqual(0, ParseDiagnosticSnapshots(valid.StandardOutput).Length,
+            "FsError's five declared variants should form an exhaustive match.");
+
+        const string incompleteSource = "module harness.fs_error_incomplete;\n"
+            + "pub fn display(error: FsError) -> Text effects {} {\n"
+            + "    return match error { FsError.NotFound => \"not found\" };\n"
+            + "}\n";
+        var incomplete = await ExpectDiagnosticsAsync(
+            harness, "fs-error-incomplete", incompleteSource, "E_MATCH_NONEXHAUSTIVE");
+        AssertTrue(incomplete.Single().Message.Contains("PermissionDenied", StringComparison.Ordinal)
+            && incomplete.Single().Message.Contains("Io", StringComparison.Ordinal),
+            "The non-exhaustive FsError diagnostic should name omitted variants.");
+    }
+
+    private static async Task TestEffectfulLibraryBuild(Harness harness)
+    {
+        const string source = "module harness.effectful_library;\n"
+            + "pub fn read(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(path); }\n";
+        var check = await harness.InvokeAsync("effectful-library-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length,
+            "The declared direct filesystem effect should pass library checking.");
+
+        var build = await harness.InvokeAsync("effectful-library-build", "build", source);
+        AssertBuiltDll(build, Path.GetDirectoryName(harness.LastSourcePath)!);
+
+        var dllPath = build.StandardOutput["Built library: ".Length..].Trim();
+        var probeDirectory = Path.Combine(harness.TemporaryRoot, $"fs-read-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(probeDirectory);
+        var validPath = Path.Combine(probeDirectory, "valid.txt");
+        var missingPath = Path.Combine(probeDirectory, "missing.txt");
+        var invalidTextPath = Path.Combine(probeDirectory, "invalid-utf8.txt");
+        const string validText = "runtime mapping λ";
+        await File.WriteAllTextAsync(validPath, validText, new UTF8Encoding(false, true));
+        await File.WriteAllBytesAsync(invalidTextPath, new byte[] { 0xC3, 0x28 });
+
+        var loadContext = ProbeFsReadRuntimeMappings(dllPath, validPath, missingPath, invalidTextPath, validText);
+        for (var attempt = 0; attempt < 10 && loadContext.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        AssertTrue(!loadContext.IsAlive, "The generated library's collectible load context should unload after the trusted probe.");
+        Directory.Delete(probeDirectory, recursive: true);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ProbeFsReadRuntimeMappings(
+        string dllPath,
+        string validPath,
+        string missingPath,
+        string invalidTextPath,
+        string validText)
+    {
+        var loadContext = new AssemblyLoadContext($"fs-read-probe-{Guid.NewGuid():N}", isCollectible: true);
+        var weakReference = new WeakReference(loadContext);
+        try
+        {
+            var assembly = loadContext.LoadFromAssemblyPath(Path.GetFullPath(dllPath));
+            var moduleType = assembly.GetType("LangModule", throwOnError: true)!;
+            var fsReadType = moduleType.GetNestedType("FsRead", BindingFlags.Public)
+                ?? throw new InvalidOperationException("Generated library does not expose its nested opaque FsRead runtime type.");
+            var fsReadConstructor = fsReadType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                Type.EmptyTypes,
+                modifiers: null)
+                ?? throw new InvalidOperationException("Generated FsRead has no trusted non-public constructor.");
+            var fsRead = fsReadConstructor.Invoke(null);
+            var readFunction = moduleType.GetMethod("Function_0", BindingFlags.Public | BindingFlags.Static)
+                ?? throw new InvalidOperationException("Generated library does not contain Function_0.");
+
+            object InvokeRead(string path) => readFunction.Invoke(null, [fsRead, path])
+                ?? throw new InvalidOperationException("Generated read_text returned null instead of Result<Text, FsError>.");
+
+            var success = InvokeRead(validPath);
+            AssertTrue(success.GetType().Name.StartsWith("Ok", StringComparison.Ordinal),
+                $"A readable UTF-8 file should map to Result.Ok, got {success.GetType().FullName}.");
+            AssertEqual(validText, success.GetType().GetProperty("Value")?.GetValue(success) as string,
+                "Result.Ok should carry the strictly decoded UTF-8 text.");
+
+            var missing = InvokeRead(missingPath);
+            AssertTrue(missing.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                $"A missing file should map to Result.Err, got {missing.GetType().FullName}.");
+            var missingError = missing.GetType().GetProperty("Error")?.GetValue(missing)
+                ?? throw new InvalidOperationException("Result.Err did not expose its FsError value.");
+            AssertTrue(missingError.GetType().Name.StartsWith("NotFound", StringComparison.Ordinal),
+                $"A missing file should map to FsError.NotFound, got {missingError.GetType().FullName}.");
+
+            var invalidText = InvokeRead(invalidTextPath);
+            AssertTrue(invalidText.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                $"Invalid UTF-8 should map to Result.Err, got {invalidText.GetType().FullName}.");
+            var invalidTextError = invalidText.GetType().GetProperty("Error")?.GetValue(invalidText)
+                ?? throw new InvalidOperationException("Result.Err did not expose its FsError value.");
+            AssertTrue(invalidTextError.GetType().Name.StartsWith("InvalidText", StringComparison.Ordinal),
+                $"Invalid UTF-8 should map to FsError.InvalidText, got {invalidTextError.GetType().FullName}.");
+        }
+        finally
+        {
+            loadContext.Unload();
+        }
+
+        return weakReference;
+    }
+
     private static async Task TestLibraryBuild(Harness harness)
     {
         const string source = """

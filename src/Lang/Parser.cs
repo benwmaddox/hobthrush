@@ -202,6 +202,21 @@ internal sealed class Parser
 {
     private const int MaximumNestingDepth = 256;
 
+    private static readonly HashSet<string> KnownEffects = new(StringComparer.Ordinal)
+    {
+        "fs.read",
+        "fs.write",
+        "process.spawn",
+        "net.client",
+        "net.listen",
+        "db.read",
+        "db.write",
+        "env.read",
+        "clock.read",
+        "log.write",
+        "secret.reveal"
+    };
+
     private static readonly HashSet<string> BareExpressionKeywords = new(StringComparer.Ordinal)
     {
         "await", "false", "if", "match", "null", "true", "with"
@@ -380,17 +395,6 @@ internal sealed class Parser
         return new ImportDecl(module, at, moduleAt, symbols);
     }
 
-    private string ParseQualifiedName()
-    {
-        var name = ExpectModuleSegment().Text;
-        while (Is("."))
-        {
-            Take();
-            name += "." + ExpectModuleSegment().Text;
-        }
-        return name;
-    }
-
     private FunctionDecl ParseFunction(bool isPublic)
     {
         if (Is("async"))
@@ -422,7 +426,7 @@ internal sealed class Parser
         Expect("->");
         var returnType = ParseType();
         Expect("effects");
-        ParseEffects();
+        var effects = ParseEffects();
         Expect("{");
 
         var body = new List<Stmt>();
@@ -458,27 +462,49 @@ internal sealed class Parser
         }
 
         Expect("}");
-        return new FunctionDecl(name.Text, isPublic, parameters, returnType, body, name);
+        return new FunctionDecl(name.Text, isPublic, parameters, returnType, effects, body, name);
     }
 
-    private void ParseEffects()
+    private List<EffectSyntax> ParseEffects()
     {
         Expect("{");
-        if (Is("}"))
+        var effects = new List<EffectSyntax>();
+        var seenEffects = new HashSet<string>(StringComparer.Ordinal);
+        while (!Is("}"))
         {
-            Take();
-            return;
+            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed effects list");
+            var effect = ParseEffect();
+            if (!KnownEffects.Contains(effect.Name))
+                Fail(effect.At, "E_EFFECT_UNKNOWN", $"Unknown effect '{effect.Name}'");
+            if (!seenEffects.Add(effect.Name))
+                Fail(effect.At, "E_EFFECT_DUPLICATE", $"Duplicate effect '{effect.Name}'");
+            effects.Add(effect);
+
+            if (Is(","))
+            {
+                Take();
+                if (Is("}")) break;
+            }
+            else if (!Is("}"))
+            {
+                Expect(",");
+            }
         }
 
-        var firstEffect = Current;
-        while (!Is("}") && Current.Kind != "eof")
+        Expect("}");
+        return effects;
+    }
+
+    private EffectSyntax ParseEffect()
+    {
+        var at = ExpectModuleSegment();
+        var name = at.Text;
+        while (Is("."))
         {
-            ParseQualifiedName();
-            if (Is("}")) break;
-            Expect(",");
+            Take();
+            name += "." + ExpectModuleSegment().Text;
         }
-        if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed effects list");
-        Fail(firstEffect, "E_UNSUPPORTED", "Nonempty effects are not implemented yet");
+        return new EffectSyntax(name, at);
     }
 
     private UnionDecl ParseUnion(bool isPublic)
@@ -785,7 +811,7 @@ internal sealed class Parser
                 var arguments = ParseArguments();
                 var depth = 1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max();
                 expression = RegisterExpression(
-                    new VariantExpr(typeName.At, typeName.Name, fieldAt.Text, arguments), depth);
+                    new QualifiedCallExpr(typeName.At, typeName.Name, fieldAt.Text, fieldAt, arguments), depth);
                 continue;
             }
 

@@ -10,7 +10,11 @@ import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 declaration     = [ "pub" ], ( function | union | struct ) ;
 
 function        = "fn", bare_identifier, "(", [ parameters ], ")",
-                  "->", type, "effects", "{", "}", block ;
+                  "->", type, "effects", "{", [ effect, { ",", effect }, [ "," ] ], "}", block ;
+effect          = effect_name ;
+effect_name     = "fs.read" | "fs.write" | "process.spawn" | "net.client" | "net.listen"
+                | "db.read" | "db.write" | "env.read" | "clock.read" | "log.write"
+                | "secret.reveal" ;
 parameters      = parameter, { ",", parameter }, [ "," ] ;
 parameter       = bare_identifier, ":", type ;
 
@@ -38,11 +42,10 @@ multiplicative  = unary, { "*", unary } ;
 unary           = [ "-" ], postfix ;
 postfix         = primary, { ".", member_identifier } ;
 primary         = integer | boolean | text | bare_identifier | call
-                | variant_construction | struct_construction
+                | qualified_call | struct_construction
                 | "(", expression, ")" ;
 call            = bare_identifier, "(", [ arguments ], ")" ;
-variant_construction
-                = bare_identifier, ".", member_identifier, "(", [ arguments ], ")" ;
+qualified_call  = bare_identifier, ".", member_identifier, "(", [ arguments ], ")" ;
 struct_construction
                 = bare_identifier, "{", [ field_values ], "}" ;
 field_values    = field_value, { ",", field_value }, [ "," ] ;
@@ -95,7 +98,7 @@ return user.name;
 
 Initializer expressions are evaluated in source order, including when that order differs from the declaration order. Duplicate initializers report `E_FIELD_DUPLICATE`, omitted fields report `E_FIELD_MISSING`, unknown initializers or reads report `E_FIELD_UNKNOWN`, and a value with the wrong field type reports `E_TYPE_MISMATCH`. Duplicate field declarations report `E_NAME_DUPLICATE`.
 
-Field reads can be chained from a local, call, parenthesized value, or struct construction, for example `user.address.city`, `make_user().name`, `(user).name`, and `User { name: "Ada", age: 37 }.name`. Method calls are not implemented. A dotted no-call form such as `Choice.Empty` is resolved as a zero-payload union variant only when the left name is not shadowed by a local. A local name shadows a type name in dotted access and dotted-call syntax.
+Field reads can be chained from a local, call, parenthesized value, or struct construction, for example `user.address.city`, `make_user().name`, `(user).name`, and `User { name: "Ada", age: 37 }.name`. General method calls are not implemented; `FsRead.read_text(path)` is the one built-in capability operation. The grammar uses the same qualified-call form for a union constructor such as `Choice.Value(3)` and this capability call. A receiver local takes precedence over a matching type name, so local receiver resolution remains deterministic. A dotted no-call form such as `Choice.Empty` is resolved as a zero-payload union variant only when the left name is not shadowed by a local.
 
 A struct may contain itself through `Option`, `Result`, or a tagged union. Cycles made only of direct struct fields are rejected with `E_TYPE_MISMATCH`; a bare recursive field such as `struct Node { next: Node }` is invalid.
 
@@ -107,7 +110,11 @@ Use `Choice.Yes` or `Choice.Value(3)` to construct a declared union. Built-in co
 
 A match covers every union variant, including `Some`/`None` or `Ok`/`Err`; `_` is an explicit wildcard. Payload pattern names bind the payload values and do not need to match named field labels. Match arms use `=>` and are comma-separated.
 
-Every function still writes an explicit `effects {}` clause. Only empty effect sets are implemented. Function bodies currently accept typed `let` declarations and `return` statements.
+Every function must declare an `effects { ... }` upper bound. The closed effect vocabulary is `fs.read`, `fs.write`, `process.spawn`, `net.client`, `net.listen`, `db.read`, `db.write`, `env.read`, `clock.read`, `log.write`, and `secret.reveal`. Unknown and repeated names report `E_EFFECT_UNKNOWN` and `E_EFFECT_DUPLICATE`. The checker infers direct and transitive effects through calls, including recursive call cycles, and reports `E_EFFECT_EXCEEDED` when inferred effects exceed the annotation. Its message includes a shortest call path to the operation.
+
+The only effectful built-in operation in this slice is `FsRead.read_text(path: Text) -> Result<Text, FsError>`, which has effect `fs.read`. `FsRead` is opaque: it can enter source code only through a function parameter; once received, code may pass, return, or store it in ordinary immutable values, but cannot construct one. `FsError` is a closed union with zero-payload variants `NotFound`, `PermissionDenied`, `InvalidPath`, `InvalidText`, and `Io`; source code cannot construct these variants, and matches must handle every variant or include an explicit wildcard. Values are produced by the `read_text` adapter.
+
+The filesystem adapter is a trusted runtime boundary. It currently calls `File.ReadAllBytes` on the supplied path, maps recognized file/path/permission/I/O failures to those `FsError` cases, and decodes bytes with strict UTF-8, mapping invalid text to `InvalidText`. `FsRead` is an opaque marker, not a path-root restriction or security sandbox; the checks do not prove the adapter's internal behavior. A library may accept and use `FsRead`, and builds as a managed library, but no application manifest grant or injection exists yet. `lang inspect effects`, build receipts, and adapters for the other vocabulary entries are deferred. Function bodies currently accept typed `let` declarations and `return` statements.
 
 ## Build and run entrypoints
 
