@@ -1,0 +1,11 @@
+module text.validation;
+
+pub union NormalizeError { Empty }
+
+pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {
+    if input.length == 0 {
+        return Err(NormalizeError.Empty);
+    }
+
+    return Ok(input.trim());
+}

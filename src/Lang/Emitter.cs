@@ -31,6 +31,10 @@ internal static class Emitter
                 _source.AppendLine("using System.Security;");
                 _source.AppendLine("using System.Text;");
             }
+            else if (UsesTextLength)
+            {
+                _source.AppendLine("using System.Text;");
+            }
             _source.AppendLine();
             _source.AppendLine("public static class LangModule");
             _source.AppendLine("{");
@@ -42,6 +46,7 @@ internal static class Emitter
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in program.Functions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
+            if (UsesTextLength) EmitTextLengthHelper();
             EmitArithmeticHelpers();
             if (executable) EmitEntryPoint(entry!);
 
@@ -134,9 +139,14 @@ internal static class Emitter
             }
             _source.AppendLine(")");
             _source.AppendLine("    {");
-            foreach (var statement in function.Body) EmitStatement(statement, 2);
+            EmitStatements(function.Body, 2);
             _source.AppendLine("    }");
             _source.AppendLine();
+        }
+
+        private void EmitStatements(IEnumerable<TypedStmt> statements, int indent)
+        {
+            foreach (var statement in statements) EmitStatement(statement, indent);
         }
 
         private void EmitStatement(TypedStmt statement, int indent)
@@ -152,6 +162,25 @@ internal static class Emitter
                     Indent(indent);
                     _source.Append("return ").Append(EmitExpr(ret.Value)).AppendLine(";");
                     break;
+                case TypedIfStmt conditional:
+                    Indent(indent);
+                    _source.Append("if (").Append(EmitExpr(conditional.Condition)).AppendLine(")");
+                    Indent(indent);
+                    _source.AppendLine("{");
+                    EmitStatements(conditional.ThenBody, indent + 1);
+                    Indent(indent);
+                    _source.AppendLine("}");
+                    if (conditional.ElseBody is not null)
+                    {
+                        Indent(indent);
+                        _source.AppendLine("else");
+                        Indent(indent);
+                        _source.AppendLine("{");
+                        EmitStatements(conditional.ElseBody, indent + 1);
+                        Indent(indent);
+                        _source.AppendLine("}");
+                    }
+                    break;
                 default:
                     throw new InvalidOperationException("Unknown typed statement in emitter");
             }
@@ -164,8 +193,11 @@ internal static class Emitter
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedBinaryExpr binary => EmitBinary(binary),
+            TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr call => "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture) +
                 "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")",
+            TypedTextLengthExpr length => "TextLength(" + EmitExpr(length.Target) + ")",
+            TypedTextTrimExpr trim => "(" + EmitExpr(trim.Target) + ").Trim()",
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
@@ -195,6 +227,26 @@ internal static class Emitter
                 _ => throw new InvalidOperationException("Unknown checked arithmetic operator")
             };
             return helper + "(" + EmitExpr(expression.Left) + ", " + EmitExpr(expression.Right) + ")";
+        }
+
+        private string EmitComparison(TypedCompareExpr expression)
+        {
+            var left = EmitExpr(expression.Left);
+            var right = EmitExpr(expression.Right);
+            if (expression.Left.Type.IsText)
+            {
+                if (expression.Op is not ("==" or "!="))
+                    throw new InvalidOperationException("Text comparison only supports equality");
+                var equals = "string.Equals(" + left + ", " + right + ", StringComparison.Ordinal)";
+                return expression.Op == "==" ? equals : "!" + equals;
+            }
+
+            return expression.Op switch
+            {
+                "==" or "!=" or "<" or "<=" or ">" or ">=" =>
+                    "(" + left + " " + expression.Op + " " + right + ")",
+                _ => throw new InvalidOperationException("Unknown comparison operator")
+            };
         }
 
         private string EmitBuiltinConstruct(TypedBuiltinConstructExpr expression)
@@ -280,6 +332,18 @@ internal static class Emitter
             _source.AppendLine("    private static int CheckedAdd(int left, int right) => checked(left + right);");
             _source.AppendLine("    private static int CheckedSubtract(int left, int right) => checked(left - right);");
             _source.AppendLine("    private static int CheckedMultiply(int left, int right) => checked(left * right);");
+            _source.AppendLine();
+        }
+
+        private void EmitTextLengthHelper()
+        {
+            _source.AppendLine("    private static int TextLength(string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var length = 0;");
+            _source.AppendLine("        foreach (var rune in value.EnumerateRunes())");
+            _source.AppendLine("            length = checked(length + 1);");
+            _source.AppendLine("        return length;");
+            _source.AppendLine("    }");
             _source.AppendLine();
         }
 
@@ -376,8 +440,19 @@ internal static class Emitter
 
         private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
 
-        private bool UsesFsReadText => program.Functions
-            .Any(function => function.InferredEffects.Contains("fs.read", StringComparer.Ordinal));
+        private bool UsesFsReadText => program.Functions.Any(function =>
+            function.InferredEffects.Contains("fs.read", StringComparer.Ordinal) ||
+            EnumerateStatements(function.Body)
+                .SelectMany(StatementExpressions)
+                .SelectMany(EnumerateExpressions)
+                .OfType<TypedIntrinsicCallExpr>()
+                .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText));
+
+        private bool UsesTextLength => program.Functions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .Any(expression => expression is TypedTextLengthExpr);
 
         private bool UsesTypeKind(LangTypeKind kind) => EnumerateDeclaredTypes()
             .Any(type => ContainsTypeKind(type, kind));
@@ -399,9 +474,91 @@ internal static class Emitter
                     yield return parameter.Type;
                 yield return function.ReturnType;
 
-                foreach (var statement in function.Body)
+                foreach (var statement in EnumerateStatements(function.Body))
                     if (statement is TypedLetStmt let)
                         yield return let.Type;
+
+                foreach (var statement in EnumerateStatements(function.Body))
+                foreach (var expression in StatementExpressions(statement).SelectMany(EnumerateExpressions))
+                    yield return expression.Type;
+            }
+        }
+
+        private static IEnumerable<TypedStmt> EnumerateStatements(IEnumerable<TypedStmt> statements)
+        {
+            foreach (var statement in statements)
+            {
+                yield return statement;
+                if (statement is not TypedIfStmt conditional) continue;
+                foreach (var nested in EnumerateStatements(conditional.ThenBody)) yield return nested;
+                if (conditional.ElseBody is not null)
+                    foreach (var nested in EnumerateStatements(conditional.ElseBody)) yield return nested;
+            }
+        }
+
+        private static IEnumerable<TypedExpr> StatementExpressions(TypedStmt statement)
+        {
+            switch (statement)
+            {
+                case TypedLetStmt let:
+                    yield return let.Value;
+                    break;
+                case TypedReturnStmt ret:
+                    yield return ret.Value;
+                    break;
+                case TypedIfStmt conditional:
+                    yield return conditional.Condition;
+                    break;
+            }
+        }
+
+        private static IEnumerable<TypedExpr> EnumerateExpressions(TypedExpr expression)
+        {
+            yield return expression;
+            switch (expression)
+            {
+                case TypedBinaryExpr binary:
+                    foreach (var nested in EnumerateExpressions(binary.Left)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(binary.Right)) yield return nested;
+                    break;
+                case TypedCompareExpr comparison:
+                    foreach (var nested in EnumerateExpressions(comparison.Left)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(comparison.Right)) yield return nested;
+                    break;
+                case TypedCallExpr call:
+                    foreach (var argument in call.Arguments)
+                    foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedTextLengthExpr length:
+                    foreach (var nested in EnumerateExpressions(length.Target)) yield return nested;
+                    break;
+                case TypedTextTrimExpr trim:
+                    foreach (var nested in EnumerateExpressions(trim.Target)) yield return nested;
+                    break;
+                case TypedIntrinsicCallExpr intrinsic:
+                    foreach (var argument in intrinsic.Arguments)
+                    foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedBuiltinConstructExpr builtin:
+                    foreach (var argument in builtin.Arguments)
+                    foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedUnionConstructExpr variant:
+                    foreach (var argument in variant.Arguments)
+                    foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedStructConstructExpr structure:
+                    foreach (var field in structure.Fields)
+                    foreach (var nested in EnumerateExpressions(field.Value)) yield return nested;
+                    break;
+                case TypedFieldAccessExpr field:
+                    foreach (var nested in EnumerateExpressions(field.Target)) yield return nested;
+                    break;
+                case TypedMatchExpr match:
+                    foreach (var nested in EnumerateExpressions(match.Value)) yield return nested;
+                    foreach (var arm in match.Arms)
+                    foreach (var nested in EnumerateExpressions(arm.Body)) yield return nested;
+                    break;
             }
         }
 

@@ -128,5 +128,30 @@
     "file": "25-struct-direct-recursion.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "26-control-flow-text.lang",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "27-unreachable-after-if.lang",
+    "status": "active",
+    "expectedCode": "E_UNREACHABLE"
+  },
+  {
+    "file": "28-comparison-type-mismatch.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "29-if-missing-return.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "30-if-branch-local-escape.lang",
+    "status": "active",
+    "expectedCode": "E_NAME_UNRESOLVED"
   }
 ]

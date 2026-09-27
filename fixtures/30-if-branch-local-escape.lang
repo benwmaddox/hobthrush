@@ -1,0 +1,9 @@
+module fixture.if_branch_local_escape;
+
+pub fn invalid() -> i32 effects {} {
+    if true {
+        let branch_value: i32 = 1;
+    } else {
+    }
+    return branch_value;
+}

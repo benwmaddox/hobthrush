@@ -92,6 +92,18 @@ internal static class Lexer
                 column += 2;
                 continue;
             }
+            if (i + 1 < source.Length &&
+                (source.AsSpan(i, 2).SequenceEqual("==") ||
+                 source.AsSpan(i, 2).SequenceEqual("!=") ||
+                 source.AsSpan(i, 2).SequenceEqual("<=") ||
+                 source.AsSpan(i, 2).SequenceEqual(">=")))
+            {
+                var operation = source.Substring(i, 2);
+                tokens.Add(new Token(operation, operation, line, column, file));
+                i += 2;
+                column += 2;
+                continue;
+            }
 
             if (".;:,(){}=+*-<>".IndexOf(c) >= 0)
             {
@@ -228,6 +240,7 @@ internal sealed class Parser
     private readonly Token _emptyEof;
     private int _position;
     private int _nestingDepth;
+    private int _statementNestingDepth;
     private readonly Dictionary<Expr, int> _expressionDepth = new(ReferenceEqualityComparer.Instance);
 
     public Parser(List<Token> tokens, string file, List<Diagnostic> diagnostics)
@@ -427,42 +440,81 @@ internal sealed class Parser
         var returnType = ParseType();
         Expect("effects");
         var effects = ParseEffects();
-        Expect("{");
+        var body = ParseStatementBlock("Unclosed function body");
+        return new FunctionDecl(name.Text, isPublic, parameters, returnType, effects, body, name);
+    }
 
-        var body = new List<Stmt>();
+    private List<Stmt> ParseStatementBlock(string unclosedMessage)
+    {
+        Expect("{");
+        var statements = new List<Stmt>();
         while (!Is("}"))
         {
-            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed function body");
-            if (Is("let"))
-            {
-                var at = Take();
-                var local = ExpectBareIdentifier();
-                Expect(":");
-                var type = ParseType();
-                Expect("=");
-                var value = ParseExpr();
-                Expect(";");
-                body.Add(new LetStmt(at, local.Text, type, value));
-            }
-            else if (Is("return"))
-            {
-                var at = Take();
-                var value = ParseExpr();
-                Expect(";");
-                body.Add(new ReturnStmt(at, value));
-            }
-            else if (Is("var") || Is("if") || Is("with") || Is("await"))
-            {
-                Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
-            }
-            else
-            {
-                Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
-            }
+            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", unclosedMessage);
+            statements.Add(ParseStatement());
         }
 
         Expect("}");
-        return new FunctionDecl(name.Text, isPublic, parameters, returnType, effects, body, name);
+        return statements;
+    }
+
+    private Stmt ParseStatement()
+    {
+        if (Is("let"))
+        {
+            var at = Take();
+            var local = ExpectBareIdentifier();
+            Expect(":");
+            var type = ParseType();
+            Expect("=");
+            var value = ParseExpr();
+            Expect(";");
+            return new LetStmt(at, local.Text, type, value);
+        }
+
+        if (Is("return"))
+        {
+            var at = Take();
+            var value = ParseExpr();
+            Expect(";");
+            return new ReturnStmt(at, value);
+        }
+
+        if (Is("if")) return ParseIfStatement();
+
+        if (Is("var") || Is("with") || Is("await"))
+            Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
+
+        Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
+        throw new ParseFailure();
+    }
+
+    private IfStmt ParseIfStatement()
+    {
+        var at = Expect("if");
+        if (_statementNestingDepth >= MaximumNestingDepth)
+            Fail(at, "E_SYNTAX", "Statement nesting is too deep");
+
+        _statementNestingDepth++;
+        try
+        {
+            // The next brace starts the then block, so a leading identifier cannot
+            // consume it as a struct construction.
+            var condition = ParseExpr(allowStructConstruction: false);
+            var then = ParseStatementBlock("Unclosed if block");
+            IReadOnlyList<Stmt> otherwise = Array.Empty<Stmt>();
+            if (Is("else"))
+            {
+                Take();
+                otherwise = ParseStatementBlock("Unclosed else block");
+            }
+
+            return new IfStmt(at, condition, then, otherwise);
+        }
+        finally
+        {
+            _statementNestingDepth--;
+        }
     }
 
     private List<EffectSyntax> ParseEffects()
@@ -661,8 +713,10 @@ internal sealed class Parser
             {
                 var precedence = Current.Text switch
                 {
-                    "*" => 2,
-                    "+" or "-" => 1,
+                    "*" => 5,
+                    "+" or "-" => 4,
+                    "<" or "<=" or ">" or ">=" => 3,
+                    "==" or "!=" => 2,
                     _ => 0
                 };
                 if (precedence == 0 || precedence < minPrecedence) break;
@@ -708,7 +762,7 @@ internal sealed class Parser
                 return ParsePostfix(RegisterExpression(new NumberExpr(minus, value)));
             }
 
-            var operand = ParseExpr(3, allowStructConstruction);
+            var operand = ParseExpr(6, allowStructConstruction);
             var zero = RegisterExpression(new NumberExpr(minus, 0));
             var depth = Math.Max(ExpressionDepth(zero), ExpressionDepth(operand)) + 1;
             if (depth > MaximumNestingDepth)
@@ -802,16 +856,12 @@ internal sealed class Parser
             var fieldAt = ExpectMemberIdentifier();
             if (Is("("))
             {
-                if (expression is not NameExpr typeName)
-                {
-                    Fail(fieldAt, "E_UNSUPPORTED", "Method calls are not implemented yet");
-                    throw new ParseFailure();
-                }
-
                 var arguments = ParseArguments();
-                var depth = 1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max();
+                var depth = Math.Max(
+                    ExpressionDepth(expression),
+                    arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max()) + 1;
                 expression = RegisterExpression(
-                    new QualifiedCallExpr(typeName.At, typeName.Name, fieldAt.Text, fieldAt, arguments), depth);
+                    new MemberCallExpr(expression.At, expression, fieldAt.Text, fieldAt, arguments), depth);
                 continue;
             }
 
