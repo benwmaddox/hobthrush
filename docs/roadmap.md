@@ -16,24 +16,25 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Lower the supported source into typed semantic IR and emit deterministic C#.
 - [x] Build a library DLL when no supported executable entrypoint is present.
 - [x] Add immutable non-generic nominal structs with named construction, field checks and reads, and direct-recursion checks.
-- [x] Add strict same-package manifests, explicit imports, and multi-file module resolution for the implemented pure-language slice.
-- [x] Resolve local path dependencies on library packages, qualify imports by direct dependency alias, and preserve package-specific module identity.
+- [x] Add strict same-package manifests, fully qualified declaration references, and multi-file module resolution for the implemented pure-language slice.
+- [x] Resolve local path dependencies on library packages, qualify direct dependency references by alias, and preserve package-specific module identity.
 - [x] Create portable deterministic package locks and reject missing, malformed, or stale locks before package checks and builds.
 - [x] Add scoped `if`/`else`, comparison operators with defined precedence, branch-local scopes, guaranteed-return checking, and `E_UNREACHABLE`.
 - [x] Add `Text.length` using Unicode scalar counts and `Text.trim()` using Unicode whitespace trimming.
 - [x] Add generic functions with type inference from independently typed arguments.
+- [x] Add pure module-level language tests and `lang test PACKAGE_DIRECTORY`; dependency tests are typechecked while only root-package tests execute.
 - [ ] Add generic structs and unions, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, language-level package tests, application capability grants, and the final maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, application capability grants, and the final maintained library/CLI/web project set remain future work. Broader test features, including property-based testing, JSON test results, executing dependency package tests, and an AOT test runner, remain future work.
 
-The active compiler-fixture set covers fixtures 01-14 and 20-36. Fixtures 15-19 remain pending. Package modules resolve within the root and its recursively declared local library paths using explicit imports; this does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, and the effect/FsRead kernel are bounded slices and do not complete the M1 library, generic types, language-level package tests, traits, or V1 package requirements.
+The active compiler-fixture set covers fixtures 01-14 and 20-42. Fixtures 15-19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, and pure package tests are implemented bounded slices; they do not complete the M1 library, generic types, traits, or V1 package requirements.
 
 [`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained CLI example consumes the sibling library through a local path dependency; broader package source support remains future work.
 
 ## M2 - effects and capabilities (partial)
 
 - [x] Define a closed effect vocabulary and require every function to declare an upper bound.
-- [x] Infer direct and transitive effects across calls, imports, and recursive call cycles; report a shortest call path when a bound is exceeded.
+- [x] Infer direct and transitive effects across qualified calls and recursive call cycles; report a shortest call path when a bound is exceeded.
 - [x] Add opaque `FsRead.read_text(Text) -> Result<Text, FsError>` with the `fs.read` effect and exhaustive typed filesystem errors.
 - [x] Allow effectful library functions to be checked and built as managed libraries without constructing capabilities in source.
 - [ ] Grant and inject capabilities from the application manifest.

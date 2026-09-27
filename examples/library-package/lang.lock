@@ -3,7 +3,7 @@
   "root": {
     "name": "library-package-example",
     "version": "0.1.0",
-    "manifest_sha256": "25a69014a8be08e4dfee457554d992b777b4cca179bdf5a2117d4ebe390cf66f",
+    "manifest_sha256": "84f37b8b0a4c3db3c8c6b6d72a44f8212223e28fffbf700603f18610e9bdd395",
     "dependencies": {
       "validation": "../text-validation"
     }
@@ -13,7 +13,7 @@
       "path": "../text-validation",
       "name": "text-validation",
       "version": "0.1.0",
-      "content_sha256": "543e2914377d34101e1e50955ddb578203e6277ba3d01bbd2e6c0bb3787eedee",
+      "content_sha256": "86033f1b38ab1ea423816dd60d8b6df0547579b94a358ba744f96d8779389e14",
       "dependencies": {}
     }
   ]

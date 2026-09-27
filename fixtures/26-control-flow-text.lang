@@ -1,10 +1,10 @@
-module fixture.control_flow_text;
+module fixture::control_flow_text;
 
 pub union NormalizeError { Empty }
 
-pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {
+pub fn normalize(input: Text) -> Result<Text, self::fixture::control_flow_text::NormalizeError> effects {} {
     if input.length == 0 {
-        return Err(NormalizeError.Empty);
+        return Err(self::fixture::control_flow_text::NormalizeError.Empty);
     }
     return Ok(input.trim());
 }

@@ -1,10 +1,10 @@
-module fixture.test;
+module fixture::test;
 struct Names { test: bool, assert: bool }
 fn test(assert: bool) -> bool effects {} {
-    let names: Names = Names { test: assert, assert: true };
+    let names: self::fixture::test::Names = self::fixture::test::Names { test: assert, assert: true };
     return names.test == names.assert;
 }
 test "contextual spellings are legal names" {
-    let result: bool = test(false);
+    let result: bool = self::fixture::test::test(false);
     assert result == false;
 }

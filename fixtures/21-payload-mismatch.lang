@@ -1,3 +1,3 @@
-module fixture.payload_mismatch;
+module fixture::payload_mismatch;
 pub union Choice { Value(i32), Other }
-pub fn bad() -> Choice effects {} { return Choice.Value("wrong"); }
+pub fn bad() -> self::fixture::payload_mismatch::Choice effects {} { return self::fixture::payload_mismatch::Choice.Value("wrong"); }

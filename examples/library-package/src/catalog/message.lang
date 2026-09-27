@@ -1,9 +1,9 @@
-module catalog.message;
+module catalog::message;
 
 pub struct Greeting { text: Text }
 
-pub union Message { Ready(Greeting), Missing }
+pub union Message { Ready(self::catalog::message::Greeting), Missing }
 
-pub fn greeting() -> Greeting effects {} {
-    return Greeting { text: "ready" };
+pub fn greeting() -> self::catalog::message::Greeting effects {} {
+    return self::catalog::message::Greeting { text: "ready" };
 }

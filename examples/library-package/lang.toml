@@ -2,7 +2,7 @@ name = "library-package-example"
 version = "0.1.0"
 kind = "cli"
 source_root = "src"
-entry_module = "app.main"
+entry_module = "app::main"
 
 [dependencies]
 validation = "../text-validation"

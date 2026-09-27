@@ -1,4 +1,4 @@
-module fixture.comparison_type_mismatch;
+module fixture::comparison_type_mismatch;
 
 pub fn invalid() -> bool effects {} {
     return 1 < false;

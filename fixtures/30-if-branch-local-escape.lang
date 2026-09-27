@@ -1,4 +1,4 @@
-module fixture.if_branch_local_escape;
+module fixture::if_branch_local_escape;
 
 pub fn invalid() -> i32 effects {} {
     if true {

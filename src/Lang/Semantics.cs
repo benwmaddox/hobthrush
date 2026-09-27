@@ -352,11 +352,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         "secret.reveal"
     ];
     private const string SinglePackageId = "<single-package>";
-    private readonly Dictionary<(ModuleIdentity Module, string Name), UnionSymbol> _unionsByModuleAndName = new();
     private readonly List<UnionSymbol> _unions = [];
-    private readonly Dictionary<(ModuleIdentity Module, string Name), StructSymbol> _structsByModuleAndName = new();
     private readonly List<StructSymbol> _structs = [];
-    private readonly Dictionary<(ModuleIdentity Module, string Name), FunctionSymbol> _functionsByModuleAndName = new();
     private readonly List<FunctionSymbol> _functions = [];
     private readonly List<CheckedTest> _tests = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
@@ -391,12 +388,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             orderedModules.Add(module);
         }
 
-        // Register every declaration header before resolving signatures, so forward references and
-        // import cycles see the same complete package symbol set.
+        // Register every declaration header before resolving signatures, so qualified references
+        // across modules and packages can see the complete package graph.
         foreach (var module in orderedModules) RegisterUnionHeaders(module);
         foreach (var module in orderedModules) RegisterStructHeaders(module);
         foreach (var module in orderedModules) RegisterFunctionHeaders(module);
-        foreach (var module in orderedModules) BindImports(module);
 
         foreach (var module in orderedModules) PopulateUnionVariants(module);
         foreach (var module in orderedModules) PopulateStructFields(module);
@@ -486,9 +482,6 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var symbol = new UnionSymbol(_unions.Count, module.Identity, declaration, LangType.ForUnion(_unions.Count, declaration.Name));
             _unions.Add(symbol);
             module.DeclaredUnions.Add(declaration.Name, symbol);
-            module.VisibleUnions.Add(declaration.Name, symbol);
-            module.VisibleTypeNames.Add(declaration.Name);
-            _unionsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
     }
 
@@ -512,9 +505,6 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var symbol = new StructSymbol(_structs.Count, module.Identity, declaration, LangType.ForStruct(_structs.Count, declaration.Name));
             _structs.Add(symbol);
             module.DeclaredStructs.Add(declaration.Name, symbol);
-            module.VisibleStructs.Add(declaration.Name, symbol);
-            module.VisibleTypeNames.Add(declaration.Name);
-            _structsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
     }
 
@@ -532,120 +522,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var symbol = new FunctionSymbol(_functions.Count, module.Identity, declaration);
             _functions.Add(symbol);
             module.DeclaredFunctions.Add(declaration.Name, symbol);
-            module.VisibleFunctions.Add(declaration.Name, symbol);
-            _functionsByModuleAndName.Add((module.Identity, declaration.Name), symbol);
         }
-    }
-
-    private void BindImports(ModuleSymbols module)
-    {
-        _currentModule = module.Identity;
-        foreach (var import in module.Program.Imports)
-        {
-            var targetIdentity = new ModuleIdentity(module.PackageId, import.Module);
-            if (import.DependencyAlias is { } dependencyAlias)
-            {
-                if (!module.DirectDependencies.TryGetValue(dependencyAlias, out var dependencyPackageId))
-                {
-                    AddMissingImportModule(
-                        import,
-                        $"Dependency alias '{dependencyAlias}' is not declared by package '{module.PackageId}'");
-                    continue;
-                }
-                targetIdentity = new ModuleIdentity(dependencyPackageId, import.Module);
-            }
-
-            if (!_modulesByIdentity.TryGetValue(targetIdentity, out _))
-            {
-                var message = import.DependencyAlias is { } alias
-                    ? $"Module '{import.Module}' is not part of dependency '{alias}'"
-                    : $"Module '{import.Module}' is not part of this package";
-                AddMissingImportModule(import, message);
-                continue;
-            }
-
-            foreach (var imported in import.Symbols)
-            {
-                var found = false;
-                var hasPublicMatch = false;
-                if (_functionsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var function))
-                {
-                    found = true;
-                    if (function.Declaration.Public)
-                    {
-                        hasPublicMatch = true;
-                        BindImported(module.VisibleFunctions, module.DeclaredFunctions, imported, function, "function");
-                    }
-                }
-                if (_unionsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var union))
-                {
-                    found = true;
-                    if (union.Declaration.Public)
-                    {
-                        hasPublicMatch = true;
-                        BindImportedType(module, imported, union);
-                    }
-                }
-                if (_structsByModuleAndName.TryGetValue((targetIdentity, imported.Name), out var structure))
-                {
-                    found = true;
-                    if (structure.Declaration.Public)
-                    {
-                        hasPublicMatch = true;
-                        BindImportedType(module, imported, structure);
-                    }
-                }
-                if (!found)
-                    Add("E_IMPORT_UNRESOLVED", $"Module '{import.Module}' does not declare a function or type named '{imported.Name}'", imported.At);
-                else if (!hasPublicMatch)
-                    Add("E_IMPORT_PRIVATE", $"All declarations named '{imported.Name}' in module '{import.Module}' are private", imported.At);
-            }
-        }
-    }
-
-    private void AddMissingImportModule(ImportDecl import, string message)
-    {
-        if (import.Symbols.Count == 0)
-        {
-            Add("E_IMPORT_UNRESOLVED", message, import.ModuleAt);
-            return;
-        }
-
-        foreach (var imported in import.Symbols)
-            Add("E_IMPORT_UNRESOLVED", message, imported.At);
-    }
-
-    private void BindImported<T>(
-        Dictionary<string, T> visible,
-        Dictionary<string, T> declared,
-        ImportSymbol imported,
-        T symbol,
-        string kind)
-    {
-        if (declared.ContainsKey(imported.Name) || !visible.TryAdd(imported.Name, symbol))
-        {
-            Add("E_IMPORT_CONFLICT", $"Imported {kind} '{imported.Name}' collides with a local declaration or another import", imported.At);
-        }
-    }
-
-    private void BindImportedType(ModuleSymbols module, ImportSymbol imported, UnionSymbol symbol)
-    {
-        if (!module.VisibleTypeNames.Add(imported.Name))
-        {
-            Add("E_IMPORT_CONFLICT", $"Imported type '{imported.Name}' collides with a local declaration or another import", imported.At);
-            return;
-        }
-        module.VisibleUnions.Add(imported.Name, symbol);
-    }
-
-    private void BindImportedType(ModuleSymbols module, ImportSymbol imported, StructSymbol symbol)
-    {
-        if (!module.VisibleTypeNames.Add(imported.Name))
-        {
-            Add("E_IMPORT_CONFLICT", $"Imported type '{imported.Name}' collides with a local declaration or another import", imported.At);
-            return;
-        }
-        module.VisibleStructs.Add(imported.Name, symbol);
     }
 
     private void PopulateUnionVariants(ModuleSymbols module)
@@ -777,7 +654,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
                 if (IsReservedTypeName(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
-                else if (module.VisibleTypeNames.Contains(typeParameter.Name))
+                else if (module.TypeNames.Contains(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
             }
 
@@ -845,7 +722,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 [],
                 Public: false,
                 Parameters: [],
-                new TypeSyntax("bool", [], test.AssertAt),
+                new TypeSyntax(new SourceDeclarationRefSyntax(null, [], "bool", test.AssertAt), [], test.AssertAt),
                 Effects: [],
                 body,
                 test.At);
@@ -1119,6 +996,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             BoolExpr boolean => new TypedBoolExpr(boolean.At, boolean.Value),
             TextExpr text => new TypedTextExpr(text.At, text.Value),
             NameExpr name => CheckName(name, expected, locals),
+            DeclarationRefExpr reference => CheckDeclarationReference(reference),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1),
             MemberCallExpr call => CheckMemberCall(call, locals, depth + 1),
@@ -1131,6 +1009,105 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (expected is not null && !expected.IsError && !result.Type.IsError && result.Type != expected)
             AddMismatch(expected, result.Type, expression.At);
         return result;
+    }
+
+    private TypedExpr CheckDeclarationReference(DeclarationRefExpr expression)
+    {
+        Add("E_NAME_UNRESOLVED", $"Declaration '{FormatReference(expression.Reference)}' is not a value", expression.At);
+        return new TypedErrorExpr(expression.At);
+    }
+
+    private static string FormatReference(SourceDeclarationRefSyntax reference) =>
+        reference.IsQualified
+            ? $"{reference.Root}::{string.Join("::", reference.Module.Append(reference.Declaration))}"
+            : reference.Declaration;
+
+    private bool TryResolveTargetModule(SourceDeclarationRefSyntax reference, out ModuleSymbols? target)
+    {
+        target = null;
+        if (!reference.IsQualified)
+        {
+            Add("E_NAME_UNRESOLVED", $"Declaration '{reference.Declaration}' must be referenced with a qualified module path", reference.At);
+            return false;
+        }
+
+        var current = CurrentModule;
+        string targetPackage;
+        if (reference.Root == "self")
+        {
+            targetPackage = current.PackageId;
+        }
+        else if (!current.DirectDependencies.TryGetValue(reference.Root!, out targetPackage!))
+        {
+            Add("E_NAME_UNRESOLVED", $"Dependency alias '{reference.Root}' is not declared by package '{current.PackageId}'", reference.At);
+            return false;
+        }
+
+        var moduleName = string.Join("::", reference.Module);
+        var identity = new ModuleIdentity(targetPackage, moduleName);
+        if (_modulesByIdentity.TryGetValue(identity, out target)) return true;
+
+        var owner = reference.Root == "self" ? "this package" : $"dependency '{reference.Root}'";
+        Add("E_NAME_UNRESOLVED", $"Module '{moduleName}' is not part of {owner}", reference.At);
+        return false;
+    }
+
+    private FunctionSymbol? ResolveFunctionReference(SourceDeclarationRefSyntax reference)
+    {
+        if (!TryResolveTargetModule(reference, out var target)) return null;
+        if (!target!.DeclaredFunctions.TryGetValue(reference.Declaration, out var function))
+        {
+            Add("E_NAME_UNRESOLVED", $"Module '{target.Program.Module}' does not declare function '{reference.Declaration}'", reference.At);
+            return null;
+        }
+        if (target.Identity != CurrentModule.Identity && !function.Declaration.Public)
+        {
+            Add("E_ACCESS_PRIVATE", $"Function '{FormatReference(reference)}' is private", reference.At);
+            return null;
+        }
+        return function;
+    }
+
+    private UnionSymbol? ResolveUnionReference(SourceDeclarationRefSyntax reference)
+    {
+        if (!TryResolveTargetModule(reference, out var target)) return null;
+        if (!target!.DeclaredUnions.TryGetValue(reference.Declaration, out var union))
+        {
+            Add("E_NAME_UNRESOLVED", $"Module '{target.Program.Module}' does not declare union '{reference.Declaration}'", reference.At);
+            return null;
+        }
+        if (target.Identity != CurrentModule.Identity && !union.Declaration.Public)
+        {
+            Add("E_ACCESS_PRIVATE", $"Union '{FormatReference(reference)}' is private", reference.At);
+            return null;
+        }
+        return union;
+    }
+
+    private (UnionSymbol? Union, StructSymbol? Struct) ResolveTypeDeclaration(SourceDeclarationRefSyntax reference)
+    {
+        if (!TryResolveTargetModule(reference, out var target)) return (null, null);
+        if (target!.DeclaredUnions.TryGetValue(reference.Declaration, out var union))
+        {
+            if (target.Identity != CurrentModule.Identity && !union.Declaration.Public)
+            {
+                Add("E_ACCESS_PRIVATE", $"Union '{FormatReference(reference)}' is private", reference.At);
+                return (null, null);
+            }
+            return (union, null);
+        }
+        if (target.DeclaredStructs.TryGetValue(reference.Declaration, out var structure))
+        {
+            if (target.Identity != CurrentModule.Identity && !structure.Declaration.Public)
+            {
+                Add("E_ACCESS_PRIVATE", $"Struct '{FormatReference(reference)}' is private", reference.At);
+                return (null, null);
+            }
+            return (null, structure);
+        }
+
+        Add("E_NAME_UNRESOLVED", $"Module '{target.Program.Module}' does not declare type '{reference.Declaration}'", reference.At);
+        return (null, null);
     }
 
     private TypedExpr CheckName(NameExpr expression, LangType? expected, Dictionary<string, LocalSymbol> locals)
@@ -1169,16 +1146,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        var scope = CurrentModule;
-        if (!scope.VisibleStructs.TryGetValue(expression.Name, out var structure))
+        var (union, structure) = ResolveTypeDeclaration(expression.Reference);
+        if (structure is null)
         {
             foreach (var value in expression.Fields)
                 _ = CheckExpr(value.Value, null, locals, depth);
 
-            if (scope.VisibleUnions.ContainsKey(expression.Name))
-                Add("E_TYPE_MISMATCH", $"Type '{expression.Name}' is a union, not a struct", expression.At);
-            else
-                Add("E_NAME_UNRESOLVED", $"Struct '{expression.Name}' is not declared", expression.At);
+            if (union is not null)
+                Add("E_TYPE_MISMATCH", $"Type '{FormatReference(expression.Reference)}' is a union, not a struct", expression.At);
             return new TypedErrorExpr(expression.At);
         }
 
@@ -1214,12 +1189,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (expression.Target is NameExpr typeName &&
-            !locals.ContainsKey(typeName.Name) &&
-            CurrentModule.VisibleUnions.ContainsKey(typeName.Name))
+        if (expression.Target is DeclarationRefExpr declarationReference)
         {
+            var union = ResolveUnionReference(declarationReference.Reference);
+            if (union is null) return new TypedErrorExpr(expression.At);
             return CheckVariantConstruction(
-                typeName.Name,
+                union,
                 expression.Field,
                 expression.At,
                 expression.At,
@@ -1315,11 +1290,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (CurrentModule.VisibleFunctions.TryGetValue(expression.Name, out var function))
+        var reference = expression.Reference;
+        var name = reference.Declaration;
+        if (!reference.IsQualified && name is "Some" or "Ok" or "Err")
+            return CheckBuiltinCall(expression, expected, locals, depth);
+
+        var function = ResolveFunctionReference(reference);
+        if (function is not null)
         {
             var isGeneric = function.TypeParameters.Count != 0;
             if (expression.Arguments.Count != function.Parameters.Count)
-                Add("E_TYPE_MISMATCH", $"Function '{expression.Name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}", expression.At);
+                Add("E_TYPE_MISMATCH", $"Function '{name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}", expression.At);
 
             var arguments = new List<TypedExpr>();
             var diagnosticsBeforeArguments = diagnostics.Count;
@@ -1362,12 +1343,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedCallExpr(returnType, function.Id, ReadOnly(typeArguments), ReadOnly(arguments), expression.At);
         }
 
-        if (expression.Name is "Some" or "Ok" or "Err")
-            return CheckBuiltinCall(expression, expected, locals, depth);
-
         foreach (var argument in expression.Arguments)
             _ = CheckExpr(argument, null, locals, depth);
-        Add("E_NAME_UNRESOLVED", $"Function '{expression.Name}' is not declared", expression.At);
         return new TypedErrorExpr(expression.At);
     }
 
@@ -1376,18 +1353,27 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
+        if (expression.Target is DeclarationRefExpr declarationReference)
+        {
+            var union = ResolveUnionReference(declarationReference.Reference);
+            if (union is null)
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+            return CheckVariantConstruction(
+                union,
+                expression.Member,
+                expression.At,
+                expression.MemberAt,
+                expression.Arguments,
+                locals,
+                depth);
+        }
+
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
-            if (CurrentModule.VisibleUnions.ContainsKey(targetName.Name))
-                return CheckVariantConstruction(
-                    targetName.Name,
-                    expression.Member,
-                    expression.At,
-                    expression.MemberAt,
-                    expression.Arguments,
-                    locals,
-                    depth);
-
             if (targetName.Name == "FsError")
             {
                 foreach (var argument in expression.Arguments)
@@ -1485,20 +1471,21 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        var wantsOption = expression.Name == "Some";
-        var wantsOk = expression.Name == "Ok";
+        var constructorName = expression.Reference.Declaration;
+        var wantsOption = constructorName == "Some";
+        var wantsOk = constructorName == "Ok";
         var expectedKind = wantsOption ? LangTypeKind.Option : LangTypeKind.Result;
         var expectedName = wantsOption ? "Option<T>" : "Result<T, E>";
         var matchingContext = expected is not null && (expected.IsError || expected.Kind == expectedKind);
 
         if (expression.Arguments.Count != 1)
-            Add("E_TYPE_MISMATCH", $"Constructor '{expression.Name}' expects 1 argument, got {expression.Arguments.Count}", expression.At);
+            Add("E_TYPE_MISMATCH", $"Constructor '{constructorName}' expects 1 argument, got {expression.Arguments.Count}", expression.At);
 
         if (expected is null)
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_TYPE_MISMATCH", $"Constructor '{expression.Name}' requires an expected type of {expectedName}", expression.At);
+            Add("E_TYPE_MISMATCH", $"Constructor '{constructorName}' requires an expected type of {expectedName}", expression.At);
             return new TypedErrorExpr(expression.At);
         }
 
@@ -1541,7 +1528,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private TypedExpr CheckVariantConstruction(
-        string qualifier,
+        UnionSymbol union,
         string member,
         Token at,
         Token memberAt,
@@ -1549,25 +1536,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (!CurrentModule.VisibleUnions.TryGetValue(qualifier, out var union))
-        {
-            foreach (var argument in arguments)
-                _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Union '{qualifier}' is not declared", at);
-            return new TypedErrorExpr(at);
-        }
-
         var variant = union.Variants.FirstOrDefault(item => item.Name == member);
         if (variant is null)
         {
             foreach (var argument in arguments)
                 _ = CheckExpr(argument, null, locals, depth);
-            Add("E_NAME_UNRESOLVED", $"Variant '{member}' is not declared on union '{qualifier}'", memberAt);
+            Add("E_NAME_UNRESOLVED", $"Variant '{member}' is not declared on union '{union.Declaration.Name}'", memberAt);
             return new TypedErrorExpr(at);
         }
 
         if (arguments.Count != variant.Fields.Count)
-            Add("E_TYPE_MISMATCH", $"Variant '{qualifier}.{variant.Name}' expects {variant.Fields.Count} payload values, got {arguments.Count}", memberAt);
+            Add("E_TYPE_MISMATCH", $"Variant '{union.Declaration.Name}.{variant.Name}' expects {variant.Fields.Count} payload values, got {arguments.Count}", memberAt);
 
         var typedArguments = new List<TypedExpr>();
         for (var i = 0; i < arguments.Count; i++)
@@ -1714,41 +1693,37 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (scrutineeType.Kind == LangTypeKind.Union)
         {
             var union = _unions[scrutineeType.UnionId];
-            if (pattern.UnionName is null)
+            if (pattern.Union is null)
             {
-                var expectedName = union.Declaration.Name + ".<variant>";
-                Add("E_TYPE_MISMATCH", $"Expected pattern from '{expectedName}', found '{pattern.VariantName}'", pattern.At);
+                Add("E_NAME_UNRESOLVED", $"Union '{union.Declaration.Name}' must be referenced with a qualified module path", pattern.At);
                 return null;
             }
 
-            if (!CurrentModule.VisibleUnions.TryGetValue(pattern.UnionName, out var visibleUnion))
-            {
-                Add("E_NAME_UNRESOLVED", $"Union '{pattern.UnionName}' is not declared or imported in this module", pattern.At);
-                return null;
-            }
+            var visibleUnion = ResolveUnionReference(pattern.Union);
+            if (visibleUnion is null) return null;
 
             if (visibleUnion.Id != union.Id)
             {
-                Add("E_TYPE_MISMATCH", $"Pattern union '{pattern.UnionName}' resolves to module '{FormatModuleIdentity(visibleUnion.ModuleIdentity)}', but the matched value uses module '{FormatModuleIdentity(union.ModuleIdentity)}'", pattern.At);
+                Add("E_TYPE_MISMATCH", $"Pattern union '{FormatReference(pattern.Union)}' resolves to module '{FormatModuleIdentity(visibleUnion.ModuleIdentity)}', but the matched value uses module '{FormatModuleIdentity(union.ModuleIdentity)}'", pattern.At);
                 return null;
             }
         }
         else if (scrutineeType.IsFsError)
         {
-            if (pattern.UnionName != "FsError")
+            if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != "FsError")
             {
                 Add("E_TYPE_MISMATCH", $"Expected pattern from 'FsError.<variant>', found '{pattern.VariantName}'", pattern.At);
                 return null;
             }
         }
-        else if (pattern.UnionName is not null)
+        else if (pattern.Union is not null)
         {
-            Add("E_TYPE_MISMATCH", $"Qualified pattern '{pattern.UnionName}.{pattern.VariantName}' does not match '{scrutineeType.DisplayName}'", pattern.At);
+            Add("E_TYPE_MISMATCH", $"Qualified pattern '{FormatReference(pattern.Union)}.{pattern.VariantName}' does not match '{scrutineeType.DisplayName}'", pattern.At);
             return null;
         }
 
         var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError
-            ? $"{pattern.UnionName}.{pattern.VariantName}"
+            ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
         var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
         if (shape is null)
@@ -1827,11 +1802,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return LangType.Error;
         }
 
-        if (typeParameters is not null && typeParameters.TryGetValue(syntax.Name, out var typeParameter))
+        var reference = syntax.Reference;
+        var name = reference.Declaration;
+        if (!reference.IsQualified && typeParameters is not null && typeParameters.TryGetValue(name, out var typeParameter))
             return NoTypeArguments(syntax, typeParameter);
 
-        switch (syntax.Name)
+        if (!reference.IsQualified)
         {
+            switch (name)
+            {
             case "i32":
                 return NoTypeArguments(syntax, LangType.I32);
             case "bool":
@@ -1858,35 +1837,45 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return LangType.Result(
                     ResolveType(syntax.Args[0], depth + 1, typeParameters),
                     ResolveType(syntax.Args[1], depth + 1, typeParameters));
-            default:
-                if (CurrentModule.VisibleUnions.TryGetValue(syntax.Name, out var union))
-                {
-                    if (syntax.Args.Count != 0)
-                    {
-                        Add("E_TYPE_MISMATCH", $"Union type '{syntax.Name}' does not take type arguments", syntax.At);
-                        return LangType.Error;
-                    }
-                    return union.Type;
-                }
-                if (CurrentModule.VisibleStructs.TryGetValue(syntax.Name, out var structure))
-                {
-                    if (syntax.Args.Count != 0)
-                    {
-                        Add("E_TYPE_MISMATCH", $"Struct type '{syntax.Name}' does not take type arguments", syntax.At);
-                        return LangType.Error;
-                    }
-                    return structure.Type;
-                }
-                Add("E_NAME_UNRESOLVED", $"Type '{syntax.Name}' is not declared", syntax.At);
-                return LangType.Error;
+            }
         }
+
+        if (!reference.IsQualified)
+        {
+            var detail = CurrentModule.TypeNames.Contains(name)
+                ? $"Type '{name}' must be referenced with a qualified module path"
+                : $"Type '{name}' is not declared (user declarations must be module-qualified)";
+            Add("E_NAME_UNRESOLVED", detail, reference.At);
+            return LangType.Error;
+        }
+
+        var (union, structure) = ResolveTypeDeclaration(reference);
+        if (union is not null)
+        {
+            if (syntax.Args.Count != 0)
+            {
+                Add("E_TYPE_MISMATCH", $"Union type '{name}' does not take type arguments", syntax.At);
+                return LangType.Error;
+            }
+            return union.Type;
+        }
+        if (structure is not null)
+        {
+            if (syntax.Args.Count != 0)
+            {
+                Add("E_TYPE_MISMATCH", $"Struct type '{name}' does not take type arguments", syntax.At);
+                return LangType.Error;
+            }
+            return structure.Type;
+        }
+        return LangType.Error;
     }
 
     private LangType NoTypeArguments(TypeSyntax syntax, LangType type)
     {
         if (syntax.Args.Count != 0)
         {
-            Add("E_TYPE_MISMATCH", $"Type '{syntax.Name}' does not take type arguments", syntax.At);
+            Add("E_TYPE_MISMATCH", $"Type '{syntax.Reference.Declaration}' does not take type arguments", syntax.At);
             return LangType.Error;
         }
         return type;
@@ -1922,10 +1911,6 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public Dictionary<string, UnionSymbol> DeclaredUnions { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, StructSymbol> DeclaredStructs { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, FunctionSymbol> DeclaredFunctions { get; } = new(StringComparer.Ordinal);
-        public Dictionary<string, UnionSymbol> VisibleUnions { get; } = new(StringComparer.Ordinal);
-        public Dictionary<string, StructSymbol> VisibleStructs { get; } = new(StringComparer.Ordinal);
-        public HashSet<string> VisibleTypeNames { get; } = new(StringComparer.Ordinal);
-        public Dictionary<string, FunctionSymbol> VisibleFunctions { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class UnionSymbol(int id, ModuleIdentity moduleIdentity, UnionDecl declaration, LangType type)

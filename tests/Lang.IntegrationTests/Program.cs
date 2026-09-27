@@ -65,27 +65,28 @@ internal static class IntegrationTests
             ("library build writes a durable DLL without a main function", TestLibraryBuild),
             ("effect annotations are closed upper bounds and enforce FsRead capabilities", TestEffectAnnotationsAndCapabilities),
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
-            ("imported calls carry effects into exact JSON diagnostics", TestImportedEffects),
+            ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
-            ("same-package CLI package checks, builds, and runs imported public values", TestPackageCliRoundTrip),
+            ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
-            ("package imports enforce module and symbol visibility and conflicts", TestPackageImportDiagnostics),
+            ("private struct and union access paths report package visibility", TestQualifiedPrivateTypeAccessPaths),
+            ("qualified references enforce package visibility and resolution", TestPackageQualifiedReferenceDiagnostics),
             ("package manifest schema is strict and reports JSON locations", TestPackageManifestDiagnostics),
             ("package module paths match their source headers", TestPackageModulePathDiagnostic),
             ("CLI entry module and main signature rules are enforced", TestPackageEntryPointDiagnostics),
             ("only the declared package entry module selects main", TestPackageEntrySelection),
-            ("imported union variants participate in exhaustive matching", TestPackageImportedUnionExhaustiveness),
-            ("package imports are not transitive", TestPackageImportsAreNotTransitive),
+            ("qualified union variants participate in exhaustive matching", TestPackageQualifiedUnionExhaustiveness),
+            ("same-package declarations use qualified cross-module references", TestPackageQualifiedReferencesCrossModules),
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
             ("dependency graphs reject cycles, missing manifests, non-libraries, and duplicate identities", TestDependencyGraphDiagnostics),
             ("dependency aliases enforce direct visibility and preserve module identity", TestDependencyAliasResolution),
-            ("dependency imports enforce public and existing symbols", TestDependencyImportDiagnostics),
+            ("dependency references enforce public and existing symbols", TestDependencyReferenceDiagnostics),
             ("dependency source roots and reparse paths stay inside package boundaries", TestDependencyFilesystemSafety),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
-            ("Text validation package builds and imported generic calls specialize correctly", TestTextValidationExample),
+            ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
             ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
             ("language tests validate assertions, dependency selection, and locks", TestManagedLanguageTestPackageRules),
@@ -185,7 +186,7 @@ internal static class IntegrationTests
 
     private static async Task TestJsonValidProgram(Harness harness)
     {
-        const string source = "module harness.valid_json;\n"
+        const string source = "module harness::valid_json;\n"
             + "pub fn main() -> i32 effects {} { return 1; }\n";
         var result = await harness.InvokeAsync("json-valid", "check", source, "--json");
 
@@ -198,16 +199,16 @@ internal static class IntegrationTests
 
     private static async Task TestPrimitiveMainOutput(Harness harness)
     {
-        const string boolSource = "module harness.bool_value;\n"
+        const string boolSource = "module harness::bool_value;\n"
             + "pub fn echo(value: bool) -> bool effects {} { return value; }\n"
-            + "pub fn main() -> bool effects {} { let answer: bool = echo(true); return answer; }\n";
-        const string falseSource = "module harness.false_value;\n"
+            + "pub fn main() -> bool effects {} { let answer: bool = self::harness::bool_value::echo(true); return answer; }\n";
+        const string falseSource = "module harness::false_value;\n"
             + "pub fn main() -> bool effects {} { return false; }\n";
         const string textSource = """
-            module harness.text_value;
+            module harness::text_value;
             pub fn echo(value: Text) -> Text effects {} { return value; }
             pub fn main() -> Text effects {} {
-                let answer: Text = echo("quote: \" slash: \\ line1\nline2 λ 😀");
+                let answer: Text = self::harness::text_value::echo("quote: \" slash: \\ line1\nline2 λ 😀");
                 return answer;
             }
             """;
@@ -223,7 +224,7 @@ internal static class IntegrationTests
     private static async Task TestComparisonAndControlFlow(Harness harness)
     {
         const string source = """
-            module harness.comparisons;
+            module harness::comparisons;
             pub fn choose(enabled: bool, value: i32) -> i32 effects {} {
                 if enabled {
                     let doubled: i32 = value * 2;
@@ -243,7 +244,7 @@ internal static class IntegrationTests
                             if 3 <= 3 {
                                 if 4 > 3 {
                                     if 4 >= 4 {
-                                        return choose(true, 21);
+                                        return self::harness::comparisons::choose(true, 21);
                                     } else {
                                         return 5;
                                     }
@@ -269,7 +270,7 @@ internal static class IntegrationTests
             await harness.InvokeAsync("comparisons-and-control-flow", "run", source));
 
         const string memberCallSource = """
-            module harness.control_member_call;
+            module harness::control_member_call;
             pub fn read_if_empty(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
                 let loaded: Result<Text, FsError> = fs.read_text(path);
                 if path.length == 0 {
@@ -289,7 +290,7 @@ internal static class IntegrationTests
     private static async Task TestInvalidControlFlow(Harness harness)
     {
         const string nonBooleanCondition = """
-            module harness.non_boolean_condition;
+            module harness::non_boolean_condition;
             pub fn main() -> i32 effects {} {
                 if 1 { return 1; } else { return 0; }
             }
@@ -297,7 +298,7 @@ internal static class IntegrationTests
         await ExpectDiagnosticsAsync(harness, "non-boolean-condition", nonBooleanCondition, "E_TYPE_MISMATCH");
 
         const string mismatchedOrderingOperands = """
-            module harness.mismatched_ordering;
+            module harness::mismatched_ordering;
             pub fn main() -> i32 effects {} {
                 if 1 < false { return 1; } else { return 0; }
             }
@@ -305,7 +306,7 @@ internal static class IntegrationTests
         await ExpectDiagnosticsAsync(harness, "mismatched-ordering-operands", mismatchedOrderingOperands, "E_TYPE_MISMATCH");
 
         const string mismatchedEqualityOperands = """
-            module harness.mismatched_equality;
+            module harness::mismatched_equality;
             pub fn main() -> i32 effects {} {
                 let same: bool = 1 == "1";
                 if same { return 1; } else { return 0; }
@@ -314,7 +315,7 @@ internal static class IntegrationTests
         await ExpectDiagnosticsAsync(harness, "mismatched-equality-operands", mismatchedEqualityOperands, "E_TYPE_MISMATCH");
 
         const string missingReturn = """
-            module harness.if_missing_return;
+            module harness::if_missing_return;
             pub fn choose(enabled: bool) -> i32 effects {} {
                 if enabled { return 1; }
             }
@@ -322,7 +323,7 @@ internal static class IntegrationTests
         await ExpectDiagnosticsAsync(harness, "if-missing-return", missingReturn, "E_TYPE_MISMATCH");
 
         const string branchLocalEscape = """
-            module harness.branch_local_escape;
+            module harness::branch_local_escape;
             pub fn main() -> i32 effects {} {
                 if true { let branch_value: i32 = 1; } else { }
                 return branch_value;
@@ -331,7 +332,7 @@ internal static class IntegrationTests
         await ExpectDiagnosticsAsync(harness, "branch-local-escape", branchLocalEscape, "E_NAME_UNRESOLVED");
 
         const string unreachableStatement = """
-            module harness.unreachable_statement;
+            module harness::unreachable_statement;
             pub fn main() -> i32 effects {} {
                 if true { return 1; } else { return 2; }
                 return 3;
@@ -343,7 +344,7 @@ internal static class IntegrationTests
     private static async Task TestUnicodeTextOperations(Harness harness)
     {
         const string scalarLengthSource = """
-            module harness.scalar_length;
+            module harness::scalar_length;
             pub fn main() -> i32 effects {} { return "😀".length; }
             """;
         AssertRunOutput("1" + Environment.NewLine,
@@ -351,7 +352,7 @@ internal static class IntegrationTests
 
         var whitespace = "\u00A0\u3000hello 😀\u3000\u00A0";
         var trimSource = $$"""
-            module harness.unicode_trim;
+            module harness::unicode_trim;
             pub fn main() -> Text effects {} { return "{{whitespace}}".trim(); }
             """;
         AssertRunOutput("hello 😀" + Environment.NewLine,
@@ -361,14 +362,14 @@ internal static class IntegrationTests
     private static async Task TestUnionMatchOutput(Harness harness)
     {
         const string source = """
-            module harness.union_match;
+            module harness::union_match;
             pub union Choice { Number(i32), Word(Text), Empty }
             pub fn main() -> i32 effects {} {
-                let choice: Choice = Choice.Number(37);
+                let choice: self::harness::union_match::Choice = self::harness::union_match::Choice.Number(37);
                 return match choice {
-                    Choice.Number(number) => number,
-                    Choice.Word(word) => 0,
-                    Choice.Empty => 0,
+                    self::harness::union_match::Choice.Number(number) => number,
+                    self::harness::union_match::Choice.Word(word) => 0,
+                    self::harness::union_match::Choice.Empty => 0,
                 };
             }
             """;
@@ -379,7 +380,7 @@ internal static class IntegrationTests
     private static async Task TestOptionResult(Harness harness)
     {
         const string optionSource = """
-            module harness.option;
+            module harness::option;
             pub fn main() -> i32 effects {} {
                 let value: Option<i32> = Some(23);
                 return match value {
@@ -389,7 +390,7 @@ internal static class IntegrationTests
             }
             """;
         const string resultSource = """
-            module harness.result;
+            module harness::result;
             pub fn main() -> i32 effects {} {
                 let value: Result<i32, Text> = Ok(31);
                 return match value {
@@ -408,36 +409,36 @@ internal static class IntegrationTests
     private static async Task TestStructValues(Harness harness)
     {
         const string source = """
-            module harness.struct_values;
+            module harness::struct_values;
             pub union Color { Red, Blue }
             pub union Choice { Yes, No }
-            pub struct Container { item: Choice }
+            pub struct Container { item: self::harness::struct_values::Choice }
             pub struct Person { name: Text, age: i32 }
-            pub struct Profile { owner: Person }
+            pub struct Profile { owner: self::harness::struct_values::Person }
             pub struct ColorValue { Red: i32 }
 
-            pub fn make_person(name: Text, age: i32) -> Person effects {} {
-                return Person { age: age, name: name };
+            pub fn make_person(name: Text, age: i32) -> self::harness::struct_values::Person effects {} {
+                return self::harness::struct_values::Person { age: age, name: name };
             }
-            pub fn person_age(person: Person) -> i32 effects {} { return person.age; }
+            pub fn person_age(person: self::harness::struct_values::Person) -> i32 effects {} { return person.age; }
             pub fn red_value() -> i32 effects {} {
-                let color: Color = Color.Red;
-                return match color { Color.Red => 1, Color.Blue => 0, };
+                let color: self::harness::struct_values::Color = self::harness::struct_values::Color.Red;
+                return match color { self::harness::struct_values::Color.Red => 1, self::harness::struct_values::Color.Blue => 0, };
             }
             pub fn main() -> i32 effects {} {
-                let Color: ColorValue = ColorValue { Red: 40 };
-                let profile: Profile = Profile { owner: make_person("Ada", 37) };
+                let Color: self::harness::struct_values::ColorValue = self::harness::struct_values::ColorValue { Red: 40 };
+                let profile: self::harness::struct_values::Profile = self::harness::struct_values::Profile { owner: self::harness::struct_values::make_person("Ada", 37) };
                 let chained: i32 = profile.owner.age;
-                let call_field: i32 = make_person("Lin", 2).age;
-                let call_argument: i32 = person_age(profile.owner);
+                let call_field: i32 = self::harness::struct_values::make_person("Lin", 2).age;
+                let call_argument: i32 = self::harness::struct_values::person_age(profile.owner);
                 let parenthesized_value: i32 = (profile.owner).age;
-                let parenthesized_constructor: i32 = (Person { age: 3, name: "Ada" }).age;
-                let matched: i32 = match (Container { item: Choice.Yes }).item {
-                    Choice.Yes => Color.Red,
-                    Choice.No => 0,
+                let parenthesized_constructor: i32 = (self::harness::struct_values::Person { age: 3, name: "Ada" }).age;
+                let matched: i32 = match (self::harness::struct_values::Container { item: self::harness::struct_values::Choice.Yes }).item {
+                    self::harness::struct_values::Choice.Yes => Color.Red,
+                    self::harness::struct_values::Choice.No => 0,
                 };
                 return chained + call_field + call_argument + parenthesized_value
-                    + parenthesized_constructor + matched + red_value();
+                    + parenthesized_constructor + matched + self::harness::struct_values::red_value();
             }
             """;
 
@@ -448,31 +449,31 @@ internal static class IntegrationTests
     private static async Task TestStructWrappers(Harness harness)
     {
         const string source = """
-            module harness.struct_wrappers;
+            module harness::struct_wrappers;
             pub struct Record { value: i32 }
-            pub union BoxedRecord { Present(Record), Empty }
+            pub union BoxedRecord { Present(self::harness::struct_wrappers::Record), Empty }
 
-            pub fn option_or_default(value: Option<Record>) -> Record effects {} {
+            pub fn option_or_default(value: Option<self::harness::struct_wrappers::Record>) -> self::harness::struct_wrappers::Record effects {} {
                 return match value {
                     Some(record) => record,
-                    None => Record { value: 0 },
+                    None => self::harness::struct_wrappers::Record { value: 0 },
                 };
             }
-            pub fn result_or_default(value: Result<Record, Text>) -> Record effects {} {
+            pub fn result_or_default(value: Result<self::harness::struct_wrappers::Record, Text>) -> self::harness::struct_wrappers::Record effects {} {
                 return match value {
                     Ok(record) => record,
-                    Err(message) => Record { value: 0 },
+                    Err(message) => self::harness::struct_wrappers::Record { value: 0 },
                 };
             }
             pub fn main() -> i32 effects {} {
-                let optional: Option<Record> = Some(Record { value: 23 });
-                let from_option: Record = option_or_default(optional);
-                let result: Result<Record, Text> = Ok(from_option);
-                let from_result: Record = result_or_default(result);
-                let boxed: BoxedRecord = BoxedRecord.Present(from_result);
+                let optional: Option<self::harness::struct_wrappers::Record> = Some(self::harness::struct_wrappers::Record { value: 23 });
+                let from_option: self::harness::struct_wrappers::Record = self::harness::struct_wrappers::option_or_default(optional);
+                let result: Result<self::harness::struct_wrappers::Record, Text> = Ok(from_option);
+                let from_result: self::harness::struct_wrappers::Record = self::harness::struct_wrappers::result_or_default(result);
+                let boxed: self::harness::struct_wrappers::BoxedRecord = self::harness::struct_wrappers::BoxedRecord.Present(from_result);
                 return match boxed {
-                    BoxedRecord.Present(record) => record.value,
-                    BoxedRecord.Empty => 0,
+                    self::harness::struct_wrappers::BoxedRecord.Present(record) => record.value,
+                    self::harness::struct_wrappers::BoxedRecord.Empty => 0,
                 };
             }
             """;
@@ -484,21 +485,21 @@ internal static class IntegrationTests
     private static async Task TestForwardAndGuardedRecursion(Harness harness)
     {
         const string source = """
-            module harness.forward_guarded_structs;
+            module harness::forward_guarded_structs;
             pub struct Empty {}
-            pub struct Before { after: After }
+            pub struct Before { after: self::harness::forward_guarded_structs::After }
             pub struct After { value: i32 }
-            pub struct OptionalNode { next: Option<OptionalNode> }
-            pub struct ResultNode { next: Result<Option<ResultNode>, Text> }
-            pub union TreeLink { Branch(TreeBranch), End }
-            pub struct TreeBranch { next: TreeLink }
+            pub struct OptionalNode { next: Option<self::harness::forward_guarded_structs::OptionalNode> }
+            pub struct ResultNode { next: Result<Option<self::harness::forward_guarded_structs::ResultNode>, Text> }
+            pub union TreeLink { Branch(self::harness::forward_guarded_structs::TreeBranch), End }
+            pub struct TreeBranch { next: self::harness::forward_guarded_structs::TreeLink }
 
             pub fn main() -> i32 effects {} {
-                let empty: Empty = Empty {};
-                let optional: OptionalNode = OptionalNode { next: None };
-                let result: ResultNode = ResultNode { next: Err("stop") };
-                let tree: TreeLink = TreeLink.Branch(TreeBranch { next: TreeLink.End });
-                let value: Before = Before { after: After { value: 29 } };
+                let empty: self::harness::forward_guarded_structs::Empty = self::harness::forward_guarded_structs::Empty {};
+                let optional: self::harness::forward_guarded_structs::OptionalNode = self::harness::forward_guarded_structs::OptionalNode { next: None };
+                let result: self::harness::forward_guarded_structs::ResultNode = self::harness::forward_guarded_structs::ResultNode { next: Err("stop") };
+                let tree: self::harness::forward_guarded_structs::TreeLink = self::harness::forward_guarded_structs::TreeLink.Branch(self::harness::forward_guarded_structs::TreeBranch { next: self::harness::forward_guarded_structs::TreeLink.End });
+                let value: self::harness::forward_guarded_structs::Before = self::harness::forward_guarded_structs::Before { after: self::harness::forward_guarded_structs::After { value: 29 } };
                 return value.after.value;
             }
             """;
@@ -507,9 +508,9 @@ internal static class IntegrationTests
         AssertRunOutput("29" + Environment.NewLine, result);
 
         const string librarySource = """
-            module harness.empty_struct_library;
+            module harness::empty_struct_library;
             pub struct Empty {}
-            pub fn make_empty() -> Empty effects {} { return Empty {}; }
+            pub fn make_empty() -> self::harness::empty_struct_library::Empty effects {} { return self::harness::empty_struct_library::Empty {}; }
             """;
         var library = await harness.InvokeAsync("empty-struct-library", "build", librarySource);
         AssertBuiltDll(library, Path.GetDirectoryName(harness.LastSourcePath)!);
@@ -520,13 +521,13 @@ internal static class IntegrationTests
         var cases = new (string Name, string Source)[]
         {
             ("direct-struct-cycle", """
-                module harness.direct_struct_cycle;
-                pub struct Node { next: Node }
+                module harness::direct_struct_cycle;
+                pub struct Node { next: self::harness::direct_struct_cycle::Node }
                 """),
             ("mutual-struct-cycle", """
-                module harness.mutual_struct_cycle;
-                pub struct Left { right: Right }
-                pub struct Right { left: Left }
+                module harness::mutual_struct_cycle;
+                pub struct Left { right: self::harness::mutual_struct_cycle::Right }
+                pub struct Right { left: self::harness::mutual_struct_cycle::Left }
                 """)
         };
 
@@ -539,67 +540,67 @@ internal static class IntegrationTests
         var cases = new (string Name, string Source, string ExpectedCode)[]
         {
             ("missing-struct-field", """
-                module harness.missing_struct_field;
+                module harness::missing_struct_field;
                 pub struct Person { name: Text, age: i32 }
                 pub fn main() -> i32 effects {} {
-                    let person: Person = Person { name: "Ada" };
+                    let person: self::harness::missing_struct_field::Person = self::harness::missing_struct_field::Person { name: "Ada" };
                     return 0;
                 }
                 """, "E_FIELD_MISSING"),
             ("unknown-struct-field", """
-                module harness.unknown_struct_field;
+                module harness::unknown_struct_field;
                 pub struct Person { name: Text, age: i32 }
                 pub fn main() -> i32 effects {} {
-                    let person: Person = Person { name: "Ada", age: 37, nickname: "A" };
+                    let person: self::harness::unknown_struct_field::Person = self::harness::unknown_struct_field::Person { name: "Ada", age: 37, nickname: "A" };
                     return 0;
                 }
                 """, "E_FIELD_UNKNOWN"),
             ("duplicate-struct-initializer-field", """
-                module harness.duplicate_struct_initializer_field;
+                module harness::duplicate_struct_initializer_field;
                 pub struct Person { name: Text, age: i32 }
                 pub fn main() -> i32 effects {} {
-                    let person: Person = Person { name: "Ada", age: 37, age: 38 };
+                    let person: self::harness::duplicate_struct_initializer_field::Person = self::harness::duplicate_struct_initializer_field::Person { name: "Ada", age: 37, age: 38 };
                     return 0;
                 }
                 """, "E_FIELD_DUPLICATE"),
             ("shadowed-dotted-call", """
-                module harness.shadowed_dotted_call;
+                module harness::shadowed_dotted_call;
                 pub union Choice { Yes(i32), No }
                 pub struct ChoiceValue { Yes: i32 }
                 pub fn main() -> i32 effects {} {
-                    let Choice: ChoiceValue = ChoiceValue { Yes: 1 };
+                    let Choice: self::harness::shadowed_dotted_call::ChoiceValue = self::harness::shadowed_dotted_call::ChoiceValue { Yes: 1 };
                     return Choice.Yes(2);
                 }
                 """, "E_UNSUPPORTED"),
             ("wrong-struct-field-type", """
-                module harness.wrong_struct_field_type;
+                module harness::wrong_struct_field_type;
                 pub struct Person { name: Text, age: i32 }
                 pub fn main() -> i32 effects {} {
-                    let person: Person = Person { name: "Ada", age: "thirty-seven" };
+                    let person: self::harness::wrong_struct_field_type::Person = self::harness::wrong_struct_field_type::Person { name: "Ada", age: "thirty-seven" };
                     return 0;
                 }
                 """, "E_TYPE_MISMATCH"),
             ("unknown-struct-member-read", """
-                module harness.unknown_struct_member;
+                module harness::unknown_struct_member;
                 pub struct Person { name: Text, age: i32 }
                 pub fn main() -> i32 effects {} {
-                    let person: Person = Person { name: "Ada", age: 37 };
+                    let person: self::harness::unknown_struct_member::Person = self::harness::unknown_struct_member::Person { name: "Ada", age: 37 };
                     return person.height;
                 }
                 """, "E_FIELD_UNKNOWN"),
             ("non-struct-member-read", """
-                module harness.non_struct_member;
+                module harness::non_struct_member;
                 pub fn main() -> i32 effects {} {
                     let count: i32 = 3;
                     return count.value;
                 }
                 """, "E_TYPE_MISMATCH"),
             ("nominal-struct-mismatch", """
-                module harness.nominal_struct_mismatch;
+                module harness::nominal_struct_mismatch;
                 pub struct User { age: i32 }
                 pub struct Score { age: i32 }
-                pub fn use_user(value: User) -> i32 effects {} { return value.age; }
-                pub fn main() -> i32 effects {} { return use_user(Score { age: 37 }); }
+                pub fn use_user(value: self::harness::nominal_struct_mismatch::User) -> i32 effects {} { return value.age; }
+                pub fn main() -> i32 effects {} { return self::harness::nominal_struct_mismatch::use_user(self::harness::nominal_struct_mismatch::Score { age: 37 }); }
                 """, "E_TYPE_MISMATCH")
         };
 
@@ -614,7 +615,7 @@ internal static class IntegrationTests
     private static async Task TestContextualIdentifiers(Harness harness)
     {
         const string source = """
-            module true.false.null.match.if.await.with.route.command.effects.return.fn;
+            module true::false::null::match::if::await::with::route::command::effects::return::fn;
             struct effects { route: i32, return: i32, if: i32, true: i32, null: i32 }
             union Choice { return(null: i32) }
 
@@ -623,15 +624,15 @@ internal static class IntegrationTests
                 return return;
             }
 
-            fn make_choice(value: effects) -> Choice effects {} {
-                return Choice.return(value.route + value.return + value.if + value.true + value.null);
+            fn make_choice(value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects) -> self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice effects {} {
+                return self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice.return(value.route + value.return + value.if + value.true + value.null);
             }
 
             pub fn main() -> i32 effects {} {
-                let value: effects = effects { route: 1, return: 2, if: 3, true: 4, null: 5 };
-                let choice: Choice = make_choice(value);
+                let value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects = self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects { route: 1, return: 2, if: 3, true: 4, null: 5 };
+                let choice: self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice = self::true::false::null::match::if::await::with::route::command::effects::return::fn::make_choice(value);
                 return match choice {
-                    Choice.return(payload) => route(payload),
+                    self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice.return(payload) => self::true::false::null::match::if::await::with::route::command::effects::return::fn::route(payload),
                 };
             }
             """;
@@ -640,7 +641,7 @@ internal static class IntegrationTests
         AssertRunOutput("15" + Environment.NewLine, result);
 
         const string hardKeywordSource = """
-            module harness.hard_keyword_identifier;
+            module harness::hard_keyword_identifier;
             fn main() -> i32 effects {} {
                 let if: i32 = 1;
                 return 0;
@@ -652,7 +653,7 @@ internal static class IntegrationTests
             "A hard expression keyword must remain unavailable as a bare binding.");
 
         const string standaloneRouteSource = """
-            module harness.standalone_route;
+            module harness::standalone_route;
             route
             """;
         await ExpectDiagnosticsAsync(harness, "standalone-route-declaration", standaloneRouteSource, "E_UNSUPPORTED");
@@ -663,25 +664,25 @@ internal static class IntegrationTests
         var cases = new (string Name, string Source, string ExpectedCode)[]
         {
             ("duplicate-struct-declaration", """
-                module harness.duplicate_struct_declaration;
+                module harness::duplicate_struct_declaration;
                 pub struct Item {}
                 pub struct Item { value: i32 }
                 """, "E_NAME_DUPLICATE"),
             ("duplicate-struct-field-declaration", """
-                module harness.duplicate_struct_field_declaration;
+                module harness::duplicate_struct_field_declaration;
                 pub struct Item { value: i32, value: Text }
                 """, "E_NAME_DUPLICATE"),
             ("union-struct-name-collision", """
-                module harness.union_struct_name_collision;
+                module harness::union_struct_name_collision;
                 pub union Item { Empty }
                 pub struct Item { value: i32 }
                 """, "E_NAME_DUPLICATE"),
             ("reserved-struct-name", """
-                module harness.reserved_struct_name;
+                module harness::reserved_struct_name;
                 pub struct match { value: i32 }
                 """, "E_SYNTAX"),
             ("reserved-builtin-type-names", """
-                module harness.reserved_builtin_type_names;
+                module harness::reserved_builtin_type_names;
                 pub struct i32 {}
                 pub struct bool {}
                 pub struct Text {}
@@ -704,20 +705,20 @@ internal static class IntegrationTests
         var cases = new (string Name, string Source)[]
         {
             ("public-function-private-struct", """
-                module harness.public_function_private_struct;
+                module harness::public_function_private_struct;
                 pub struct Public { value: i32 }
                 struct Hidden { value: i32 }
-                pub fn expose(value: Option<Result<Hidden, Text>>) -> i32 effects {} { return 0; }
+                pub fn expose(value: Option<Result<self::harness::public_function_private_struct::Hidden, Text>>) -> i32 effects {} { return 0; }
                 """),
             ("public-union-private-struct", """
-                module harness.public_union_private_struct;
+                module harness::public_union_private_struct;
                 struct Hidden { value: i32 }
-                pub union PublicChoice { Wrapped(Option<Result<Hidden, Text>>), Empty }
+                pub union PublicChoice { Wrapped(Option<Result<self::harness::public_union_private_struct::Hidden, Text>>), Empty }
                 """),
             ("public-struct-private-field-type", """
-                module harness.public_struct_private_field;
+                module harness::public_struct_private_field;
                 struct Hidden { value: i32 }
-                pub struct PublicBox { value: Option<Result<Hidden, Text>> }
+                pub struct PublicBox { value: Option<Result<self::harness::public_struct_private_field::Hidden, Text>> }
                 """)
         };
 
@@ -728,9 +729,9 @@ internal static class IntegrationTests
     private static async Task TestDeepStructFieldChain(Harness harness)
     {
         var fieldChain = "node" + string.Concat(Enumerable.Repeat(".next", 300));
-        var source = "module harness.deep_struct_field_chain;\n"
+        var source = "module harness::deep_struct_field_chain;\n"
             + "pub struct Node { next: i32 }\n"
-            + "pub fn main() -> i32 effects {} { let node: Node = Node { next: 0 }; return " + fieldChain + "; }\n";
+            + "pub fn main() -> i32 effects {} { let node: self::harness::deep_struct_field_chain::Node = self::harness::deep_struct_field_chain::Node { next: 0 }; return " + fieldChain + "; }\n";
 
         var diagnostics = await ExpectDiagnosticsAsync(harness, "deep-struct-field-chain", source, "E_SYNTAX");
         var deep = diagnostics.Single(diagnostic => diagnostic.Code == "E_SYNTAX");
@@ -743,59 +744,59 @@ internal static class IntegrationTests
         var cases = new (string Name, string Source)[]
         {
             ("wrong-argument", """
-                module harness.wrong_argument;
+                module harness::wrong_argument;
                 pub fn wants_i32(value: i32) -> i32 effects {} { return value; }
-                pub fn main() -> i32 effects {} { return wants_i32(true); }
+                pub fn main() -> i32 effects {} { return self::harness::wrong_argument::wants_i32(true); }
                 """),
             ("wrong-local", """
-                module harness.wrong_local;
+                module harness::wrong_local;
                 pub fn main() -> i32 effects {} { let value: i32 = true; return 0; }
                 """),
             ("wrong-return", """
-                module harness.wrong_return;
+                module harness::wrong_return;
                 pub fn value() -> i32 effects {} { return true; }
                 pub fn main() -> i32 effects {} { return 0; }
                 """),
             ("wrong-binary", """
-                module harness.wrong_binary;
+                module harness::wrong_binary;
                 pub fn main() -> i32 effects {} { return 1 + true; }
                 """),
             ("wrong-union-payload", """
-                module harness.wrong_union_payload;
+                module harness::wrong_union_payload;
                 pub union Choice { Number(i32) }
-                pub fn main() -> i32 effects {} { let value: Choice = Choice.Number(true); return 0; }
+                pub fn main() -> i32 effects {} { let value: self::harness::wrong_union_payload::Choice = self::harness::wrong_union_payload::Choice.Number(true); return 0; }
                 """),
             ("wrong-match-arm", """
-                module harness.wrong_match_arm;
+                module harness::wrong_match_arm;
                 pub union Choice { First, Second }
                 pub fn main() -> i32 effects {} {
-                    let value: Choice = Choice.First;
-                    return match value { Choice.First => 1, Choice.Second => false, };
+                    let value: self::harness::wrong_match_arm::Choice = self::harness::wrong_match_arm::Choice.First;
+                    return match value { self::harness::wrong_match_arm::Choice.First => 1, self::harness::wrong_match_arm::Choice.Second => false, };
                 }
                 """),
             ("option-does-not-implicitly-unwrap", """
-                module harness.option_unwrap;
+                module harness::option_unwrap;
                 pub fn unwrap(value: Option<i32>) -> i32 effects {} { return value; }
-                pub fn main() -> i32 effects {} { return unwrap(Some(7)); }
+                pub fn main() -> i32 effects {} { return self::harness::option_unwrap::unwrap(Some(7)); }
                 """),
             ("option-arguments-are-invariant", """
-                module harness.option_types;
+                module harness::option_types;
                 pub fn use_integer(value: Option<i32>) -> i32 effects {} {
                     return match value { Some(number) => number, None => 0, };
                 }
                 pub fn main() -> i32 effects {} {
                     let value: Option<Text> = Some("text");
-                    return use_integer(value);
+                    return self::harness::option_types::use_integer(value);
                 }
                 """),
             ("result-type-arguments-are-ordered", """
-                module harness.result_types;
+                module harness::result_types;
                 pub fn use_result(value: Result<i32, Text>) -> i32 effects {} {
                     return match value { Ok(number) => number, Err(message) => 0, };
                 }
                 pub fn main() -> i32 effects {} {
                     let value: Result<Text, i32> = Err(1);
-                    return use_result(value);
+                    return self::harness::result_types::use_result(value);
                 }
                 """)
         };
@@ -816,11 +817,11 @@ internal static class IntegrationTests
     private static async Task TestInvalidMatches(Harness harness)
     {
         const string missingSource = """
-            module harness.missing_match;
+            module harness::missing_match;
             pub union Choice { Yes, No }
             pub fn main() -> i32 effects {} {
-                let value: Choice = Choice.Yes;
-                return match value { Choice.Yes => 1, };
+                let value: self::harness::missing_match::Choice = self::harness::missing_match::Choice.Yes;
+                return match value { self::harness::missing_match::Choice.Yes => 1, };
             }
             """;
         var missingDiagnostics = await ExpectDiagnosticsAsync(harness, "missing-match-arm", missingSource, "E_MATCH_NONEXHAUSTIVE");
@@ -829,33 +830,33 @@ internal static class IntegrationTests
         AssertRangeAtToken(missingSource, missing, "match", 1);
 
         const string duplicateSource = """
-            module harness.duplicate_match;
+            module harness::duplicate_match;
             pub union Choice { Yes, No }
             pub fn main() -> i32 effects {} {
-                let value: Choice = Choice.Yes;
-                return match value { Choice.Yes => 1, Choice.Yes => 2, Choice.No => 0, };
+                let value: self::harness::duplicate_match::Choice = self::harness::duplicate_match::Choice.Yes;
+                return match value { self::harness::duplicate_match::Choice.Yes => 1, self::harness::duplicate_match::Choice.Yes => 2, self::harness::duplicate_match::Choice.No => 0, };
             }
             """;
         var duplicateDiagnostics = await ExpectDiagnosticsAsync(harness, "duplicate-match-arm", duplicateSource, "E_MATCH_ARM_DUPLICATE");
         var duplicate = duplicateDiagnostics.Single(diagnostic => diagnostic.Code == "E_MATCH_ARM_DUPLICATE");
-        AssertRangeAtToken(duplicateSource, duplicate, "Choice", 5);
+        AssertRangeAtToken(duplicateSource, duplicate, "self", 4);
 
         const string wrongUnionSource = """
-            module harness.wrong_union_pattern;
+            module harness::wrong_union_pattern;
             pub union Choice { First, Second }
             pub union Other { First, Second }
             pub fn main() -> i32 effects {} {
-                let value: Choice = Choice.First;
-                return match value { Other.First => 1, Other.Second => 0, };
+                let value: self::harness::wrong_union_pattern::Choice = self::harness::wrong_union_pattern::Choice.First;
+                return match value { self::harness::wrong_union_pattern::Other.First => 1, self::harness::wrong_union_pattern::Other.Second => 0, };
             }
             """;
         await ExpectDiagnosticsAsync(harness, "wrong-union-pattern", wrongUnionSource, "E_TYPE_MISMATCH", "E_NAME_UNRESOLVED");
         const string aritySource = """
-            module harness.match_arity;
+            module harness::match_arity;
             pub union Choice { Number(i32), Empty }
             pub fn main() -> i32 effects {} {
-                let value: Choice = Choice.Empty;
-                return match value { Choice.Number(first, second) => first, Choice.Empty => 0, };
+                let value: self::harness::match_arity::Choice = self::harness::match_arity::Choice.Empty;
+                return match value { self::harness::match_arity::Choice.Number(first, second) => first, self::harness::match_arity::Choice.Empty => 0, };
             }
             """;
         await ExpectDiagnosticsAsync(harness, "wrong-match-payload-arity", aritySource, "E_TYPE_MISMATCH");
@@ -864,14 +865,14 @@ internal static class IntegrationTests
     private static async Task TestNull(Harness harness)
     {
         const string expressionSource = """
-            module harness.null_expression;
+            module harness::null_expression;
             pub fn main() -> i32 effects {} { return null; }
             """;
         var expressionDiagnostics = await ExpectDiagnosticsAsync(harness, "null-expression", expressionSource, "E_TYPE_MISMATCH");
         AssertRangeAtToken(expressionSource, expressionDiagnostics.Single(diagnostic => diagnostic.Code == "E_TYPE_MISMATCH"), "null", 1);
 
         const string identifierSource = """
-            module harness.null_identifier;
+            module harness::null_identifier;
             pub fn main() -> i32 effects {} { let null: i32 = 1; return null; }
             """;
         var identifierDiagnostics = await ExpectDiagnosticsAsync(harness, "null-identifier", identifierSource, "E_TYPE_MISMATCH", "E_SYNTAX");
@@ -882,7 +883,7 @@ internal static class IntegrationTests
     {
         var nestedType = "i32";
         for (var depth = 0; depth < 300; depth++) nestedType = $"Option<{nestedType}>";
-        var source = $"module harness.deep_nesting;\npub fn value(input: {nestedType}) -> i32 effects {{}} {{ return 0; }}\n";
+        var source = $"module harness::deep_nesting;\npub fn value(input: {nestedType}) -> i32 effects {{}} {{ return 0; }}\n";
 
         var result = await harness.InvokeWithTimeoutAsync("deep-nesting", "check", source, TimeSpan.FromSeconds(15), "--json");
         AssertTrue(result.ExitCode != 0, Describe(result));
@@ -1001,7 +1002,7 @@ internal static class IntegrationTests
     private static async Task TestLongBinaryChain(Harness harness)
     {
         var expression = string.Join(" + ", Enumerable.Repeat("1", 10_000));
-        var source = "module harness.long_chain;\n"
+        var source = "module harness::long_chain;\n"
             + "pub fn main() -> i32 effects {} { return " + expression + "; }\n";
         var result = await harness.InvokeWithTimeoutAsync("long-binary-chain", "check", source, TimeSpan.FromSeconds(15), "--json");
 
@@ -1017,24 +1018,24 @@ internal static class IntegrationTests
     private static async Task TestSignedI32(Harness harness)
     {
         const string negativeOneSource = """
-            module harness.negative_one;
+            module harness::negative_one;
             pub fn main() -> i32 effects {} { return -1; }
             """;
         const string minimumSource = """
-            module harness.minimum;
+            module harness::minimum;
             pub fn main() -> i32 effects {} { return -2147483648; }
             """;
         const string negativeCallSource = """
-            module harness.negative_call;
+            module harness::negative_call;
             pub fn value() -> i32 effects {} { return 3; }
-            pub fn main() -> i32 effects {} { return -value(); }
+            pub fn main() -> i32 effects {} { return -self::harness::negative_call::value(); }
             """;
         const string tooSmallSource = """
-            module harness.too_small;
+            module harness::too_small;
             pub fn main() -> i32 effects {} { return -2147483649; }
             """;
         const string negatedMinimumSource = """
-            module harness.negated_minimum;
+            module harness::negated_minimum;
             pub fn main() -> i32 effects {} { return -(-2147483648); }
             """;
 
@@ -1049,75 +1050,75 @@ internal static class IntegrationTests
     }
     private static async Task TestEffectAnnotationsAndCapabilities(Harness harness)
     {
-        const string pureSource = "module harness.effect_pure;\n"
+        const string pureSource = "module harness::effect_pure;\n"
             + "pub fn main() -> i32 effects {} { return 42; }\n";
         AssertRunOutput("42" + Environment.NewLine, await harness.InvokeAsync("effect-pure-success", "run", pureSource));
 
-        const string directSource = "module harness.effect_direct;\n"
+        const string directSource = "module harness::effect_direct;\n"
             + "pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
         var directCheck = await harness.InvokeAsync("effect-direct-success", "check", directSource, "--json");
         AssertEqual(0, directCheck.ExitCode, Describe(directCheck));
         AssertEqual(0, ParseDiagnosticSnapshots(directCheck.StandardOutput).Length,
             "A direct fs.read operation inside its declared upper bound should check cleanly.");
 
-        const string directExceededSource = "module harness.effect_direct_exceeded;\n"
+        const string directExceededSource = "module harness::effect_direct_exceeded;\n"
             + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(\"x\"); }\n";
         var directExceeded = await ExpectDiagnosticsAsync(
             harness, "effect-direct-exceeded", directExceededSource, "E_EFFECT_EXCEEDED");
         AssertEqual(1, directExceeded.Length, "A direct effect outside its upper bound should produce one diagnostic.");
         AssertRangeAtToken(directExceededSource, directExceeded.Single(), "bad", 1);
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness.effect_direct_exceeded.bad'; shortest call path: harness.effect_direct_exceeded.bad -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_direct_exceeded.bad'; shortest call path: harness::effect_direct_exceeded.bad -> fs.read_text",
             directExceeded.Single().Message,
             "A direct-effect diagnostic should show the shortest path to the operation.");
 
-        const string unknownEffectSource = "module harness.effect_unknown_annotation;\n"
+        const string unknownEffectSource = "module harness::effect_unknown_annotation;\n"
             + "pub fn bad() -> i32 effects { fs.unknown } { return 1; }\n";
         var unknownEffect = await ExpectDiagnosticsAsync(
             harness, "effect-unknown-annotation", unknownEffectSource, "E_EFFECT_UNKNOWN");
         AssertEqual(1, unknownEffect.Length, "An unknown annotation should produce one diagnostic.");
 
-        const string duplicateEffectSource = "module harness.effect_duplicate_annotation;\n"
+        const string duplicateEffectSource = "module harness::effect_duplicate_annotation;\n"
             + "pub fn bad() -> i32 effects { fs.read, fs.read } { return 1; }\n";
         var duplicateEffect = await ExpectDiagnosticsAsync(
             harness, "effect-duplicate-annotation", duplicateEffectSource, "E_EFFECT_DUPLICATE");
         AssertEqual(1, duplicateEffect.Length, "A repeated annotation should produce one diagnostic.");
 
-        const string missingCapabilitySource = "module harness.effect_missing_capability;\n"
+        const string missingCapabilitySource = "module harness::effect_missing_capability;\n"
             + "pub fn bad() -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
         var missingCapability = await ExpectDiagnosticsAsync(
             harness, "effect-missing-capability", missingCapabilitySource, "E_CAPABILITY_MISSING");
         AssertRangeAtToken(missingCapabilitySource, missingCapability.Single(), "fs", 2);
 
-        const string wrongCapabilitySource = "module harness.effect_wrong_capability;\n"
+        const string wrongCapabilitySource = "module harness::effect_wrong_capability;\n"
             + "pub fn bad(value: Text) -> Result<Text, FsError> effects { fs.read } { return value.read_text(\"x\"); }\n";
         var wrongCapability = await ExpectDiagnosticsAsync(
             harness, "effect-wrong-capability", wrongCapabilitySource, "E_CAPABILITY_MISSING");
         AssertRangeAtToken(wrongCapabilitySource, wrongCapability.Single(), "value", 2);
 
-        const string invalidFunctionCallSource = "module harness.effect_invalid_function_call;\n"
+        const string invalidFunctionCallSource = "module harness::effect_invalid_function_call;\n"
             + "fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
-            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return read(); }\n";
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return self::harness::effect_invalid_function_call::read(); }\n";
         var invalidFunctionCall = await ExpectDiagnosticsAsync(
             harness, "effect-invalid-function-call", invalidFunctionCallSource, "E_TYPE_MISMATCH");
         AssertTrue(invalidFunctionCall.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
             "An invalid-arity function call must not add a transitive effect diagnostic.");
 
-        const string invalidIntrinsicAritySource = "module harness.effect_invalid_intrinsic_arity;\n"
+        const string invalidIntrinsicAritySource = "module harness::effect_invalid_intrinsic_arity;\n"
             + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(); }\n";
         var invalidIntrinsicArity = await ExpectDiagnosticsAsync(
             harness, "effect-invalid-intrinsic-arity", invalidIntrinsicAritySource, "E_TYPE_MISMATCH");
         AssertTrue(invalidIntrinsicArity.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
             "An invalid-arity filesystem operation must not seed an inferred effect.");
 
-        const string invalidIntrinsicPathSource = "module harness.effect_invalid_intrinsic_path;\n"
+        const string invalidIntrinsicPathSource = "module harness::effect_invalid_intrinsic_path;\n"
             + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return fs.read_text(1); }\n";
         var invalidIntrinsicPath = await ExpectDiagnosticsAsync(
             harness, "effect-invalid-intrinsic-path", invalidIntrinsicPathSource, "E_TYPE_MISMATCH");
         AssertTrue(invalidIntrinsicPath.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
             "A wrong-typed filesystem path must not seed an inferred effect.");
 
-        const string localReceiverSource = "module harness.effect_local_receiver;\n"
+        const string localReceiverSource = "module harness::effect_local_receiver;\n"
             + "pub fn read(FsRead: FsRead) -> Result<Text, FsError> effects { fs.read } { return FsRead.read_text(\"x\"); }\n";
         var localReceiver = await harness.InvokeAsync("effect-local-receiver", "check", localReceiverSource, "--json");
         AssertEqual(0, localReceiver.ExitCode, Describe(localReceiver));
@@ -1127,104 +1128,102 @@ internal static class IntegrationTests
 
     private static async Task TestEffectInferencePaths(Harness harness)
     {
-        const string source = "module harness.effect_paths;\n"
+        const string source = "module harness::effect_paths;\n"
             + "fn leaf(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
-            + "fn deep_three(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
-            + "fn deep_two(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return deep_three(fs); }\n"
-            + "fn deep_one(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return deep_two(fs); }\n"
-            + "fn near(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "fn deep_three(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_paths::leaf(fs); }\n"
+            + "fn deep_two(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_paths::deep_three(fs); }\n"
+            + "fn deep_one(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_paths::deep_two(fs); }\n"
+            + "fn near(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_paths::leaf(fs); }\n"
             + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} {\n"
-            + "    let nearer: Result<Text, FsError> = near(fs);\n"
-            + "    return deep_one(fs);\n"
+            + "    let nearer: Result<Text, FsError> = self::harness::effect_paths::near(fs);\n"
+            + "    return self::harness::effect_paths::deep_one(fs);\n"
             + "}\n";
 
         var firstRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-first", source, "E_EFFECT_EXCEEDED");
         var secondRun = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-second", source, "E_EFFECT_EXCEEDED");
-        const string expectedMessage = "Effect 'fs.read' is not declared by function 'harness.effect_paths.bad'; shortest call path: harness.effect_paths.bad -> harness.effect_paths.near -> harness.effect_paths.leaf -> fs.read_text";
+        const string expectedMessage = "Effect 'fs.read' is not declared by function 'harness::effect_paths.bad'; shortest call path: harness::effect_paths.bad -> harness::effect_paths.near -> harness::effect_paths.leaf -> fs.read_text";
         AssertEqual(expectedMessage, firstRun.Single().Message, "The checker should choose the shortest call path.");
         AssertEqual(firstRun.Single().Message, secondRun.Single().Message,
             "Call-path diagnostic content should be deterministic across runs.");
         AssertRangeAtToken(source, firstRun.Single(), "bad", 1);
 
-        const string tiedPathsSource = "module harness.effect_tie;\n"
+        const string tiedPathsSource = "module harness::effect_tie;\n"
             + "fn leaf(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
-            + "fn zeta(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
-            + "fn alpha(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return leaf(fs); }\n"
+            + "fn zeta(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_tie::leaf(fs); }\n"
+            + "fn alpha(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_tie::leaf(fs); }\n"
             + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} {\n"
-            + "    let first: Result<Text, FsError> = zeta(fs);\n"
-            + "    return alpha(fs);\n"
+            + "    let first: Result<Text, FsError> = self::harness::effect_tie::zeta(fs);\n"
+            + "    return self::harness::effect_tie::alpha(fs);\n"
             + "}\n";
         var tiedPaths = await ExpectDiagnosticsAsync(harness, "effect-shortest-path-tie", tiedPathsSource, "E_EFFECT_EXCEEDED");
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness.effect_tie.bad'; shortest call path: harness.effect_tie.bad -> harness.effect_tie.alpha -> harness.effect_tie.leaf -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_tie.bad'; shortest call path: harness::effect_tie.bad -> harness::effect_tie.alpha -> harness::effect_tie.leaf -> fs.read_text",
             tiedPaths.Single().Message,
             "Equal-length effect paths should use canonical function ordering, independent of call source order.");
 
-        const string recursiveSource = "module harness.effect_recursive;\n"
+        const string recursiveSource = "module harness::effect_recursive;\n"
             + "fn first(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {\n"
-            + "    let next: Result<Text, FsError> = second(fs);\n"
+            + "    let next: Result<Text, FsError> = self::harness::effect_recursive::second(fs);\n"
             + "    return fs.read_text(\"x\");\n"
             + "}\n"
-            + "fn second(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return first(fs); }\n"
-            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return second(fs); }\n";
+            + "fn second(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::harness::effect_recursive::first(fs); }\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return self::harness::effect_recursive::second(fs); }\n";
         var recursiveDiagnostics = await ExpectDiagnosticsAsync(
             harness, "effect-recursive-cycle", recursiveSource, "E_EFFECT_EXCEEDED");
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'harness.effect_recursive.bad'; shortest call path: harness.effect_recursive.bad -> harness.effect_recursive.second -> harness.effect_recursive.first -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'harness::effect_recursive.bad'; shortest call path: harness::effect_recursive.bad -> harness::effect_recursive.second -> harness::effect_recursive.first -> fs.read_text",
             recursiveDiagnostics.Single().Message,
             "Effect inference should converge through recursive call cycles and retain the shortest path.");
     }
 
-    private static async Task TestImportedEffects(Harness harness)
+    private static async Task TestQualifiedEffects(Harness harness)
     {
-        const string library = "module io.files;\n"
+        const string library = "module io::files;\n"
             + "pub fn load(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n";
-        const string wrapperWithoutEffect = "module app.reader;\n"
-            + "import io.files { load };\n"
-            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return load(fs); }\n";
+        const string wrapperWithoutEffect = "module app::reader;\n"
+            + "pub fn bad(fs: FsRead) -> Result<Text, FsError> effects {} { return self::io::files::load(fs); }\n";
         var files = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["src/app/reader.lang"] = wrapperWithoutEffect,
             ["src/io/files.lang"] = library
         };
-        var packageRoot = await harness.WritePackageAsync("effect-imported-exceeded", LibraryPackageManifest(), files);
+        var packageRoot = await harness.WritePackageAsync("effect-qualified-exceeded", LibraryPackageManifest(), files);
         var wrapperPath = Path.GetFullPath(Path.Combine(packageRoot, "src", "app", "reader.lang"));
-        var result = await harness.InvokePackageDirectoryAsync("effect-imported-exceeded", packageRoot, "check", "--json");
-        AssertTrue(result.ExitCode != 0, $"An imported effect outside its upper bound unexpectedly passed. {Describe(result)}");
+        var result = await harness.InvokePackageDirectoryAsync("effect-qualified-exceeded", packageRoot, "check", "--json");
+        AssertTrue(result.ExitCode != 0, $"A qualified effectful call outside its upper bound unexpectedly passed. {Describe(result)}");
         AssertEqual(string.Empty, result.StandardError, Describe(result));
         var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
         var exceeded = diagnostics.Single(diagnostic => diagnostic.Code == "E_EFFECT_EXCEEDED");
         AssertEqual(wrapperPath, Path.GetFullPath(exceeded.File), "The effect diagnostic should identify the caller module.");
         AssertRangeAtToken(wrapperWithoutEffect, exceeded, "bad", 1);
         AssertEqual(
-            "Effect 'fs.read' is not declared by function 'app.reader.bad'; shortest call path: app.reader.bad -> io.files.load -> fs.read_text",
+            "Effect 'fs.read' is not declared by function 'app::reader.bad'; shortest call path: app::reader.bad -> io::files.load -> fs.read_text",
             exceeded.Message,
-            "The path should include the imported function and the filesystem operation.");
+            "The path should include the qualified function and the filesystem operation.");
 
-        var repeat = await harness.InvokePackageDirectoryAsync("effect-imported-exceeded-repeat", packageRoot, "check", "--json");
+        var repeat = await harness.InvokePackageDirectoryAsync("effect-qualified-exceeded-repeat", packageRoot, "check", "--json");
         var repeated = ParseDiagnosticSnapshots(repeat.StandardOutput).Single(diagnostic => diagnostic.Code == "E_EFFECT_EXCEEDED");
         AssertEqual(exceeded.Message, repeated.Message, "Imported call paths should be stable across repeated checks.");
 
-        const string wrapperWithEffect = "module app.reader;\n"
-            + "import io.files { load };\n"
-            + "pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return load(fs); }\n";
+        const string wrapperWithEffect = "module app::reader;\n"
+            + "pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return self::io::files::load(fs); }\n";
         var allowedPackage = await harness.WritePackageAsync(
-            "effect-imported-allowed",
+            "effect-qualified-allowed",
             LibraryPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/reader.lang"] = wrapperWithEffect,
                 ["src/io/files.lang"] = library
             });
-        var allowed = await harness.InvokePackageDirectoryAsync("effect-imported-allowed", allowedPackage, "check", "--json");
+        var allowed = await harness.InvokePackageDirectoryAsync("effect-qualified-allowed", allowedPackage, "check", "--json");
         AssertEqual(0, allowed.ExitCode, Describe(allowed));
         AssertEqual(0, ParseDiagnosticSnapshots(allowed.StandardOutput).Length,
-            "An imported effect inside the caller's upper bound should check cleanly.");
+            "A qualified effectful call inside the caller's upper bound should check cleanly.");
     }
 
     private static async Task TestFsErrorExhaustiveness(Harness harness)
     {
-        const string exhaustiveSource = "module harness.fs_error_exhaustive;\n"
+        const string exhaustiveSource = "module harness::fs_error_exhaustive;\n"
             + "pub fn display(error: FsError) -> Text effects {} {\n"
             + "    return match error {\n"
             + "        FsError.NotFound => \"not found\",\n"
@@ -1239,7 +1238,7 @@ internal static class IntegrationTests
         AssertEqual(0, ParseDiagnosticSnapshots(valid.StandardOutput).Length,
             "FsError's five declared variants should form an exhaustive match.");
 
-        const string incompleteSource = "module harness.fs_error_incomplete;\n"
+        const string incompleteSource = "module harness::fs_error_incomplete;\n"
             + "pub fn display(error: FsError) -> Text effects {} {\n"
             + "    return match error { FsError.NotFound => \"not found\" };\n"
             + "}\n";
@@ -1252,7 +1251,7 @@ internal static class IntegrationTests
 
     private static async Task TestEffectfulLibraryBuild(Harness harness)
     {
-        const string source = "module harness.effectful_library;\n"
+        const string source = "module harness::effectful_library;\n"
             + "pub fn read(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(path); }\n";
         var check = await harness.InvokeAsync("effectful-library-check", "check", source, "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -1345,16 +1344,16 @@ internal static class IntegrationTests
     private static async Task TestLibraryBuild(Harness harness)
     {
         const string source = """
-            module harness.library;
+            module harness::library;
             pub fn square(value: i32) -> i32 effects {} { return value * value; }
             """;
         var result = await harness.InvokeAsync("library-build", "build", source);
         AssertBuiltDll(result, Path.GetDirectoryName(harness.LastSourcePath)!);
 
         const string mainNamedLibrarySource = """
-            module harness.main_named_library;
+            module harness::main_named_library;
             pub union U { A }
-            pub fn main(value: U) -> U effects {} { return value; }
+            pub fn main(value: self::harness::main_named_library::U) -> self::harness::main_named_library::U effects {} { return value; }
             """;
         var mainNamedLibrary = await harness.InvokeAsync("main-named-library-build", "build", mainNamedLibrarySource);
         AssertBuiltDll(mainNamedLibrary, Path.GetDirectoryName(harness.LastSourcePath)!);
@@ -1374,25 +1373,24 @@ internal static class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/catalog/message.lang"] = """
-                    module catalog.message;
+                    module catalog::message;
 
                     pub struct Greeting { text: Text }
-                    pub union Message { Ready(Greeting), Missing }
+                    pub union Message { Ready(self::catalog::message::Greeting), Missing }
 
-                    pub fn greeting() -> Greeting effects {} {
-                        return Greeting { text: "ready" };
+                    pub fn greeting() -> self::catalog::message::Greeting effects {} {
+                        return self::catalog::message::Greeting { text: "ready" };
                     }
                     """,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import catalog.message { Greeting, Message, greeting };
+                    module app::main;
 
                     pub fn main() -> Text effects {} {
-                        let welcome: Greeting = greeting();
-                        let message: Message = Message.Ready(welcome);
+                        let welcome: self::catalog::message::Greeting = self::catalog::message::greeting();
+                        let message: self::catalog::message::Message = self::catalog::message::Message.Ready(welcome);
                         return match message {
-                            Message.Ready(value) => value.text,
-                            Message.Missing => "missing",
+                            self::catalog::message::Message.Ready(value) => value.text,
+                            self::catalog::message::Message.Missing => "missing",
                         };
                     }
                     """
@@ -1421,7 +1419,7 @@ internal static class IntegrationTests
             module first;
             struct Hidden { value: i32 }
             pub fn first_value() -> i32 effects {} {
-                let item: Hidden = Hidden { value: 19 };
+                let item: self::first::Hidden = self::first::Hidden { value: 19 };
                 return item.value;
             }
             """;
@@ -1429,15 +1427,13 @@ internal static class IntegrationTests
             module second;
             struct Hidden { value: i32 }
             pub fn second_value() -> i32 effects {} {
-                let item: Hidden = Hidden { value: 23 };
+                let item: self::second::Hidden = self::second::Hidden { value: 23 };
                 return item.value;
             }
             """;
         const string main = """
-            module app.main;
-            import first { first_value };
-            import second { second_value };
-            pub fn main() -> i32 effects {} { return first_value() + second_value(); }
+            module app::main;
+            pub fn main() -> i32 effects {} { return self::first::first_value() + self::second::second_value(); }
             """;
 
         var result = await harness.InvokePackageAsync(
@@ -1453,7 +1449,89 @@ internal static class IntegrationTests
         AssertRunOutput("42" + Environment.NewLine, result);
     }
 
-    private static async Task TestPackageImportDiagnostics(Harness harness)
+    private static async Task TestQualifiedPrivateTypeAccessPaths(Harness harness)
+    {
+        const string hiddenLibrary = """
+            module library;
+            struct HiddenStruct { value: i32 }
+            union HiddenUnion { Value(i32) }
+            """;
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "private-struct-qualified-type-access",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = hiddenLibrary,
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    fn read_hidden(value: self::library::HiddenStruct) -> i32 effects {} { return value.value; }
+                    pub fn main() -> i32 effects {} { return 0; }
+                    """
+            },
+            "E_ACCESS_PRIVATE",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "private-struct-qualified-construction",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = hiddenLibrary,
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    pub fn main() -> i32 effects {} {
+                        return self::library::HiddenStruct { value: 7 }.value;
+                    }
+                    """
+            },
+            "E_ACCESS_PRIVATE",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "private-union-qualified-constructor",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = hiddenLibrary,
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    pub fn main() -> i32 effects {} {
+                        let value: i32 = self::library::HiddenUnion.Value(7);
+                        return value;
+                    }
+                    """
+            },
+            "E_ACCESS_PRIVATE",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "private-union-qualified-pattern",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/library.lang"] = hiddenLibrary,
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    pub union VisibleUnion { Empty }
+                    pub fn main() -> i32 effects {} {
+                        let choice: self::app::main::VisibleUnion = self::app::main::VisibleUnion.Empty;
+                        return match choice {
+                            self::library::HiddenUnion.Value(value) => value,
+                            _ => 0,
+                        };
+                    }
+                    """
+            },
+            "E_ACCESS_PRIVATE",
+            "src/app/main.lang");
+    }
+
+    private static async Task TestPackageQualifiedReferenceDiagnostics(Harness harness)
     {
         const string library = """
             module library;
@@ -1463,122 +1541,28 @@ internal static class IntegrationTests
 
         await ExpectPackageJsonDiagnosticAsync(
             harness,
-            "package-import-private",
+            "package-qualified-private-reference",
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/library.lang"] = library,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import library { hidden };
-                    pub fn main() -> i32 effects {} { return hidden(); }
+                    module app::main;
+                    pub fn main() -> i32 effects {} { return self::library::hidden(); }
                     """
             },
-            "E_IMPORT_PRIVATE",
+            "E_ACCESS_PRIVATE",
             "src/app/main.lang");
 
         await ExpectPackageJsonDiagnosticAsync(
             harness,
-            "package-import-symbol-missing",
-            CliPackageManifest(),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/library.lang"] = library,
-                ["src/app/main.lang"] = """
-                    module app.main;
-                    import library { absent };
-                    pub fn main() -> i32 effects {} { return absent(); }
-                    """
-            },
-            "E_IMPORT_UNRESOLVED",
-            "src/app/main.lang");
-
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-module-missing",
+            "package-qualified-unknown-module",
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import absent.module { value };
-                    pub fn main() -> i32 effects {} { return value(); }
-                    """
-            },
-            "E_IMPORT_UNRESOLVED",
-            "src/app/main.lang");
-
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-duplicate-symbol",
-            CliPackageManifest(),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/library.lang"] = library,
-                ["src/app/main.lang"] = """
-                    module app.main;
-                    import library { present, present };
-                    pub fn main() -> i32 effects {} { return present(); }
-                    """
-            },
-            "E_IMPORT_CONFLICT",
-            "src/app/main.lang");
-
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-local-conflict",
-            CliPackageManifest(),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/library.lang"] = library,
-                ["src/app/main.lang"] = """
-                    module app.main;
-                    import library { present };
-                    pub fn present() -> i32 effects {} { return 3; }
-                    pub fn main() -> i32 effects {} { return present(); }
-                    """
-            },
-            "E_IMPORT_CONFLICT",
-            "src/app/main.lang");
-
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-cross-module-type-conflict",
-            CliPackageManifest(),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/left/types.lang"] = "module left.types; pub union Shared { Available }",
-                ["src/right/types.lang"] = "module right.types; pub struct Shared { value: i32 }",
-                ["src/app/main.lang"] = """
-                    module app.main;
-                    import left.types { Shared };
-                    import right.types { Shared };
-                    pub fn main() -> i32 effects {} { return 1; }
-                    """
-            },
-            "E_IMPORT_CONFLICT",
-            "src/app/main.lang");
-
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-function-does-not-import-return-type",
-            CliPackageManifest(),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/model/choice.lang"] = """
-                    module model.choice;
-                    pub union Choice { Ready, Waiting }
-                    pub fn create() -> Choice effects {} { return Choice.Ready; }
-                    """,
-                ["src/app/main.lang"] = """
-                    module app.main;
-                    import model.choice { create };
-                    pub fn main() -> i32 effects {} {
-                        return match create() {
-                            Choice.Ready => 1,
-                            Choice.Waiting => 0,
-                        };
-                    }
+                    module app::main;
+                    pub fn main() -> i32 effects {} { return self::absent::value(); }
                     """
             },
             "E_NAME_UNRESOLVED",
@@ -1586,28 +1570,76 @@ internal static class IntegrationTests
 
         await ExpectPackageJsonDiagnosticAsync(
             harness,
-            "package-import-local-union-name-mismatch",
+            "package-qualified-unknown-declaration",
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/model/choice.lang"] = """
-                    module model.choice;
-                    pub union Choice { Ready, Waiting }
-                    pub fn create() -> Choice effects {} { return Choice.Ready; }
-                    """,
+                ["src/library.lang"] = library,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import model.choice { create };
-                    union Choice { Ready, Waiting }
-                    pub fn main() -> i32 effects {} {
-                        return match create() {
-                            Choice.Ready => 1,
-                            Choice.Waiting => 0,
-                        };
-                    }
+                    module app::main;
+                    pub fn main() -> i32 effects {} { return self::library::absent(); }
                     """
             },
-            "E_TYPE_MISMATCH",
+            "E_NAME_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-unqualified-user-function",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    fn helper() -> i32 effects {} { return 7; }
+                    pub fn main() -> i32 effects {} { return helper(); }
+                    """
+            },
+            "E_NAME_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-unqualified-user-type",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    struct Value { value: i32 }
+                    pub fn main(item: Value) -> i32 effects {} { return item.value; }
+                    """
+            },
+            "E_NAME_UNRESOLVED",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-legacy-import-rejected",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    import library { present };
+                    pub fn main() -> i32 effects {} { return 1; }
+                    """
+            },
+            "E_SYNTAX",
+            "src/app/main.lang");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-dotted-module-rejected",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app.main;
+                    pub fn main() -> i32 effects {} { return 1; }
+                    """
+            },
+            "E_SYNTAX",
             "src/app/main.lang");
     }
 
@@ -1617,6 +1649,22 @@ internal static class IntegrationTests
             harness,
             "package-manifest-missing-entry",
             "name = \"manifest-test\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-dotted-entry",
+            CliPackageManifest().Replace("entry_module = \"app::main\"", "entry_module = \"app.main\"", StringComparison.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "package-manifest-reserved-self-alias",
+            CliPackageManifest() + "\n[dependencies]\nself = \"../library\"\n",
             new Dictionary<string, string>(StringComparer.Ordinal),
             "E_MANIFEST",
             "lang.toml");
@@ -1653,7 +1701,7 @@ internal static class IntegrationTests
             CliPackageManifest() + "\n[dependencies]\nconsole = \"../CONSOLE\"\nnullish = \"../NULL\"\n",
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
             });
         var ordinaryDeviceLikeCheck = await harness.InvokePackageDirectoryAsync(
             "package-manifest-device-like-dependency-paths-check",
@@ -1669,7 +1717,7 @@ internal static class IntegrationTests
         await ExpectPackageJsonDiagnosticAsync(
             harness,
             "package-manifest-library-entry",
-            LibraryPackageManifest() + "entry_module = \"app.main\"\n",
+            LibraryPackageManifest() + "entry_module = \"app::main\"\n",
             new Dictionary<string, string>(StringComparer.Ordinal),
             "E_MANIFEST",
             "lang.toml");
@@ -1682,7 +1730,7 @@ internal static class IntegrationTests
             commentManifest,
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
             });
         var commentCheck = await harness.InvokePackageDirectoryAsync(
             "package-manifest-comments-check",
@@ -1701,7 +1749,7 @@ internal static class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = """
-                    module elsewhere.main;
+                    module elsewhere::main;
                     pub fn main() -> i32 effects {} { return 1; }
                     """
             },
@@ -1714,7 +1762,7 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/text.validation.lang"] = "module text.validation; pub fn main() -> i32 effects {} { return 1; }"
+                ["src/text.validation.lang"] = "module text::validation; pub fn main() -> i32 effects {} { return 1; }"
             },
             "E_MODULE_PATH",
             "src/text.validation.lang");
@@ -1740,7 +1788,7 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn helper() -> i32 effects {} { return 1; }",
+                ["src/app/main.lang"] = "module app::main; pub fn helper() -> i32 effects {} { return 1; }",
                 ["src/other.lang"] = "module other; pub fn main() -> i32 effects {} { return 4; }"
             },
             "run",
@@ -1753,7 +1801,7 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main(value: i32) -> i32 effects {} { return value; }"
+                ["src/app/main.lang"] = "module app::main; pub fn main(value: i32) -> i32 effects {} { return value; }"
             },
             "run",
             "E_ENTRYPOINT",
@@ -1766,7 +1814,7 @@ internal static class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = """
-                    module app.main;
+                    module app::main;
                     pub fn main() -> i32 effects {} { return 1; }
                     pub fn main() -> i32 effects {} { return 2; }
                     """
@@ -1783,32 +1831,31 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 17; }",
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 17; }",
                 ["src/other.lang"] = "module other; pub fn main() -> i32 effects {} { return 99; }"
             });
         AssertRunOutput("17" + Environment.NewLine, result);
     }
 
-    private static async Task TestPackageImportedUnionExhaustiveness(Harness harness)
+    private static async Task TestPackageQualifiedUnionExhaustiveness(Harness harness)
     {
         await ExpectPackageJsonDiagnosticAsync(
             harness,
-            "package-imported-union-exhaustiveness",
+            "package-qualified-union-exhaustiveness",
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/shared/choice.lang"] = """
-                    module shared.choice;
+                    module shared::choice;
                     pub union Choice { First, Second, Third }
                     """,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import shared.choice { Choice };
+                    module app::main;
                     pub fn main() -> i32 effects {} {
-                        let choice: Choice = Choice.First;
+                        let choice: self::shared::choice::Choice = self::shared::choice::Choice.First;
                         return match choice {
-                            Choice.First => 1,
-                            Choice.Second => 2,
+                            self::shared::choice::Choice.First => 1,
+                            self::shared::choice::Choice.Second => 2,
                         };
                     }
                     """
@@ -1817,28 +1864,27 @@ internal static class IntegrationTests
             "src/app/main.lang");
     }
 
-    private static async Task TestPackageImportsAreNotTransitive(Harness harness)
+    private static async Task TestPackageQualifiedReferencesCrossModules(Harness harness)
     {
-        await ExpectPackageJsonDiagnosticAsync(
-            harness,
-            "package-import-not-transitive",
+        var packageRoot = await harness.WritePackageAsync(
+            "package-qualified-cross-module",
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/base.lang"] = "module base; pub fn answer() -> i32 effects {} { return 42; }",
                 ["src/middle.lang"] = """
                     module middle;
-                    import base { answer };
-                    pub fn wrapped() -> i32 effects {} { return answer(); }
+                    pub fn wrapped() -> i32 effects {} { return self::base::answer(); }
                     """,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import middle { wrapped };
-                    pub fn main() -> i32 effects {} { return wrapped() + answer(); }
+                    module app::main;
+                    pub fn main() -> i32 effects {} { return self::middle::wrapped() + self::base::answer(); }
                     """
-            },
-            "E_NAME_UNRESOLVED",
-            "src/app/main.lang");
+            });
+        var check = await harness.InvokePackageDirectoryAsync("package-qualified-cross-module-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var run = await harness.InvokePackageDirectoryAsync("package-qualified-cross-module-run", packageRoot, "run");
+        AssertRunOutput("84" + Environment.NewLine, run);
     }
 
     private static async Task TestPackageLibraryBuild(Harness harness)
@@ -1848,7 +1894,7 @@ internal static class IntegrationTests
             LibraryPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/core/math.lang"] = "module core.math; pub fn square(value: i32) -> i32 effects {} { return value * value; }"
+                ["src/core/math.lang"] = "module core::math; pub fn square(value: i32) -> i32 effects {} { return value * value; }"
             });
         var check = await harness.InvokePackageDirectoryAsync("package-library-check", packageRoot, "check");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -1866,27 +1912,26 @@ internal static class IntegrationTests
             + "version = \"0.1.0\"\n"
             + "kind = \"cli\"\n"
             + "source_root = \"src\"\n"
-            + "entry_module = \"app.main\"\n"
+            + "entry_module = \"app::main\"\n"
             + "\n[dependencies]\n"
             + "validation = \"../validation\"\n";
-        const string validationSource = "module text.validation;\n"
+        const string validationSource = "module text::validation;\n"
             + "pub union NormalizeError { Empty }\n"
-            + "pub fn normalize(input: Text) -> Result<Text, NormalizeError> effects {} {\n"
-            + "    if input.length == 0 { return Err(NormalizeError.Empty); }\n"
+            + "pub fn normalize(input: Text) -> Result<Text, self::text::validation::NormalizeError> effects {} {\n"
+            + "    if input.length == 0 { return Err(self::text::validation::NormalizeError.Empty); }\n"
             + "    return Ok(input.trim());\n"
             + "}\n"
             + "pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {\n"
             + "    return match value { Some(item) => Ok(item), None => Err(error) };\n"
             + "}\n";
-        const string consumerSource = "module app.main;\n"
-            + "import validation::text.validation { NormalizeError, normalize, require };\n"
+        const string consumerSource = "module app::main;\n"
             + "pub fn main() -> Text effects {} {\n"
-            + "    let normalized: Result<Text, NormalizeError> = normalize(\" ready \");\n"
+            + "    let normalized: Result<Text, validation::text::validation::NormalizeError> = validation::text::validation::normalize(\" ready \");\n"
             + "    let candidate: Option<Text> = match normalized {\n"
             + "        Ok(value) => Some(value),\n"
             + "        Err(error) => None,\n"
             + "    };\n"
-            + "    let required: Result<Text, NormalizeError> = require(candidate, NormalizeError.Empty);\n"
+            + "    let required: Result<Text, validation::text::validation::NormalizeError> = validation::text::validation::require(candidate, validation::text::validation::NormalizeError.Empty);\n"
             + "    return match required { Ok(value) => value, Err(error) => \"ready\" };\n"
             + "}\n";
         var packageRoot = await harness.WritePackageGraphAsync(
@@ -1981,7 +2026,7 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 42; }"
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 42; }"
             });
         var noDependencies = await harness.InvokePackageDirectoryAsync("dependency-free-lock", dependencyFree, "lock");
         AssertEqual(0, noDependencies.ExitCode, Describe(noDependencies));
@@ -2018,7 +2063,7 @@ internal static class IntegrationTests
                     CliPackageManifest() + "\n[dependencies]\nmissing = \"../missing\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
                     })
             });
         Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(missingManifestRoot)!, "missing"));
@@ -2032,13 +2077,13 @@ internal static class IntegrationTests
                     CliPackageManifest() + "\n[dependencies]\napp = \"../app-dependency\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
                     }),
                 ["app-dependency"] = new PackageFixture(
                     CliPackageManifest(),
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 2; }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 2; }"
                     })
             });
         await AssertPackageDiagnosticAsync(harness, "dependency-cli-child-check", cliDependencyRoot, "E_DEPENDENCY", "lang.toml");
@@ -2052,7 +2097,7 @@ internal static class IntegrationTests
                     CliPackageManifest() + "\n[dependencies]\nleft = \"../left\"\nright = \"../right\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
                     }),
                 ["left"] = new PackageFixture(duplicateManifest,
                     new Dictionary<string, string>(StringComparer.Ordinal)
@@ -2075,28 +2120,28 @@ internal static class IntegrationTests
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"alias-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"alias-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nalpha = \"../alpha\"\nbeta = \"../beta\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main;\n"
-                            + "import alpha::text.validation { alpha_token, read_alpha };\n"
-                            + "import beta::text.validation { beta_token, read_beta };\n"
-                            + "pub fn main() -> i32 effects {} { return read_alpha(alpha_token()) + read_beta(beta_token()); }\n"
+                        ["src/app/main.lang"] = "module app::main;\n"
+                            + "pub fn load_from_alpha(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return alpha::text::validation::load(fs); }\n"
+                            + "pub fn main() -> i32 effects {} { return alpha::text::validation::read_alpha(alpha::text::validation::alpha_token()) + beta::text::validation::read_beta(beta::text::validation::beta_token()); }\n"
                     }),
                 ["alpha"] = new PackageFixture(LibraryPackageManifest("alpha-library"), new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["src/text/validation.lang"] = "module text.validation;\n"
+                    ["src/text/validation.lang"] = "module text::validation;\n"
                         + "pub struct Token { value: i32 }\n"
-                        + "pub fn alpha_token() -> Token effects {} { return Token { value: 20 }; }\n"
-                        + "pub fn read_alpha(value: Token) -> i32 effects {} { return value.value + 1; }\n"
+                        + "pub fn alpha_token() -> self::text::validation::Token effects {} { return self::text::validation::Token { value: 20 }; }\n"
+                        + "pub fn read_alpha(value: self::text::validation::Token) -> i32 effects {} { return value.value + 1; }\n"
+                        + "pub fn load(fs: FsRead) -> Result<Text, FsError> effects { fs.read } { return fs.read_text(\"x\"); }\n"
                 }),
                 ["beta"] = new PackageFixture(LibraryPackageManifest("beta-library"), new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["src/text/validation.lang"] = "module text.validation;\n"
+                    ["src/text/validation.lang"] = "module text::validation;\n"
                         + "pub struct Token { value: i32 }\n"
-                        + "pub fn beta_token() -> Token effects {} { return Token { value: 20 }; }\n"
-                        + "pub fn read_beta(value: Token) -> i32 effects {} { return value.value + 1; }\n"
+                        + "pub fn beta_token() -> self::text::validation::Token effects {} { return self::text::validation::Token { value: 20 }; }\n"
+                        + "pub fn read_beta(value: self::text::validation::Token) -> i32 effects {} { return value.value + 1; }\n"
                 })
             });
         AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-shared-module-lock", sharedModuleRoot, "lock"));
@@ -2108,25 +2153,23 @@ internal static class IntegrationTests
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"identity-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"identity-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nalpha = \"../alpha\"\nbeta = \"../beta\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main;\n"
-                            + "import alpha::text.validation { alpha_token, read_alpha };\n"
-                            + "import beta::text.validation { beta_token };\n"
-                            + "pub fn main() -> i32 effects {} { return read_alpha(beta_token()); }\n"
+                        ["src/app/main.lang"] = "module app::main;\n"
+                            + "pub fn main() -> i32 effects {} { return alpha::text::validation::read_alpha(beta::text::validation::beta_token()); }\n"
                     }),
                 ["alpha"] = new PackageFixture(LibraryPackageManifest("identity-alpha"), new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["src/text/validation.lang"] = "module text.validation; pub struct Token { value: i32 }\n"
-                        + "pub fn alpha_token() -> Token effects {} { return Token { value: 1 }; }\n"
-                        + "pub fn read_alpha(value: Token) -> i32 effects {} { return value.value; }\n"
+                    ["src/text/validation.lang"] = "module text::validation; pub struct Token { value: i32 }\n"
+                        + "pub fn alpha_token() -> self::text::validation::Token effects {} { return self::text::validation::Token { value: 1 }; }\n"
+                        + "pub fn read_alpha(value: self::text::validation::Token) -> i32 effects {} { return value.value; }\n"
                 }),
                 ["beta"] = new PackageFixture(LibraryPackageManifest("identity-beta"), new Dictionary<string, string>(StringComparer.Ordinal)
                 {
-                    ["src/text/validation.lang"] = "module text.validation; pub struct Token { value: i32 }\n"
-                        + "pub fn beta_token() -> Token effects {} { return Token { value: 2 }; }\n"
+                    ["src/text/validation.lang"] = "module text::validation; pub struct Token { value: i32 }\n"
+                        + "pub fn beta_token() -> self::text::validation::Token effects {} { return self::text::validation::Token { value: 2 }; }\n"
                 })
             });
         AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-cross-identity-lock", crossIdentityRoot, "lock"));
@@ -2137,19 +2180,17 @@ internal static class IntegrationTests
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"direct-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"direct-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nmid = \"../mid\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main;\n"
-                            + "import mid::mid.api { wrapped };\n"
-                            + "import foundation::foundation { answer };\n"
-                            + "pub fn main() -> i32 effects {} { return wrapped() + answer(); }\n"
+                        ["src/app/main.lang"] = "module app::main;\n"
+                            + "pub fn main() -> i32 effects {} { return mid::mid::api::wrapped() + foundation::foundation::answer(); }\n"
                     }),
                 ["mid"] = new PackageFixture(LibraryPackageManifest("middle-library") + "\n[dependencies]\nfoundation = \"../foundation\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/mid/api.lang"] = "module mid.api; import foundation::foundation { answer }; pub fn wrapped() -> i32 effects {} { return answer(); }"
+                        ["src/mid/api.lang"] = "module mid::api; pub fn wrapped() -> i32 effects {} { return foundation::foundation::answer(); }"
                     }),
                 ["foundation"] = new PackageFixture(LibraryPackageManifest("foundation-library"),
                     new Dictionary<string, string>(StringComparer.Ordinal)
@@ -2158,60 +2199,59 @@ internal static class IntegrationTests
                     })
             });
         AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-transitive-lock", transitiveRoot, "lock"));
-        await AssertPackageDiagnosticAsync(harness, "dependency-transitive-alias-check", transitiveRoot, "E_IMPORT_UNRESOLVED", "src/app/main.lang");
+        await AssertPackageDiagnosticAsync(harness, "dependency-transitive-alias-check", transitiveRoot, "E_NAME_UNRESOLVED", "src/app/main.lang");
     }
 
-    private static async Task TestDependencyImportDiagnostics(Harness harness)
+    private static async Task TestDependencyReferenceDiagnostics(Harness harness)
     {
         var packageRoot = await harness.WritePackageGraphAsync(
-            "dependency-import-visibility",
+            "dependency-reference-visibility",
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"visibility-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"visibility-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nvalidation = \"../validation\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main;\n"
-                            + "import validation::text.validation { hidden, absent };\n"
-                            + "pub fn main() -> i32 effects {} { return hidden() + absent(); }\n"
+                        ["src/app/main.lang"] = "module app::main;\n"
+                            + "pub fn main() -> i32 effects {} { return validation::text::validation::hidden() + validation::text::validation::absent(); }\n"
                     }),
                 ["validation"] = new PackageFixture(LibraryPackageManifest("visibility-library"),
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/text/validation.lang"] = "module text.validation;\n"
+                        ["src/text/validation.lang"] = "module text::validation;\n"
                             + "pub fn present() -> i32 effects {} { return 1; }\n"
                             + "fn hidden() -> i32 effects {} { return 2; }\n"
                     })
             });
-        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-import-visibility-lock", packageRoot, "lock"));
-        var visibility = await harness.InvokePackageDirectoryAsync("dependency-import-visibility-check", packageRoot, "check", "--json");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-reference-visibility-lock", packageRoot, "lock"));
+        var visibility = await harness.InvokePackageDirectoryAsync("dependency-reference-visibility-check", packageRoot, "check", "--json");
         AssertEqual(1, visibility.ExitCode, Describe(visibility));
         var visibilityDiagnostics = ParseDiagnosticSnapshots(visibility.StandardOutput);
-        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_IMPORT_PRIVATE"),
+        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_ACCESS_PRIVATE"),
             $"A private declaration in a path dependency must be rejected. {visibility.StandardOutput}");
-        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_IMPORT_UNRESOLVED"),
+        AssertTrue(visibilityDiagnostics.Any(diagnostic => diagnostic.Code == "E_NAME_UNRESOLVED"),
             $"A missing declaration in a path dependency must be rejected. {visibility.StandardOutput}");
 
         var malformedAliasRoot = await harness.WritePackageGraphAsync(
-            "dependency-malformed-alias-import",
+            "dependency-malformed-qualified-reference",
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"malformed-import-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"malformed-reference-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nvalidation = \"../validation\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; import 42::text.validation { present }; pub fn main() -> i32 effects {} { return present(); }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 42::text::validation::present(); }"
                     }),
-                ["validation"] = new PackageFixture(LibraryPackageManifest("malformed-import-library"),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("malformed-reference-library"),
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/text/validation.lang"] = "module text.validation; pub fn present() -> i32 effects {} { return 1; }"
+                        ["src/text/validation.lang"] = "module text::validation; pub fn present() -> i32 effects {} { return 1; }"
                     })
             });
-        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-malformed-alias-lock", malformedAliasRoot, "lock"));
-        await AssertPackageDiagnosticAsync(harness, "dependency-malformed-alias-check", malformedAliasRoot, "E_SYNTAX", "src/app/main.lang");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("dependency-malformed-reference-lock", malformedAliasRoot, "lock"));
+        await AssertPackageDiagnosticAsync(harness, "dependency-malformed-reference-check", malformedAliasRoot, "E_SYNTAX", "src/app/main.lang");
     }
 
     private static async Task TestDependencyFilesystemSafety(Harness harness)
@@ -2221,11 +2261,11 @@ internal static class IntegrationTests
             new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
             {
                 ["root"] = new PackageFixture(
-                    "name = \"source-root-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app.main\"\n"
+                    "name = \"source-root-consumer\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                     + "\n[dependencies]\nvalidation = \"../validation\"\n",
                     new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 1; }"
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
                     }),
                 ["validation"] = new PackageFixture(
                     "name = \"escaped-source-root\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"../outside\"\n",
@@ -2242,7 +2282,7 @@ internal static class IntegrationTests
         Directory.CreateDirectory(externalSourceDirectory);
         await File.WriteAllTextAsync(
             Path.Combine(externalSourceDirectory, "main.lang"),
-            "module app.main; pub fn main() -> i32 effects {} { return 1; }");
+            "module app::main; pub fn main() -> i32 effects {} { return 1; }");
         try
         {
             Directory.CreateSymbolicLink(sourceDirectoryLink, externalSourceDirectory);
@@ -2258,7 +2298,7 @@ internal static class IntegrationTests
 
     private static async Task TestPackageAotCommandValidation(Harness harness)
     {
-        const string main = "module app.main; pub fn main() -> i32 effects {} { return 41; }";
+        const string main = "module app::main; pub fn main() -> i32 effects {} { return 41; }";
         var files = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["src/app/main.lang"] = main
@@ -2298,8 +2338,8 @@ internal static class IntegrationTests
         var source = await File.ReadAllTextAsync(Path.Combine(packageRoot, "src", "app", "main.lang"));
         AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
             "The maintained CLI package must resolve validation from its sibling package path.");
-        AssertTrue(source.Contains("import validation::text.validation { NormalizeError, normalize, require };", StringComparison.Ordinal),
-            "The maintained CLI must import the validation and inferred generic APIs through its dependency alias.");
+        AssertTrue(source.Contains("validation::text::validation::require", StringComparison.Ordinal),
+            "The maintained CLI must use qualified validation and inferred generic APIs through its dependency alias.");
         AssertTrue(!File.Exists(Path.Combine(packageRoot, "src", "text", "validation.lang")),
             "The consumer must not contain a copied validation source module.");
         AssertTrue(File.Exists(Path.Combine(packageRoot, "..", "text-validation", "src", "text", "validation.lang")),
@@ -2341,22 +2381,20 @@ internal static class IntegrationTests
         var cases = new (string Name, string MainSource, string ExpectedOutput)[]
         {
             ("text-validation-empty", """
-                module app.main;
-                import text.validation { NormalizeError, normalize };
+                module app::main;
                 pub fn main() -> Text effects {} {
-                    return match normalize("") {
+                    return match self::text::validation::normalize("") {
                         Ok(value) => "unexpected success",
                         Err(error) => match error {
-                            NormalizeError.Empty => "empty",
+                            self::text::validation::NormalizeError.Empty => "empty",
                         },
                     };
                 }
                 """, "empty" + Environment.NewLine),
             ("text-validation-nonempty", $$"""
-                module app.main;
-                import text.validation { NormalizeError, normalize };
+                module app::main;
                 pub fn main() -> Text effects {} {
-                    return match normalize("{{unicodeInput}}") {
+                    return match self::text::validation::normalize("{{unicodeInput}}") {
                         Ok(value) => value,
                         Err(error) => "unexpected error",
                     };
@@ -2391,18 +2429,16 @@ internal static class IntegrationTests
             {
                 ["src/text/validation.lang"] = librarySource,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import text.validation { NormalizeError, require };
-
+                    module app::main;
                     pub fn main() -> i32 effects {} {
                         let text_option: Option<Text> = Some("hello 😀");
-                        let text_result: Result<Text, NormalizeError> = require(text_option, NormalizeError.Empty);
+                        let text_result: Result<Text, self::text::validation::NormalizeError> = self::text::validation::require(text_option, self::text::validation::NormalizeError.Empty);
                         let number_option: Option<i32> = Some(35);
-                        let number_result: Result<i32, Text> = require(number_option, "missing");
+                        let number_result: Result<i32, Text> = self::text::validation::require(number_option, "missing");
                         let text_length: i32 = match text_result {
                             Ok(value) => value.length,
                             Err(error) => match error {
-                                NormalizeError.Empty => 0,
+                                self::text::validation::NormalizeError.Empty => 0,
                             },
                         };
                         return match number_result {
@@ -2429,13 +2465,13 @@ internal static class IntegrationTests
             "text-validation-language-tests", packageRoot, "test");
         var expected = string.Join(Environment.NewLine,
         [
-            "PASS text.validation :: normalize empty input returns Empty",
-            "PASS text.validation :: normalize trims nonempty input",
-            "PASS text.validation :: Text trim removes surrounding Unicode whitespace",
-            "PASS text.validation :: require preserves a present Option<Text>",
-            "PASS text.validation :: require maps a missing Option<Text> to its error",
-            "PASS text.validation :: require preserves a present Option<i32>",
-            "PASS text.validation :: require maps a missing Option<i32> to its error",
+            "PASS text::validation :: normalize empty input returns Empty",
+            "PASS text::validation :: normalize trims nonempty input",
+            "PASS text::validation :: Text trim removes surrounding Unicode whitespace",
+            "PASS text::validation :: require preserves a present Option<Text>",
+            "PASS text::validation :: require maps a missing Option<Text> to its error",
+            "PASS text::validation :: require preserves a present Option<i32>",
+            "PASS text::validation :: require maps a missing Option<i32> to its error",
             "7 passed, 0 failed"
         ]) + Environment.NewLine;
 
@@ -2447,7 +2483,7 @@ internal static class IntegrationTests
     private static async Task TestManagedLanguageTestOutcomes(Harness harness)
     {
         var failureSource = """
-            module app.tests;
+            module app::tests;
             test "first assertion fails" {
                 assert false;
             }
@@ -2468,8 +2504,8 @@ internal static class IntegrationTests
         var failureDisplayPath = failureSourcePath.Replace("\\", "\\\\", StringComparison.Ordinal);
         var expectedFailure = string.Join(Environment.NewLine,
         [
-            $"FAIL app.tests :: first assertion fails ({failureDisplayPath}:2:1)",
-            "PASS app.tests :: later test runs",
+            $"FAIL app::tests :: first assertion fails ({failureDisplayPath}:2:1)",
+            "PASS app::tests :: later test runs",
             "1 passed, 1 failed"
         ]) + Environment.NewLine;
         AssertEqual(1, failure.ExitCode, Describe(failure));
@@ -2477,7 +2513,7 @@ internal static class IntegrationTests
         AssertEqual(string.Empty, failure.StandardError, Describe(failure));
 
         var escapedNameSource = """
-            module app.escaped;
+            module app::escaped;
             test "attempt\nPASS injected\n0 passed, 99 failed\t\\tail" {
                 assert false;
             }
@@ -2498,8 +2534,8 @@ internal static class IntegrationTests
         var escapedNameDisplayPath = escapedNameSourcePath.Replace("\\", "\\\\", StringComparison.Ordinal);
         var expectedEscapedName = string.Join(Environment.NewLine,
         [
-            $"FAIL app.escaped :: attempt\\nPASS injected\\n0 passed, 99 failed\\t\\\\tail ({escapedNameDisplayPath}:2:1)",
-            "PASS app.escaped :: after escaped name",
+            $"FAIL app::escaped :: attempt\\nPASS injected\\n0 passed, 99 failed\\t\\\\tail ({escapedNameDisplayPath}:2:1)",
+            "PASS app::escaped :: after escaped name",
             "1 passed, 1 failed"
         ]) + Environment.NewLine;
         AssertEqual(1, escapedName.ExitCode, Describe(escapedName));
@@ -2513,7 +2549,7 @@ internal static class IntegrationTests
             LibraryPackageManifest("language-tests-empty"),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/empty/suite.lang"] = "module empty.suite;\n"
+                ["src/empty/suite.lang"] = "module empty::suite;\n"
             });
         var empty = await harness.InvokePackageDirectoryAsync(
             "language-tests-empty-run", emptyPackage, "test");
@@ -2526,19 +2562,19 @@ internal static class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/suite/alpha.lang"] = """
-                    module suite.alpha;
+                    module suite::alpha;
                     struct Names { test: bool, assert: bool }
                     fn test(assert: bool) -> bool effects {} {
-                        let names: Names = Names { test: assert, assert: true };
+                        let names: self::suite::alpha::Names = self::suite::alpha::Names { test: assert, assert: true };
                         return names.test == names.assert;
                     }
                     test "same name" {
-                        let result: bool = test(false);
+                        let result: bool = self::suite::alpha::test(false);
                         assert result == false;
                     }
                     """,
                 ["src/suite/beta.lang"] = """
-                    module suite.beta;
+                    module suite::beta;
                     test "same name" {
                         assert true;
                     }
@@ -2548,8 +2584,8 @@ internal static class IntegrationTests
             "language-tests-multiple-modules-run", multiModulePackage, "test");
         var expectedMultiModule = string.Join(Environment.NewLine,
         [
-            "PASS suite.alpha :: same name",
-            "PASS suite.beta :: same name",
+            "PASS suite::alpha :: same name",
+            "PASS suite::beta :: same name",
             "2 passed, 0 failed"
         ]) + Environment.NewLine;
         AssertEqual(0, multiModule.ExitCode, Describe(multiModule));
@@ -2559,7 +2595,7 @@ internal static class IntegrationTests
     private static async Task TestManagedLanguageTestPackageRules(Harness harness)
     {
         const string invalidAssertions = """
-            module validation.invalid_tests;
+            module validation::invalid_tests;
             test "duplicate assertion name" {
                 assert 1;
             }
@@ -2594,11 +2630,11 @@ internal static class IntegrationTests
             child = "../child"
             """;
         const string rootTest = """
-            module root.tests;
+            module root::tests;
             test "root test only" { assert true; }
             """;
         const string dependencyTest = """
-            module child.tests;
+            module child::tests;
             test "dependency test is typechecked but not run" { assert false; }
             """;
         var rootPackage = await harness.WritePackageGraphAsync(
@@ -2626,12 +2662,12 @@ internal static class IntegrationTests
         var rootOnly = await harness.InvokePackageDirectoryAsync(
             "language-tests-root-only", rootPackage, "test");
         AssertEqual(0, rootOnly.ExitCode, Describe(rootOnly));
-        AssertEqual("PASS root.tests :: root test only" + Environment.NewLine + "1 passed, 0 failed" + Environment.NewLine,
+        AssertEqual("PASS root::tests :: root test only" + Environment.NewLine + "1 passed, 0 failed" + Environment.NewLine,
             rootOnly.StandardOutput, Describe(rootOnly));
 
         var dependencySourcePath = Path.Combine(Path.GetDirectoryName(rootPackage)!, "child", "src", "child", "tests.lang");
         await File.WriteAllTextAsync(dependencySourcePath, """
-            module child.tests;
+            module child::tests;
             test "dependency assertion must typecheck" { assert 1; }
             """);
         var staleLock = await harness.InvokePackageDirectoryAsync(
@@ -2674,14 +2710,12 @@ internal static class IntegrationTests
             {
                 ["src/text/validation.lang"] = librarySource,
                 ["src/app/main.lang"] = """
-                    module app.main;
-                    import text.validation { require };
-
+                    module app::main;
                     pub fn from_some() -> Result<Text, Text> effects {} {
-                        return require(Some("present"), "fallback");
+                        return self::text::validation::require(Some("present"), "fallback");
                     }
                     pub fn from_none() -> Result<Text, Text> effects {} {
-                        return require(None, "fallback");
+                        return self::text::validation::require(None, "fallback");
                     }
                     pub fn main() -> Text effects {} { return "unused"; }
                     """
@@ -2702,7 +2736,7 @@ internal static class IntegrationTests
             "The inference diagnostic should identify both Some and None constructors.");
 
         const string genericMain = """
-            module harness.generic_main;
+            module harness::generic_main;
             pub fn main<T>(value: T) -> i32 effects {} { return 7; }
             """;
         var genericMainBuild = await harness.InvokeAsync("generic-main-library-build", "build", genericMain);
@@ -2793,7 +2827,7 @@ internal static class IntegrationTests
         AssertTrue(found, $"Expected {expectedCode} in {expectedPath}. {result.StandardOutput}");
     }
 
-    private static string CliPackageManifest(string entryModule = "app.main") =>
+    private static string CliPackageManifest(string entryModule = "app::main") =>
         "name = \"harness-package\"\n" +
         "version = \"0.1.0\"\n" +
         "kind = \"cli\"\n" +
@@ -2857,7 +2891,7 @@ internal static class IntegrationTests
 
     private static async Task TestAotCommandValidation(Harness harness)
     {
-        const string source = "module harness.aot_cli;\n"
+        const string source = "module harness::aot_cli;\n"
             + "pub fn main() -> i32 effects {} { return 41; }\n";
 
         var missingRid = await harness.InvokeAsync("aot-missing-rid", "build", source, "--aot");
@@ -2893,7 +2927,7 @@ internal static class IntegrationTests
 
     private static async Task TestAotLibraryRejected(Harness harness)
     {
-        const string source = "module harness.aot_library;\n"
+        const string source = "module harness::aot_library;\n"
             + "pub fn square(value: i32) -> i32 effects {} { return value * value; }\n";
         var result = await harness.InvokeAsync(
             "aot-library", "build", source, "--aot", "--rid", CurrentHostAotRid());
@@ -2909,7 +2943,7 @@ internal static class IntegrationTests
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new IntegrationTestSkippedException("The NativeAOT file smoke test targets x64 hosts only.");
 
-        const string source = "module harness.aot_smoke;\n"
+        const string source = "module harness::aot_smoke;\n"
             + "pub fn main() -> i32 effects {} { return 41; }\n";
         var result = await harness.InvokeWithTimeoutAsync(
             "aot-smoke", "build", source, AotPublishTimeout,
@@ -2951,7 +2985,7 @@ internal static class IntegrationTests
             CliPackageManifest(),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["src/app/main.lang"] = "module app.main; pub fn main() -> i32 effects {} { return 41; }"
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 41; }"
             });
         var result = await harness.InvokePackageDirectoryWithTimeoutAsync(
             "package-aot-smoke",
@@ -3079,7 +3113,7 @@ internal static class IntegrationTests
     private static async Task TestInvalidEntrypoint(Harness harness)
     {
         const string source = """
-            module harness.invalid_main;
+            module harness::invalid_main;
             pub fn main(value: i32) -> i32 effects {} { return value; }
             """;
         var result = await harness.InvokeAsync("invalid-main", "run", source);
@@ -3096,7 +3130,7 @@ internal static class IntegrationTests
     private static async Task TestDotnetLaunchFailure(Harness harness)
     {
         const string source = """
-            module harness.process_failure;
+            module harness::process_failure;
             pub fn main() -> i32 effects {} { return 7; }
             """;
         var badHost = Path.Combine(harness.TemporaryRoot, "missing-dotnet-host.exe");
@@ -3111,7 +3145,7 @@ internal static class IntegrationTests
     }
     private static async Task TestCheckedOverflow(Harness harness)
     {
-        const string source = "module harness.overflow;\n"
+        const string source = "module harness::overflow;\n"
             + "pub fn main() -> i32 effects {} { return 2147483647 + 1; }\n";
 
         var check = await harness.InvokeAsync("checked-overflow-check", "check", source);
@@ -3126,9 +3160,9 @@ internal static class IntegrationTests
 
     private static async Task TestParallelRuns(Harness harness)
     {
-        const string firstSource = "module harness.parallel_a;\n"
+        const string firstSource = "module harness::parallel_a;\n"
             + "pub fn main() -> i32 effects {} { return 17; }\n";
-        const string secondSource = "module harness.parallel_b;\n"
+        const string secondSource = "module harness::parallel_b;\n"
             + "pub fn main() -> i32 effects {} { return 29; }\n";
 
         var sharedSourceDirectory = harness.CreateSourceDirectory("parallel-runs");

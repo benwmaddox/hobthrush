@@ -1,6 +1,6 @@
-module fixture.struct_direct_recursion;
+module fixture::struct_direct_recursion;
 
-struct Node { next: Node }
+struct Node { next: self::fixture::struct_direct_recursion::Node }
 
 pub fn value() -> i32 effects {} {
     return 0;
