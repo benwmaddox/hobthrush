@@ -1,0 +1,5 @@
+module fixture.test_if;
+test "if is disallowed" {
+    if true { assert true; }
+    assert true;
+}

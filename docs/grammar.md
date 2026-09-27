@@ -7,7 +7,7 @@ module          = "module", module_path, ";", { import_decl }, { declaration } ;
 module_path     = lexical_identifier, { ".", lexical_identifier } ;
 import_decl     = "import", [ bare_identifier, "::" ], module_path, "{", import_symbols, "}", ";" ;
 import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
-declaration     = [ "pub" ], ( function | union | struct ) ;
+declaration     = [ "pub" ], ( function | union | struct ) | test_declaration ;
 
 function        = "fn", bare_identifier, [ "<", type_parameters, ">" ], "(", [ parameters ], ")",
                   "->", type, "effects", "{", [ effect, { ",", effect }, [ "," ] ], "}", block ;
@@ -32,6 +32,9 @@ positional_fields = type, { ",", type }, [ "," ] ;
 struct          = "struct", bare_identifier, "{", [ struct_fields ], "}" ;
 struct_fields   = struct_field, { ",", struct_field }, [ "," ] ;
 struct_field    = member_identifier, ":", type ;
+
+test_declaration = "test", text, "{", { test_let }, "assert", expression, ";", "}" ;
+test_let         = "let", bare_identifier, ":", type, "=", expression, ";" ;
 
 block           = "{", { statement }, "}" ;
 statement       = "let", bare_identifier, ":", type, "=", expression, ";"
@@ -81,8 +84,11 @@ Package commands use a package directory rather than a source-file path:
 lang check PACKAGE_DIRECTORY [--json]
 lang build PACKAGE_DIRECTORY
 lang run PACKAGE_DIRECTORY
+lang test FILE_OR_PACKAGE
 lang lock PACKAGE_DIRECTORY
 ```
+
+Bare `lang test` with no target retains the compiler fixture mode. With a source file or package directory, it checks the program and runs its language-level tests.
 
 The root `lang.toml` has required keys `name`, `version`, `kind`, and `source_root`, plus `entry_module` for `kind = "cli"`. The optional trailing `[dependencies]` table maps package aliases to relative package paths, one per line. Its values are plain double-quoted strings, paths use forward slashes, and aliases are language identifiers unique without regard to case. The table must be the final manifest section. For example:
 
@@ -103,7 +109,7 @@ A union variant uses either named fields such as `TooLong(max: i32)` or position
 
 There are no explicit type arguments, generic structs or unions, traits, or constructor-driven generic inference. `Some`, `None`, `Ok`, and `Err` still need an expected built-in type. A direct call such as `require(Some("present"), "fallback")` cannot pass the unresolved `Option<T>` expectation into `Some`; it reports `E_TYPE_MISMATCH` with a constructor-specific message that an expected `Option<T>` type is required. Bind the constructor to an annotated local first, then pass that local to the generic function. `Option<T>` and `Result<T, E>` remain compiler-provided generic types; their type arguments must be supported types.
 
-Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, `await`, and `with`; those seven retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, and `pub`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions, so an unsupported top-level `route` declaration remains unsupported.
+Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, `await`, and `with`; those seven retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, `pub`, `test`, and `assert`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions, so an unsupported top-level `route` declaration remains unsupported.
 
 Member positions are unambiguous and accept any lexical identifier: struct field declarations and initializers, union variant and named-payload labels, and the name after `.` in field access, qualified types, variant construction, and qualified patterns. Module path segments also accept any lexical identifier. A leading/root type name, constructor name, declaration name, function name, parameter, local binding, or unqualified pattern variant uses a bare identifier. `null` remains invalid as a value; `true` and `false` remain boolean literals.
 
@@ -126,6 +132,8 @@ A struct construction at the top level of a match scrutinee is ambiguous with th
 The implemented types are `i32`, `bool`, `Text`, immutable non-generic structs, declared non-generic unions, `Option<T>`, and `Result<T, E>`. Integer `+`, `-`, and `*` use checked `i32` arithmetic. Text literals support the escapes shown above. `text.length` returns an `i32` count of Unicode scalar values; a supplementary character such as 😀 counts once. `text.trim()` removes leading and trailing Unicode whitespace using the pinned runtime's string-trim behavior.
 
 Function bodies support `if condition { ... }` with an optional `else { ... }`. Conditions must have type `bool`. Each branch has its own local scope, and a branch local does not escape. The checker accepts a function only when every path returns a value; an `if` counts as a guaranteed return only when it has an `else` and both branches return. A statement after a guaranteed return reports `E_UNREACHABLE`. A function that may fall through retains `E_TYPE_MISMATCH` with `Function must end with a return value`.
+
+Language tests use `test "name" { ... }` at module scope. A test body may contain typed `let` setup statements followed by exactly one final `assert` whose expression has type `bool`; `return` and `if` are not allowed. Tests are pure and have an empty effect bound, so direct or transitive effectful calls are rejected. Duplicate names are rejected within one module, while different modules may use the same test name. Normal `check` and `build` commands typecheck tests but do not execute them. `lang test PACKAGE_DIRECTORY` runs tests in the selected package; dependency tests are typechecked but only root-package tests run. Output is managed PASS/FAIL text with each test's module and source location and a final count. The runner has no JSON result format, property-testing framework, or AOT mode.
 
 Comparison operators are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They are left-associative, and bind after arithmetic: `*`, then `+`/`-`, then ordering comparisons, then equality comparisons. Equality supports matching `i32`, `bool`, or `Text` operands; ordering supports only `i32`. A comparison returns `bool`. There are no logical operators in this slice.
 

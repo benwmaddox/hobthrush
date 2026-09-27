@@ -1,0 +1,3 @@
+module fixture.test_duplicate;
+test "duplicate" { assert true; }
+test "duplicate" { assert true; }

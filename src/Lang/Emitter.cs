@@ -19,12 +19,34 @@ internal static class Emitter
         return emitter.Emit(entry, executable);
     }
 
-    private sealed class SourceEmitter(CheckedProgram program)
+    public static string EmitTests(CheckedProgram program, string? rootPackageId = null)
+    {
+        var tests = program.Tests
+            .Where(test => rootPackageId is null || test.PackageId == rootPackageId)
+            .ToArray();
+        var testFunctionIds = tests.Select(test => test.FunctionId).ToHashSet();
+        var emitter = new SourceEmitter(program, testFunctionIds);
+        return emitter.Emit(entry: null, executable: false, tests: tests);
+    }
+
+    private sealed class SourceEmitter(
+        CheckedProgram program,
+        IReadOnlySet<int>? includedTestFunctionIds = null)
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
+        private readonly HashSet<int> _testFunctionIds = program.Tests
+            .Select(test => test.FunctionId)
+            .ToHashSet();
+        private readonly IReadOnlySet<int> _includedTestFunctionIds = includedTestFunctionIds ?? new HashSet<int>();
 
-        public string Emit(CheckedFunction? entry, bool executable)
+        private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
+            !_testFunctionIds.Contains(function.Id) || _includedTestFunctionIds.Contains(function.Id));
+
+        public string Emit(
+            CheckedFunction? entry,
+            bool executable,
+            IReadOnlyList<CheckedTest>? tests = null)
         {
             _source.AppendLine("using System;");
             _source.AppendLine("using System.Globalization;");
@@ -47,11 +69,14 @@ internal static class Emitter
             if (NeedsFsErrorType) EmitFsErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
-            foreach (var function in program.Functions) EmitFunction(function);
+            foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             EmitArithmeticHelpers();
-            if (executable) EmitEntryPoint(entry!);
+            if (tests is not null)
+                EmitTestEntryPoint(tests);
+            else if (executable)
+                EmitEntryPoint(entry!);
 
             _source.AppendLine("}");
             return _source.ToString().Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -440,6 +465,96 @@ internal static class Emitter
             _source.AppendLine("    }");
         }
 
+        private void EmitTestEntryPoint(IReadOnlyList<CheckedTest> tests)
+        {
+            _source.AppendLine("    public static int Main()");
+            _source.AppendLine("    {");
+            _source.AppendLine("        Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+            _source.AppendLine("        var passed = 0;");
+            _source.AppendLine("        var failed = 0;");
+
+            foreach (var test in tests)
+            {
+                var functionName = "Function_" + test.FunctionId.ToString(CultureInfo.InvariantCulture);
+                var module = EscapeDisplayField(test.Module);
+                var name = EscapeDisplayField(test.Name);
+                var file = EscapeDisplayField(test.At.File);
+                var passLabel = JsonSerializer.Serialize("PASS " + module + " :: " + name);
+                var failureLabel = JsonSerializer.Serialize(
+                    "FAIL " + module + " :: " + name + " (" +
+                    file + ":" +
+                    test.At.Line.ToString(CultureInfo.InvariantCulture) + ":" +
+                    test.At.Column.ToString(CultureInfo.InvariantCulture) + ")");
+
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.Append("            if (").Append(functionName).AppendLine("())");
+                _source.AppendLine("            {");
+                _source.AppendLine("                passed++;");
+                _source.Append("                Console.WriteLine(").Append(passLabel).AppendLine(");");
+                _source.AppendLine("            }");
+                _source.AppendLine("            else");
+                _source.AppendLine("            {");
+                _source.AppendLine("                failed++;");
+                _source.Append("                Console.WriteLine(").Append(failureLabel).AppendLine(");");
+                _source.AppendLine("            }");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (Exception)");
+                _source.AppendLine("        {");
+                _source.AppendLine("            failed++;");
+                _source.Append("            Console.WriteLine(").Append(failureLabel)
+                    .AppendLine(" + \" Runtime fault\");");
+                _source.AppendLine("        }");
+            }
+
+            _source.AppendLine(
+                "        Console.WriteLine(passed.ToString(CultureInfo.InvariantCulture) + " +
+                "\" passed, \" + failed.ToString(CultureInfo.InvariantCulture) + \" failed\");");
+            _source.AppendLine("        return failed == 0 ? 0 : 1;");
+            _source.AppendLine("    }");
+        }
+
+        private static string EscapeDisplayField(string value)
+        {
+            var escaped = new StringBuilder(value.Length);
+            foreach (var character in value)
+            {
+                switch (character)
+                {
+                    case '\\':
+                        escaped.Append("\\\\");
+                        break;
+                    case '\n':
+                        escaped.Append("\\n");
+                        break;
+                    case '\r':
+                        escaped.Append("\\r");
+                        break;
+                    case '\t':
+                        escaped.Append("\\t");
+                        break;
+                    case '\0':
+                        escaped.Append("\\0");
+                        break;
+                    default:
+                        var category = char.GetUnicodeCategory(character);
+                        if (char.IsControl(character) ||
+                            category is UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)
+                        {
+                            escaped.Append("\\u")
+                                .Append(((int)character).ToString("X4", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            escaped.Append(character);
+                        }
+                        break;
+                }
+            }
+
+            return escaped.ToString();
+        }
+
         private string EmitType(LangType type) => type.Kind switch
         {
             LangTypeKind.I32 => "int",
@@ -472,7 +587,7 @@ internal static class Emitter
 
         private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
 
-        private bool UsesFsReadText => program.Functions.Any(function =>
+        private bool UsesFsReadText => EmittedFunctions.Any(function =>
             function.InferredEffects.Contains("fs.read", StringComparer.Ordinal) ||
             EnumerateStatements(function.Body)
                 .SelectMany(StatementExpressions)
@@ -480,7 +595,7 @@ internal static class Emitter
                 .OfType<TypedIntrinsicCallExpr>()
                 .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText));
 
-        private bool UsesTextLength => program.Functions
+        private bool UsesTextLength => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))
             .SelectMany(StatementExpressions)
             .SelectMany(EnumerateExpressions)
@@ -500,7 +615,7 @@ internal static class Emitter
             foreach (var field in structure.Fields)
                 yield return field.Type;
 
-            foreach (var function in program.Functions)
+            foreach (var function in EmittedFunctions)
             {
                 foreach (var parameter in function.Parameters)
                     yield return parameter.Type;

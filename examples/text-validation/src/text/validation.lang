@@ -16,3 +16,64 @@ pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
         None => Err(error),
     };
 }
+
+test "normalize empty input returns Empty" {
+    let result: Result<Text, NormalizeError> = normalize("");
+    assert match result {
+        Ok(value) => false,
+        Err(error) => match error {
+            NormalizeError.Empty => true,
+        },
+    };
+}
+
+test "normalize trims nonempty input" {
+    let result: Result<Text, NormalizeError> = normalize("  hello  ");
+    assert match result {
+        Ok(value) => value == "hello",
+        Err(error) => false,
+    };
+}
+
+test "Text trim removes surrounding Unicode whitespace" {
+    let trimmed: Text = "  \tinside\n ".trim();
+    assert trimmed == "inside";
+}
+
+test "require preserves a present Option<Text>" {
+    let value: Option<Text> = Some("present");
+    let result: Result<Text, NormalizeError> = require(value, NormalizeError.Empty);
+    assert match result {
+        Ok(text) => text == "present",
+        Err(error) => false,
+    };
+}
+
+test "require maps a missing Option<Text> to its error" {
+    let value: Option<Text> = None;
+    let result: Result<Text, NormalizeError> = require(value, NormalizeError.Empty);
+    assert match result {
+        Ok(text) => false,
+        Err(error) => match error {
+            NormalizeError.Empty => true,
+        },
+    };
+}
+
+test "require preserves a present Option<i32>" {
+    let value: Option<i32> = Some(42);
+    let result: Result<i32, Text> = require(value, "missing");
+    assert match result {
+        Ok(number) => number == 42,
+        Err(message) => false,
+    };
+}
+
+test "require maps a missing Option<i32> to its error" {
+    let value: Option<i32> = None;
+    let result: Result<i32, Text> = require(value, "missing");
+    assert match result {
+        Ok(number) => false,
+        Err(message) => message == "missing",
+    };
+}

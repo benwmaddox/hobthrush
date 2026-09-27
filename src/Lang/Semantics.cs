@@ -115,6 +115,7 @@ internal sealed record CheckedUnion(int Id, string Name, bool Public, LangType T
 internal sealed record CheckedStructField(string Name, LangType Type, int Index, Token At);
 internal sealed record CheckedStruct(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
+internal sealed record CheckedTest(string Name, string PackageId, string Module, int FunctionId, Token At);
 
 internal abstract record TypedExpr(LangType Type, Token At);
 internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(LangType.I32, At);
@@ -254,7 +255,8 @@ internal sealed class CheckedProgram
         int? entryFunctionId,
         IEnumerable<CheckedFunction> functions,
         IEnumerable<CheckedUnion> unions,
-        IEnumerable<CheckedStruct> structs)
+        IEnumerable<CheckedStruct> structs,
+        IEnumerable<CheckedTest>? tests = null)
     {
         Modules = Array.AsReadOnly(modules.ToArray());
         EntryModule = entryModule;
@@ -262,6 +264,7 @@ internal sealed class CheckedProgram
         Functions = Array.AsReadOnly(functions.ToArray());
         Unions = Array.AsReadOnly(unions.ToArray());
         Structs = Array.AsReadOnly(structs.ToArray());
+        Tests = Array.AsReadOnly((tests ?? []).ToArray());
     }
 
     // Retained for single-file API compatibility. For a package, this is the selected entry module.
@@ -272,6 +275,7 @@ internal sealed class CheckedProgram
     public IReadOnlyList<CheckedFunction> Functions { get; }
     public IReadOnlyList<CheckedUnion> Unions { get; }
     public IReadOnlyList<CheckedStruct> Structs { get; }
+    public IReadOnlyList<CheckedTest> Tests { get; }
 }
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
@@ -354,6 +358,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<StructSymbol> _structs = [];
     private readonly Dictionary<(ModuleIdentity Module, string Name), FunctionSymbol> _functionsByModuleAndName = new();
     private readonly List<FunctionSymbol> _functions = [];
+    private readonly List<CheckedTest> _tests = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
@@ -396,7 +401,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var module in orderedModules) PopulateUnionVariants(module);
         foreach (var module in orderedModules) PopulateStructFields(module);
         ValidateStructRecursion();
-        foreach (var module in orderedModules) RegisterFunctionSignatures(module);
+        foreach (var module in orderedModules)
+        {
+            RegisterFunctionSignatures(module);
+            RegisterTests(module);
+        }
 
         ValidatePublicSignatures();
 
@@ -449,7 +458,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             entry?.Id,
             functions,
             unions,
-            structs), diagnostics);
+            structs,
+            _tests), diagnostics);
     }
 
     private static bool IsRunnableEntry(FunctionSymbol function) =>
@@ -812,6 +822,46 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
     }
 
+    private void RegisterTests(ModuleSymbols module)
+    {
+        _currentModule = module.Identity;
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var test in module.Program.Tests)
+        {
+            if (!names.Add(test.Name))
+            {
+                Add("E_NAME_DUPLICATE", $"Test '{test.Name}' is already declared in this module", test.NameAt);
+                continue;
+            }
+
+            var id = _functions.Count;
+            var internalName = $"$test_{id}";
+            var body = test.Setup
+                .Cast<Stmt>()
+                .Append(new ReturnStmt(test.AssertAt, test.Assertion))
+                .ToArray();
+            var declaration = new FunctionDecl(
+                internalName,
+                [],
+                Public: false,
+                Parameters: [],
+                new TypeSyntax("bool", [], test.AssertAt),
+                Effects: [],
+                body,
+                test.At);
+            var function = new FunctionSymbol(id, module.Identity, declaration, test.Name)
+            {
+                ReturnType = LangType.Bool,
+                DeclaredEffects = []
+            };
+
+            // Synthetic functions participate in local checking and effect inference, but never
+            // enter the source function maps used by name lookup and imports.
+            _functions.Add(function);
+            _tests.Add(new CheckedTest(test.Name, module.PackageId, module.Program.Module, id, test.At));
+        }
+    }
+
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "bool" or "Text" or "Option" or "Result" or "FsRead" or "FsError";
 
@@ -1041,7 +1091,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private string FormatFunctionName(FunctionSymbol function) =>
-        $"{FormatModuleIdentity(function.ModuleIdentity)}.{function.Declaration.Name}";
+        function.TestName is { } testName
+            ? $"{FormatModuleIdentity(function.ModuleIdentity)}.test({testName})"
+            : $"{FormatModuleIdentity(function.ModuleIdentity)}.{function.Declaration.Name}";
 
     private static string FormatModuleIdentity(ModuleIdentity identity) => identity.ModuleName;
 
@@ -1896,7 +1948,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public List<CheckedStructField> Fields { get; } = [];
     }
 
-    private sealed class FunctionSymbol(int id, ModuleIdentity moduleIdentity, FunctionDecl declaration)
+    private sealed class FunctionSymbol(
+        int id,
+        ModuleIdentity moduleIdentity,
+        FunctionDecl declaration,
+        string? testName = null)
     {
         public int Id { get; } = id;
         public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
@@ -1904,6 +1960,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public string ModuleName => ModuleIdentity.ModuleName;
         public string Module => ModuleName;
         public FunctionDecl Declaration { get; } = declaration;
+        public string? TestName { get; } = testName;
         public IReadOnlyList<CheckedParameter> Parameters { get; set; } = [];
         public IReadOnlyList<LangType> TypeParameters { get; set; } = [];
         public IReadOnlyDictionary<string, LangType> TypeParametersByName { get; set; } = new Dictionary<string, LangType>(StringComparer.Ordinal);

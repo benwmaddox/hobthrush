@@ -86,6 +86,10 @@ internal static class IntegrationTests
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("Text validation package builds and imported generic calls specialize correctly", TestTextValidationExample),
+            ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
+            ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
+            ("language tests validate assertions, dependency selection, and locks", TestManagedLanguageTestPackageRules),
+            ("zero-argument lang test still runs compiler fixtures", TestFixtureTestMode),
             ("generic inference limits and generic main entry selection are diagnosed", TestGenericFunctionRestrictions),
             ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
@@ -2418,6 +2422,247 @@ internal static class IntegrationTests
         AssertRunOutput("42" + Environment.NewLine, genericRun);
     }
 
+    private static async Task TestManagedLanguageTests(Harness harness)
+    {
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "text-validation");
+        var result = await harness.InvokePackageDirectoryAsync(
+            "text-validation-language-tests", packageRoot, "test");
+        var expected = string.Join(Environment.NewLine,
+        [
+            "PASS text.validation :: normalize empty input returns Empty",
+            "PASS text.validation :: normalize trims nonempty input",
+            "PASS text.validation :: Text trim removes surrounding Unicode whitespace",
+            "PASS text.validation :: require preserves a present Option<Text>",
+            "PASS text.validation :: require maps a missing Option<Text> to its error",
+            "PASS text.validation :: require preserves a present Option<i32>",
+            "PASS text.validation :: require maps a missing Option<i32> to its error",
+            "7 passed, 0 failed"
+        ]) + Environment.NewLine;
+
+        AssertEqual(0, result.ExitCode, Describe(result));
+        AssertEqual(expected, result.StandardOutput, Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+    }
+
+    private static async Task TestManagedLanguageTestOutcomes(Harness harness)
+    {
+        var failureSource = """
+            module app.tests;
+            test "first assertion fails" {
+                assert false;
+            }
+            test "later test runs" {
+                assert true;
+            }
+            """;
+        var failurePackage = await harness.WritePackageAsync(
+            "language-tests-failure",
+            LibraryPackageManifest("language-tests-failure"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/tests.lang"] = failureSource
+            });
+        var failureSourcePath = Path.Combine(failurePackage, "src", "app", "tests.lang");
+        var failure = await harness.InvokePackageDirectoryAsync(
+            "language-tests-failure-run", failurePackage, "test");
+        var failureDisplayPath = failureSourcePath.Replace("\\", "\\\\", StringComparison.Ordinal);
+        var expectedFailure = string.Join(Environment.NewLine,
+        [
+            $"FAIL app.tests :: first assertion fails ({failureDisplayPath}:2:1)",
+            "PASS app.tests :: later test runs",
+            "1 passed, 1 failed"
+        ]) + Environment.NewLine;
+        AssertEqual(1, failure.ExitCode, Describe(failure));
+        AssertEqual(expectedFailure, failure.StandardOutput, Describe(failure));
+        AssertEqual(string.Empty, failure.StandardError, Describe(failure));
+
+        var escapedNameSource = """
+            module app.escaped;
+            test "attempt\nPASS injected\n0 passed, 99 failed\t\\tail" {
+                assert false;
+            }
+            test "after escaped name" {
+                assert true;
+            }
+            """;
+        var escapedNamePackage = await harness.WritePackageAsync(
+            "language-tests-escaped-name",
+            LibraryPackageManifest("language-tests-escaped-name"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/escaped.lang"] = escapedNameSource
+            });
+        var escapedNameSourcePath = Path.Combine(escapedNamePackage, "src", "app", "escaped.lang");
+        var escapedName = await harness.InvokePackageDirectoryAsync(
+            "language-tests-escaped-name-run", escapedNamePackage, "test");
+        var escapedNameDisplayPath = escapedNameSourcePath.Replace("\\", "\\\\", StringComparison.Ordinal);
+        var expectedEscapedName = string.Join(Environment.NewLine,
+        [
+            $"FAIL app.escaped :: attempt\\nPASS injected\\n0 passed, 99 failed\\t\\\\tail ({escapedNameDisplayPath}:2:1)",
+            "PASS app.escaped :: after escaped name",
+            "1 passed, 1 failed"
+        ]) + Environment.NewLine;
+        AssertEqual(1, escapedName.ExitCode, Describe(escapedName));
+        AssertEqual(expectedEscapedName, escapedName.StandardOutput, Describe(escapedName));
+        AssertEqual(3,
+            escapedName.StandardOutput.Split([Environment.NewLine], StringSplitOptions.RemoveEmptyEntries).Length,
+            "Escaped test-name controls must remain visible escapes on a single physical result line.");
+
+        var emptyPackage = await harness.WritePackageAsync(
+            "language-tests-empty",
+            LibraryPackageManifest("language-tests-empty"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/empty/suite.lang"] = "module empty.suite;\n"
+            });
+        var empty = await harness.InvokePackageDirectoryAsync(
+            "language-tests-empty-run", emptyPackage, "test");
+        AssertEqual(0, empty.ExitCode, Describe(empty));
+        AssertEqual("0 passed, 0 failed" + Environment.NewLine, empty.StandardOutput, Describe(empty));
+
+        var multiModulePackage = await harness.WritePackageAsync(
+            "language-tests-multiple-modules",
+            LibraryPackageManifest("language-tests-multiple-modules"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/suite/alpha.lang"] = """
+                    module suite.alpha;
+                    struct Names { test: bool, assert: bool }
+                    fn test(assert: bool) -> bool effects {} {
+                        let names: Names = Names { test: assert, assert: true };
+                        return names.test == names.assert;
+                    }
+                    test "same name" {
+                        let result: bool = test(false);
+                        assert result == false;
+                    }
+                    """,
+                ["src/suite/beta.lang"] = """
+                    module suite.beta;
+                    test "same name" {
+                        assert true;
+                    }
+                    """
+            });
+        var multiModule = await harness.InvokePackageDirectoryAsync(
+            "language-tests-multiple-modules-run", multiModulePackage, "test");
+        var expectedMultiModule = string.Join(Environment.NewLine,
+        [
+            "PASS suite.alpha :: same name",
+            "PASS suite.beta :: same name",
+            "2 passed, 0 failed"
+        ]) + Environment.NewLine;
+        AssertEqual(0, multiModule.ExitCode, Describe(multiModule));
+        AssertEqual(expectedMultiModule, multiModule.StandardOutput, Describe(multiModule));
+    }
+
+    private static async Task TestManagedLanguageTestPackageRules(Harness harness)
+    {
+        const string invalidAssertions = """
+            module validation.invalid_tests;
+            test "duplicate assertion name" {
+                assert 1;
+            }
+            test "duplicate assertion name" {
+                assert true;
+            }
+            """;
+        var invalidPackage = await harness.WritePackageAsync(
+            "language-tests-invalid-assertions",
+            LibraryPackageManifest("language-tests-invalid-assertions"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/validation/invalid_tests.lang"] = invalidAssertions
+            });
+        var invalid = await harness.InvokePackageDirectoryAsync(
+            "language-tests-invalid-assertions-check", invalidPackage, "check", "--json");
+        AssertEqual(1, invalid.ExitCode, Describe(invalid));
+        var invalidCodes = ParseDiagnosticSnapshots(invalid.StandardOutput)
+            .Select(diagnostic => diagnostic.Code).ToArray();
+        AssertTrue(invalidCodes.Contains("E_TYPE_MISMATCH", StringComparer.Ordinal),
+            $"A non-bool assertion should fail typechecking. {Describe(invalid)}");
+        AssertTrue(invalidCodes.Contains("E_NAME_DUPLICATE", StringComparer.Ordinal),
+            $"A repeated test name in one module should fail. {Describe(invalid)}");
+
+        const string rootManifest = """
+            name = "language-test-root"
+            version = "0.1.0"
+            kind = "lib"
+            source_root = "src"
+
+            [dependencies]
+            child = "../child"
+            """;
+        const string rootTest = """
+            module root.tests;
+            test "root test only" { assert true; }
+            """;
+        const string dependencyTest = """
+            module child.tests;
+            test "dependency test is typechecked but not run" { assert false; }
+            """;
+        var rootPackage = await harness.WritePackageGraphAsync(
+            "language-tests-dependency-rules",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(rootManifest, new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/root/tests.lang"] = rootTest
+                }),
+                ["child"] = new PackageFixture(LibraryPackageManifest("language-test-child"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/child/tests.lang"] = dependencyTest
+                    })
+            });
+        var missingLock = await harness.InvokePackageDirectoryAsync(
+            "language-tests-missing-lock", rootPackage, "test");
+        AssertEqual(1, missingLock.ExitCode, Describe(missingLock));
+        AssertTrue(missingLock.StandardError.Contains("E_LOCK", StringComparison.Ordinal), Describe(missingLock));
+
+        var createLock = await harness.InvokePackageDirectoryAsync(
+            "language-tests-create-lock", rootPackage, "lock");
+        AssertEqual(0, createLock.ExitCode, Describe(createLock));
+        var rootOnly = await harness.InvokePackageDirectoryAsync(
+            "language-tests-root-only", rootPackage, "test");
+        AssertEqual(0, rootOnly.ExitCode, Describe(rootOnly));
+        AssertEqual("PASS root.tests :: root test only" + Environment.NewLine + "1 passed, 0 failed" + Environment.NewLine,
+            rootOnly.StandardOutput, Describe(rootOnly));
+
+        var dependencySourcePath = Path.Combine(Path.GetDirectoryName(rootPackage)!, "child", "src", "child", "tests.lang");
+        await File.WriteAllTextAsync(dependencySourcePath, """
+            module child.tests;
+            test "dependency assertion must typecheck" { assert 1; }
+            """);
+        var staleLock = await harness.InvokePackageDirectoryAsync(
+            "language-tests-stale-lock", rootPackage, "test");
+        AssertEqual(1, staleLock.ExitCode, Describe(staleLock));
+        AssertTrue(staleLock.StandardError.Contains("E_LOCK", StringComparison.Ordinal), Describe(staleLock));
+
+        var refreshLock = await harness.InvokePackageDirectoryAsync(
+            "language-tests-refresh-lock", rootPackage, "lock");
+        AssertEqual(0, refreshLock.ExitCode, Describe(refreshLock));
+        var dependencyTypecheck = await harness.InvokePackageDirectoryAsync(
+            "language-tests-dependency-typecheck", rootPackage, "test");
+        AssertEqual(1, dependencyTypecheck.ExitCode, Describe(dependencyTypecheck));
+        AssertTrue(dependencyTypecheck.StandardError.Contains("E_TYPE_MISMATCH", StringComparison.Ordinal),
+            Describe(dependencyTypecheck));
+        AssertTrue(dependencyTypecheck.StandardError.Contains(dependencySourcePath, StringComparison.Ordinal),
+            Describe(dependencyTypecheck));
+        AssertEqual(string.Empty, dependencyTypecheck.StandardOutput, Describe(dependencyTypecheck));
+    }
+
+    private static async Task TestFixtureTestMode(Harness harness)
+    {
+        var result = await harness.InvokeCompilerCommandAsync("test");
+        AssertEqual(0, result.ExitCode, Describe(result));
+        AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
+            Describe(result));
+        AssertTrue(result.StandardOutput.EndsWith("5 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+            Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+    }
+
     private static async Task TestGenericFunctionRestrictions(Harness harness)
     {
         var librarySource = await File.ReadAllTextAsync(Path.Combine(
@@ -3015,6 +3260,54 @@ internal static class IntegrationTests
 
         public Task<ProcessResult> InvokeAsync(string caseName, string command, string source, params string[] additionalArguments) =>
             InvokeWithTimeoutAsync(caseName, command, source, ProcessTimeout, additionalArguments);
+
+        public async Task<ProcessResult> InvokeCompilerCommandAsync(params string[] arguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                WorkingDirectory = repositoryRoot,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add(compilerDll);
+            foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["LANG_DOTNET"] = dotnet;
+
+            using var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+                throw new InvalidOperationException("Could not start the language compiler command.");
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            using var cancellation = new CancellationTokenSource(ProcessTimeout);
+            try
+            {
+                await process.WaitForExitAsync(cancellation.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                await process.WaitForExitAsync();
+                var timedOutStdout = await stdoutTask;
+                var timedOutStderr = await stderrTask;
+                throw new TimeoutException(
+                    $"Compiler command timed out after {ProcessTimeout}. stdout=<{timedOutStdout}>; stderr=<{timedOutStderr}>");
+            }
+
+            return new ProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
+        }
 
         public async Task<ProcessResult> InvokeUsingHostOverrideAsync(string caseName, string command, string source, string hostOverride)
         {
