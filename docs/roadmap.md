@@ -16,17 +16,17 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Lower the supported source into typed semantic IR and emit deterministic C#.
 - [x] Build a library DLL when no supported executable entrypoint is present.
 - [x] Add immutable non-generic nominal structs with named construction, field checks and reads, and direct-recursion checks.
-- [ ] Add package manifests, imports, and multi-file module resolution.
+- [x] Add strict same-package manifests, explicit imports, and multi-file module resolution for the implemented pure-language slice.
 - [ ] Add user-defined generics, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 14-19 are still pending. M1 is also incomplete; package imports, user-defined generics, traits, and the maintained library/CLI/web project set remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 14-19 are still pending. M1 is also incomplete; external dependencies and lockfiles, user-defined generics, traits, effects, and the maintained library/CLI/web project set remain future work.
 
-The active compiler-fixture set covers fixtures 01-13 and 20-25. Fixtures 14-19 remain pending. A module header names one source file; it does not enable imports or package resolution. Struct support is a bounded pure-language slice and does not complete the M1 library, imports, generics, traits, effects, or package requirements.
+The active compiler-fixture set covers fixtures 01-13 and 20-25. Fixtures 14-19 remain pending. Package modules currently resolve only within one package using an explicit import list; this does not implement external package dependencies or locking. Struct support and package resolution are bounded pure-language slices and do not complete the M1 library, generics, traits, effects, or package requirements.
 
 ## Executable deployment options (implemented)
 
 - [x] Configure Workstation GC explicitly as the default for the compiler and generated applications.
-- [x] Support optional Native AOT application publishing with `lang build FILE --aot --rid RID` for `win-x64` on Windows and `linux-x64` on Linux; normal build/run stays managed, Native AOT remains GC-managed, and library-only programs and the compiler tool are excluded.
+- [x] Support optional Native AOT application publishing with `lang build FILE_OR_PACKAGE --aot --rid RID` for `win-x64` on Windows and `linux-x64` on Linux; normal build/run stays managed, Native AOT remains GC-managed, and library-only sources/packages and the compiler tool are excluded.
 - [x] Report unsupported AOT targets, option combinations, and cross-OS RID requests with `E_BUILD_TARGET`.
 
 Native AOT requires the matching .NET native toolchain and a build host whose OS matches the RID. It is a publish mode for generated executable applications; shared-library exports remain part of the separate ABI1 proof. PERF1 remains a measurement track; see [the memory and performance contract](memory-and-performance.md).

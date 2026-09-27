@@ -1,0 +1,12 @@
+module app.main;
+
+import catalog.message { Greeting, Message, greeting };
+
+pub fn main() -> Text effects {} {
+    let welcome: Greeting = greeting();
+    let message: Message = Message.Ready(welcome);
+    return match message {
+        Message.Ready(value) => value.text,
+        Message.Missing => "missing",
+    };
+}

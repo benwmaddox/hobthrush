@@ -57,7 +57,7 @@ internal static class Lexer
                     i++;
                     column++;
                 }
-                tokens.Add(new Token("id", source[start..i], startLine, startColumn));
+                tokens.Add(new Token("id", source[start..i], startLine, startColumn, file));
                 continue;
             }
 
@@ -68,7 +68,7 @@ internal static class Lexer
                     i++;
                     column++;
                 }
-                tokens.Add(new Token("number", source[start..i], startLine, startColumn));
+                tokens.Add(new Token("number", source[start..i], startLine, startColumn, file));
                 continue;
             }
 
@@ -80,14 +80,14 @@ internal static class Lexer
 
             if (i + 1 < source.Length && source.AsSpan(i, 2).SequenceEqual("->"))
             {
-                tokens.Add(new Token("->", "->", line, column));
+                tokens.Add(new Token("->", "->", line, column, file));
                 i += 2;
                 column += 2;
                 continue;
             }
             if (i + 1 < source.Length && source.AsSpan(i, 2).SequenceEqual("=>"))
             {
-                tokens.Add(new Token("=>", "=>", line, column));
+                tokens.Add(new Token("=>", "=>", line, column, file));
                 i += 2;
                 column += 2;
                 continue;
@@ -95,7 +95,7 @@ internal static class Lexer
 
             if (".;:,(){}=+*-<>".IndexOf(c) >= 0)
             {
-                tokens.Add(new Token(c.ToString(), c.ToString(), line, column));
+                tokens.Add(new Token(c.ToString(), c.ToString(), line, column, file));
                 i++;
                 column++;
                 continue;
@@ -110,7 +110,7 @@ internal static class Lexer
             column++;
         }
 
-        tokens.Add(new Token("eof", "", line, column));
+        tokens.Add(new Token("eof", "", line, column, file));
         return tokens;
     }
 
@@ -194,7 +194,7 @@ internal static class Lexer
                 new Range(startLine, startColumn, line, column)));
         }
 
-        tokens.Add(new Token("text", source[start..i], startLine, startColumn));
+        tokens.Add(new Token("text", source[start..i], startLine, startColumn, file));
     }
 }
 
@@ -210,7 +210,7 @@ internal sealed class Parser
     private readonly IReadOnlyList<Token> _tokens;
     private readonly string _file;
     private readonly List<Diagnostic> _diagnostics;
-    private readonly Token _emptyEof = new("eof", "", 1, 1);
+    private readonly Token _emptyEof;
     private int _position;
     private int _nestingDepth;
     private readonly Dictionary<Expr, int> _expressionDepth = new(ReferenceEqualityComparer.Instance);
@@ -220,6 +220,7 @@ internal sealed class Parser
         _tokens = tokens;
         _file = file;
         _diagnostics = diagnostics;
+        _emptyEof = new Token("eof", "", 1, 1, file);
     }
 
     private Token Current => _tokens.Count == 0
@@ -274,7 +275,11 @@ internal sealed class Parser
 
     private void Fail(Token token, string code, string message)
     {
-        _diagnostics.Add(new Diagnostic(code, message, _file, token.Range));
+        _diagnostics.Add(new Diagnostic(
+            code,
+            message,
+            string.IsNullOrEmpty(token.File) ? _file : token.File,
+            token.Range));
         throw new ParseFailure();
     }
 
@@ -283,8 +288,17 @@ internal sealed class Parser
         try
         {
             Expect("module");
-            var module = ParseQualifiedName();
+            var moduleAt = ExpectModuleSegment();
+            var module = moduleAt.Text;
+            while (Is("."))
+            {
+                Take();
+                module += "." + ExpectModuleSegment().Text;
+            }
             Expect(";");
+
+            var imports = new List<ImportDecl>();
+            while (Is("import")) imports.Add(ParseImport());
 
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
@@ -315,16 +329,55 @@ internal sealed class Parser
                     var declaration = Current;
                     if (isPublic && Current.Kind == "eof")
                         Fail(Current, "E_SYNTAX", "Expected declaration after 'pub'");
+                    if (Is("import"))
+                        Fail(Current, "E_SYNTAX", "Imports must appear before declarations");
                     Fail(declaration, "E_UNSUPPORTED", $"Declaration '{declaration.Text}' is not implemented yet");
                 }
             }
 
-            return new ParsedProgram(module, unions, functions, structs);
+            return new ParsedProgram(module, moduleAt, _file, imports, unions, functions, structs);
         }
         catch (ParseFailure)
         {
             return null;
         }
+    }
+
+    private ImportDecl ParseImport()
+    {
+        var at = Expect("import");
+        var moduleAt = ExpectModuleSegment();
+        var module = moduleAt.Text;
+        while (Is("."))
+        {
+            Take();
+            module += "." + ExpectModuleSegment().Text;
+        }
+
+        Expect("{");
+        if (Is("}"))
+            Fail(Current, "E_SYNTAX", "An import must name at least one symbol");
+
+        var symbols = new List<ImportSymbol>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed import symbol list");
+            var symbolAt = ExpectMemberIdentifier();
+            symbols.Add(new ImportSymbol(symbolAt.Text, symbolAt));
+            if (Is(","))
+            {
+                Take();
+                if (Is("}")) break;
+            }
+            else if (!Is("}"))
+            {
+                Expect(",");
+            }
+        }
+
+        Expect("}");
+        Expect(";");
+        return new ImportDecl(module, at, moduleAt, symbols);
     }
 
     private string ParseQualifiedName()

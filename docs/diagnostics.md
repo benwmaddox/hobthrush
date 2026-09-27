@@ -8,6 +8,11 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_UNSUPPORTED | Valid V1 construct is not yet implemented | Implemented |
 | E_NAME_UNRESOLVED | Name is not declared in scope | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
+| E_MANIFEST | Package manifest file, schema, key, or value is invalid | Implemented |
+| E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
+| E_IMPORT_UNRESOLVED | An imported module or symbol does not exist in the package | Implemented |
+| E_IMPORT_PRIVATE | An import names a declaration that is not public | Implemented |
+| E_IMPORT_CONFLICT | Imports are duplicated or conflict with another visible/local name | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, or return type mismatch | Implemented for the pure type slice |
 | E_TYPE_VISIBILITY | A public type signature exposes a private union or struct | Implemented |
 | E_FIELD_UNKNOWN | A struct initializer or field read names an unknown field | Implemented |
@@ -15,7 +20,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_FIELD_DUPLICATE | A struct construction initializes a field more than once | Implemented |
 | E_MATCH_NONEXHAUSTIVE | One or more union variants are missing from a match | Implemented |
 | E_MATCH_ARM_DUPLICATE | A match arm is duplicated or follows a wildcard | Implemented |
-| E_ENTRYPOINT | `lang run` has no supported zero-argument `main` function | Implemented |
+| E_ENTRYPOINT | `lang run` has no supported zero-argument `main`, or a CLI package's entry module is absent or lacks that signature | Implemented |
 | E_IO | Source, fixture, or generated build files could not be read or written | Implemented |
 | E_PROCESS | The .NET build or run process could not be started or waited on | Implemented |
 | E_BUILD | The generated C# project failed to compile | Implemented |

@@ -5,7 +5,7 @@ internal sealed record Diagnostic(string Code, string Message, string File, Rang
     public string Severity => "error";
 }
 
-internal sealed record Token(string Kind, string Text, int Line, int Column)
+internal sealed record Token(string Kind, string Text, int Line, int Column, string File)
 {
     public Range Range => new(Line, Column, Line, Column + Math.Max(Text.Length, 1));
 }
@@ -24,8 +24,17 @@ internal sealed record FunctionDecl(
     TypeSyntax ReturnType,
     IReadOnlyList<Stmt> Body,
     Token At);
+internal sealed record ImportSymbol(string Name, Token At);
+internal sealed record ImportDecl(
+    string Module,
+    Token At,
+    Token ModuleAt,
+    IReadOnlyList<ImportSymbol> Symbols);
 internal sealed record ParsedProgram(
     string Module,
+    Token ModuleAt,
+    string File,
+    IReadOnlyList<ImportDecl> Imports,
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs);

@@ -3,8 +3,10 @@
 The parser accepts the implemented pure-language slice below. The wider V1 syntax in [the PRD](PRD.md) remains a design target; unsupported declarations and statements fail with a diagnostic.
 
 ```ebnf
-module          = "module", module_path, ";", { declaration } ;
+module          = "module", module_path, ";", { import_decl }, { declaration } ;
 module_path     = lexical_identifier, { ".", lexical_identifier } ;
+import_decl     = "import", module_path, "{", import_symbols, "}", ";" ;
+import_symbols  = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 declaration     = [ "pub" ], ( function | union | struct ) ;
 
 function        = "fn", bare_identifier, "(", [ parameters ], ")",
@@ -62,6 +64,20 @@ lexical_identifier = letter | "_", { letter | digit | "_" } ;
 member_identifier = lexical_identifier ;
 bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await", "with" ;
 ```
+
+Every package source file has one `module` header. Imports, when present, follow that header and precede declarations. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing dots with directory separators. For example, `module text.validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Imports name one module and an explicit, non-empty list of symbols. No aliases, wildcard imports, or transitive imports are supported.
+
+Package commands use a package directory rather than a source-file path:
+
+```text
+lang check PACKAGE_DIRECTORY [--json]
+lang build PACKAGE_DIRECTORY
+lang run PACKAGE_DIRECTORY
+```
+
+The root `lang.toml` has a strict schema: exactly the keys `name`, `version`, `kind`, and `source_root`, plus `entry_module` for `kind = "cli"`. The reader supports a simple TOML subset: values are plain double-quoted strings, blank lines and comments outside quoted values are allowed, and escapes are not. `name` must be filesystem-safe; `version` must be non-empty but is not semver-validated; `source_root` must be a normalized, forward-slash relative directory inside the package. `kind` is `"cli"` or `"lib"`; `entry_module` is a valid dotted module name, required for CLI packages and forbidden for libraries. Unknown, missing, duplicate, or invalid keys and values are rejected. A CLI package's entry module must exist and define one supported zero-argument `main() -> i32|bool|Text`. Library packages do not have an entrypoint. See [the package example](../examples/library-package/lang.toml) for a complete same-package import.
+
+The current resolver loads modules from one package only. It does not resolve external dependencies, lockfiles, or package registries. A same-package import makes only the listed public declarations available in the importing module. Private declarations remain module-local, and importing a module does not make its own imports visible to downstream modules.
 
 A union variant uses either named fields such as `TooLong(max: i32)` or positional fields such as `Value(i32)`. One variant cannot mix the two forms. User-defined generic unions and functions are not supported. `Option<T>` and `Result<T, E>` are compiler-provided generic types; their type arguments must be supported types.
 
