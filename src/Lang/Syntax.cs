@@ -42,7 +42,16 @@ internal sealed record ParsedProgram(
     IReadOnlyList<ImportDecl> Imports,
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
-    IReadOnlyList<StructDecl> Structs);
+    IReadOnlyList<StructDecl> Structs,
+    IReadOnlyList<TestDecl> Tests);
+
+internal sealed record TestDecl(
+    string Name,
+    IReadOnlyList<LetStmt> Setup,
+    Expr Assertion,
+    Token At,
+    Token NameAt,
+    Token AssertAt);
 
 internal abstract record Expr(Token At);
 internal sealed record NumberExpr(Token At, int Value) : Expr(At);

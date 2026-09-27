@@ -338,6 +338,7 @@ internal sealed class Parser
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
             var structs = new List<StructDecl>();
+            var tests = new List<TestDecl>();
             while (Current.Kind != "eof")
             {
                 var isPublic = false;
@@ -359,6 +360,12 @@ internal sealed class Parser
                 {
                     structs.Add(ParseStruct(isPublic));
                 }
+                else if (Is("test"))
+                {
+                    if (isPublic)
+                        Fail(Current, "E_SYNTAX", "Test declarations cannot be public");
+                    tests.Add(ParseTest());
+                }
                 else
                 {
                     var declaration = Current;
@@ -370,7 +377,7 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, imports, unions, functions, structs);
+            return new ParsedProgram(module, moduleAt, _file, imports, unions, functions, structs, tests);
         }
         catch (ParseFailure)
         {
@@ -464,6 +471,40 @@ internal sealed class Parser
         var effects = ParseEffects();
         var body = ParseStatementBlock("Unclosed function body");
         return new FunctionDecl(name.Text, typeParameters, isPublic, parameters, returnType, effects, body, name);
+    }
+
+    private TestDecl ParseTest()
+    {
+        var at = Expect("test");
+        if (Current.Kind != "text")
+            Fail(Current, "E_SYNTAX", "Expected a text literal after 'test'");
+        var nameAt = Take();
+        var name = DecodeText(nameAt);
+
+        Expect("{");
+        var setup = new List<LetStmt>();
+        while (Is("let"))
+            setup.Add((LetStmt)ParseStatement());
+
+        if (Current.Kind == "eof")
+            Fail(Current, "E_SYNTAX", "Unclosed test body");
+        if (!Is("assert"))
+        {
+            if (Is("return") || Is("if"))
+                Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not supported in test bodies");
+            if (Is("}"))
+                Fail(Current, "E_SYNTAX", "Test body must end with an assert statement");
+            Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not supported in test bodies");
+        }
+
+        var assertAt = Take();
+        var assertion = ParseExpr();
+        Expect(";");
+        if (!Is("}"))
+            Fail(Current, "E_SYNTAX", "The assert statement must be the final statement in a test body");
+        Expect("}");
+
+        return new TestDecl(name, setup, assertion, at, nameAt, assertAt);
     }
 
     private List<TypeParameterSyntax> ParseFunctionTypeParameters()

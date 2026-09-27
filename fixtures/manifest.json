@@ -183,5 +183,35 @@
     "file": "36-constructor-generic-inference.lang",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "37-valid-test.lang",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "38-test-assert-non-bool.lang",
+    "status": "active",
+    "expectedCode": "E_TYPE_MISMATCH"
+  },
+  {
+    "file": "39-test-return-disallowed.lang",
+    "status": "active",
+    "expectedCode": "E_UNSUPPORTED"
+  },
+  {
+    "file": "40-test-if-disallowed.lang",
+    "status": "active",
+    "expectedCode": "E_UNSUPPORTED"
+  },
+  {
+    "file": "41-test-duplicate-name.lang",
+    "status": "active",
+    "expectedCode": "E_NAME_DUPLICATE"
+  },
+  {
+    "file": "42-test-missing-assert.lang",
+    "status": "active",
+    "expectedCode": "E_SYNTAX"
   }
 ]

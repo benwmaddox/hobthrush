@@ -35,4 +35,4 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
 | E_RESOURCE_ESCAPE | Scoped resource escapes its lexical scope | Planned |
 
-An unsupported feature is a compilation failure. It never passes as an unchecked construct. `lang test` compares each active fixture's complete ordered diagnostic-code list; pending fixtures are skipped.
+An unsupported feature is a compilation failure. It never passes as an unchecked construct. Bare `lang test` compares each active fixture's complete ordered diagnostic-code list; pending fixtures are skipped. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.

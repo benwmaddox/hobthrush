@@ -36,7 +36,12 @@ internal static class Driver
 
         var hasAotOption = args.Contains("--aot", StringComparer.Ordinal);
         var hasRidOption = args.Contains("--rid", StringComparer.Ordinal);
-        if (args[0] is not ("check" or "build" or "run"))
+        if (args[0] == "test" && (hasAotOption || hasRidOption))
+        {
+            PrintUsage();
+            return 2;
+        }
+        if (args[0] is not ("check" or "build" or "run" or "test"))
         {
             if (hasAotOption || hasRidOption)
             {
@@ -137,6 +142,9 @@ internal static class Driver
                 PrintDiagnostics([], json: true);
             return 0;
         }
+
+        if (args[0] == "test")
+            return await BuildTestsAsync(result.Program!, file);
 
         return await BuildCheckedAsync(result.Program!, file, args[0], isAotBuild ? rid : null);
     }
@@ -259,6 +267,15 @@ internal static class Driver
             return 0;
         }
 
+        if (command == "test")
+        {
+            return await BuildTestsAsync(
+                checkedPackage.Program!,
+                package.ManifestFile,
+                package,
+                graph.Root.Id);
+        }
+
         return await BuildCheckedAsync(
             checkedPackage.Program!,
             package.ManifestFile,
@@ -316,7 +333,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang test");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang test [FILE_OR_PACKAGE]");
 
     private static int ReportBuildTargetError(string message, string file)
     {
@@ -348,6 +365,84 @@ internal static class Driver
 
     private static bool IsFileError(Exception error) =>
         error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException;
+
+    private static async Task<int> BuildTestsAsync(
+        CheckedProgram program,
+        string sourceFile,
+        LoadedPackage? package = null,
+        string? rootPackageId = null)
+    {
+        const string assemblyName = "GeneratedTests";
+        var generatedDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "lang-generated",
+            Guid.NewGuid().ToString("N"));
+        var projectFile = Path.Combine(generatedDirectory, "Generated.csproj");
+        var stagedAssemblyFile = Path.Combine(
+            generatedDirectory,
+            "bin",
+            "Release",
+            "net10.0",
+            assemblyName + ".dll");
+
+        try
+        {
+            Directory.CreateDirectory(generatedDirectory);
+            File.WriteAllText(
+                projectFile,
+                ProjectFileContents(executable: true, aotRid: null, assemblyName: assemblyName));
+            File.WriteAllText(
+                Path.Combine(generatedDirectory, "Program.cs"),
+                Emitter.EmitTests(program, rootPackageId));
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Could not write generated test project: {error.Message}", sourceFile)
+            ],
+            json: false);
+            TryCleanupGeneratedDirectory(generatedDirectory, sourceFile);
+            return 1;
+        }
+
+        try
+        {
+            var dotnet = ResolveDotnetHost();
+            var build = await ExecAsync(
+                dotnet,
+                ["build", projectFile, "--nologo", "-v:q", "--configuration", "Release"],
+                FindRoot() ?? Directory.GetCurrentDirectory(),
+                sourceFile);
+
+            if (build is null)
+                return 1;
+
+            if (build.ExitCode != 0)
+            {
+                PrintDiagnostics(
+                [
+                    AtStart("E_BUILD", "The generated managed test project failed to build", sourceFile)
+                ],
+                json: false);
+                WriteProcessOutputToError(build);
+                return build.ExitCode;
+            }
+
+            var run = await ExecAsync(
+                dotnet,
+                [stagedAssemblyFile],
+                package?.Root ?? Directory.GetCurrentDirectory(),
+                sourceFile,
+                forwardOutput: true);
+
+            return run?.ExitCode ?? 1;
+        }
+        finally
+        {
+            TryCleanupGeneratedDirectory(generatedDirectory, sourceFile);
+        }
+    }
 
     private static async Task<int> BuildCheckedAsync(
         CheckedProgram program,
