@@ -23,11 +23,12 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 - [x] Add `Text.length` using Unicode scalar counts and `Text.trim()` using Unicode whitespace trimming.
 - [x] Add generic functions with type inference from independently typed arguments.
 - [x] Add pure module-level language tests and `lang test PACKAGE_DIRECTORY`; dependency tests are typechecked while only root-package tests execute.
+- [x] Add the PR1 typed CLI command contract for one command in an executable entry module, including generated arguments, parsing/help, typed result mapping, and deterministic command schema output.
 - [ ] Add generic structs and unions, traits, and the remaining core types.
 
-The M0 all-fixtures acceptance remains incomplete: fixtures 15-19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, application capability grants, and the final maintained library/CLI/web project set remain future work. Broader test features, including property-based testing, JSON test results, executing dependency package tests, and an AOT test runner, remain future work.
+The M0 all-fixtures acceptance remains incomplete: fixtures 15, 16, 18, and 19 are still pending. M1 is also incomplete; Git and registry dependencies, generic structs and unions, explicit type arguments, traits, application capability grants, and the final maintained library/CLI/web project set remain future work. Broader test features, including property-based testing, JSON test results, executing dependency package tests, and an AOT test runner, remain future work.
 
-The active compiler-fixture set covers fixtures 01-14 and 20-42. Fixtures 15-19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, and pure package tests are implemented bounded slices; they do not complete the M1 library, generic types, traits, or V1 package requirements.
+The active compiler-fixture set covers fixtures 01-14, 17, and 20-42. Fixtures 15, 16, 18, and 19 remain pending. Package modules resolve within the root and its recursively declared local library paths using qualified declaration references; source-level imports are not part of the syntax. This does not implement Git or registry sources, dependency caches, package installation, or build receipts. Struct support, package resolution, generic functions, control flow, Text operations, the effect/FsRead kernel, pure package tests, and the PR1 typed CLI layer are implemented bounded slices; they do not complete the M1 library, generic types, traits, capability-backed application CLI, or V1 package requirements.
 
 [`examples/text-validation`](../examples/text-validation) is a pure `lib` package precursor for the PRD validation library. It checks and builds `NormalizeError`, `normalize`, and `require<T, E>`, and runs pure language tests for empty/nonempty input, trimming, and both `Option` generic instantiations. Integration consumers exercise same-package calls, dependency test filtering, and lock enforcement. The maintained CLI example consumes the sibling library through a local path dependency; broader package source support remains future work.
 
@@ -52,7 +53,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-Application-level effect and capability enforcement, scoped resources, typed CLI and web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, and the complete maintained V1 library/CLI/web example projects remain future work. Build receipts are also pending. The V1 promise in the PRD is not complete.
+Application-level effect grants and capability injection for commands, scoped resources, typed web declarations, Git and registry dependency sources, dependency cache/install commands, SQLite, the maintained file-scanning CLI example and its effect audit, and the complete maintained V1 library/CLI/web example projects remain future work. PR1 implements typed command declarations and dispatch without application capability injection; handlers still use normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
 
 ## MS1 - memory-semantics design (not started)
 

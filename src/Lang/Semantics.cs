@@ -6,6 +6,7 @@ internal enum LangTypeKind
     I32,
     Bool,
     Text,
+    FilePath,
     TypeParameter,
     Union,
     Struct,
@@ -43,6 +44,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsI32 => Kind == LangTypeKind.I32;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
+    public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
     public bool IsFsError => Kind == LangTypeKind.FsError;
     internal int UnionId { get; }
@@ -55,6 +57,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType I32 { get; } = new(LangTypeKind.I32, "i32");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
+    internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
 
@@ -116,6 +119,35 @@ internal sealed record CheckedStructField(string Name, LangType Type, int Index,
 internal sealed record CheckedStruct(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 internal sealed record CheckedTest(string Name, string PackageId, string Module, int FunctionId, Token At);
+internal enum CheckedCommandInputKind { Argument, Option, Flag }
+internal enum CheckedCommandLiteralKind { Text, I32, Boolean }
+internal sealed record CheckedCommandLiteral(
+    CheckedCommandLiteralKind Kind,
+    string? TextValue = null,
+    int? IntegerValue = null,
+    bool? BooleanValue = null);
+internal sealed record CheckedCommandInput(
+    string Name,
+    LangType Type,
+    CheckedCommandInputKind Kind,
+    int FieldIndex,
+    string Help,
+    CheckedCommandLiteral? Default);
+internal sealed record CheckedCommand(
+    int Id,
+    string PackageId,
+    string Module,
+    string Name,
+    string Help,
+    int ArgsStructId,
+    LangType ArgsType,
+    IReadOnlyList<CheckedCommandInput> Inputs,
+    int HandlerFunctionId,
+    string HandlerReference,
+    int ErrorFunctionId,
+    string ErrorReference,
+    LangType ErrorType,
+    Token At);
 
 internal abstract record TypedExpr(LangType Type, Token At);
 internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(LangType.I32, At);
@@ -256,7 +288,9 @@ internal sealed class CheckedProgram
         IEnumerable<CheckedFunction> functions,
         IEnumerable<CheckedUnion> unions,
         IEnumerable<CheckedStruct> structs,
-        IEnumerable<CheckedTest>? tests = null)
+        IEnumerable<CheckedTest>? tests = null,
+        IEnumerable<CheckedCommand>? commands = null,
+        int? entryCommandId = null)
     {
         Modules = Array.AsReadOnly(modules.ToArray());
         EntryModule = entryModule;
@@ -265,6 +299,8 @@ internal sealed class CheckedProgram
         Unions = Array.AsReadOnly(unions.ToArray());
         Structs = Array.AsReadOnly(structs.ToArray());
         Tests = Array.AsReadOnly((tests ?? []).ToArray());
+        Commands = Array.AsReadOnly((commands ?? []).ToArray());
+        EntryCommandId = entryCommandId;
     }
 
     // Retained for single-file API compatibility. For a package, this is the selected entry module.
@@ -276,6 +312,8 @@ internal sealed class CheckedProgram
     public IReadOnlyList<CheckedUnion> Unions { get; }
     public IReadOnlyList<CheckedStruct> Structs { get; }
     public IReadOnlyList<CheckedTest> Tests { get; }
+    public IReadOnlyList<CheckedCommand> Commands { get; }
+    public int? EntryCommandId { get; }
 }
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
@@ -356,6 +394,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<StructSymbol> _structs = [];
     private readonly List<FunctionSymbol> _functions = [];
     private readonly List<CheckedTest> _tests = [];
+    private readonly List<CommandSymbol> _commands = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
@@ -393,6 +432,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var module in orderedModules) RegisterUnionHeaders(module);
         foreach (var module in orderedModules) RegisterStructHeaders(module);
         foreach (var module in orderedModules) RegisterFunctionHeaders(module);
+        foreach (var module in orderedModules) RegisterCommandHeaders(module, rootPackageId, entryModule);
 
         foreach (var module in orderedModules) PopulateUnionVariants(module);
         foreach (var module in orderedModules) PopulateStructFields(module);
@@ -400,7 +440,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var module in orderedModules)
         {
             RegisterFunctionSignatures(module);
+        }
+        foreach (var module in orderedModules)
             RegisterTests(module);
+        // Command signatures may refer to handlers declared in any module. Resolve them only
+        // after every source function has a fully populated signature, independent of module order.
+        foreach (var module in orderedModules)
+        {
+            RegisterCommandSignatures(module);
         }
 
         ValidatePublicSignatures();
@@ -409,18 +456,30 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             CheckFunctionBody(function);
 
         InferEffectsAndValidateBounds();
+        ValidateCommandFormatterEffects();
 
         FunctionSymbol? entry = null;
+        CommandSymbol? entryCommand = null;
         if (entryModule is not null)
         {
             var entryIdentity = new ModuleIdentity(rootPackageId, entryModule);
-            if (_modulesByIdentity.TryGetValue(entryIdentity, out var entryScope) &&
-                entryScope.DeclaredFunctions.TryGetValue("main", out var main) &&
-                IsRunnableEntry(main))
+            if (_modulesByIdentity.TryGetValue(entryIdentity, out var entryScope))
             {
-                entry = main;
+                entryScope.DeclaredFunctions.TryGetValue("main", out var main);
+                if (main is not null && IsRunnableEntry(main))
+                {
+                    if (entryScope.Command is not null)
+                        Add("E_COMMAND_DECL", "A module cannot declare both a command and a runnable main function", entryScope.Command.Declaration.At);
+                    else
+                        entry = main;
+                }
+                else if (entryScope.Command is not null)
+                {
+                    entryCommand = entryScope.Command;
+                }
             }
-            else if (requireEntry)
+
+            if (entry is null && entryCommand is null && requireEntry)
             {
                 var at = _modulesByIdentity.TryGetValue(entryIdentity, out entryScope)
                     ? entryScope.Program.ModuleAt
@@ -448,14 +507,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             symbol.Type,
             ReadOnly(symbol.Fields),
             symbol.Declaration.At));
+        var commands = _commands.Select(command => command.ToCheckedCommand());
         return new CheckResult(new CheckedProgram(
             orderedModules.Select(module => module.Program.Module).ToArray(),
-            entry?.ModuleName,
+            entry?.ModuleName ?? entryCommand?.ModuleName,
             entry?.Id,
             functions,
             unions,
             structs,
-            _tests), diagnostics);
+            _tests,
+            commands,
+            entryCommand?.Id), diagnostics);
     }
 
     private static bool IsRunnableEntry(FunctionSymbol function) =>
@@ -522,6 +584,240 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var symbol = new FunctionSymbol(_functions.Count, module.Identity, declaration);
             _functions.Add(symbol);
             module.DeclaredFunctions.Add(declaration.Name, symbol);
+        }
+    }
+
+    private void RegisterCommandHeaders(ModuleSymbols module, string rootPackageId, string? entryModule)
+    {
+        _currentModule = module.Identity;
+        if (module.Program.Commands.Count == 0) return;
+
+        foreach (var duplicate in module.Program.Commands.Skip(1))
+            Add("E_COMMAND_DECL", "A module may declare at most one command", duplicate.At);
+
+        if (entryModule is null && module.PackageId != SinglePackageId)
+        {
+            foreach (var declaration in module.Program.Commands)
+                Add("E_COMMAND_DECL", "Library packages cannot declare commands", declaration.At);
+            return;
+        }
+
+        if (entryModule is not null &&
+            (module.PackageId != rootPackageId || module.Program.Module != entryModule))
+        {
+            foreach (var declaration in module.Program.Commands)
+                Add("E_COMMAND_DECL", "A package command must be declared in the package entry module", declaration.At);
+            return;
+        }
+
+        var command = module.Program.Commands[0];
+        var entries = command.Entries;
+        var helps = entries.OfType<CommandHelpSyntax>().ToArray();
+        var arguments = entries.OfType<CommandArgumentSyntax>().ToArray();
+        var options = entries.OfType<CommandOptionSyntax>().ToArray();
+        var flags = entries.OfType<CommandFlagSyntax>().ToArray();
+        var handlers = entries.OfType<CommandHandlerSyntax>().ToArray();
+        var errors = entries.OfType<CommandErrorSyntax>().ToArray();
+
+        if (helps.Length != 1)
+            Add("E_COMMAND_DECL", "A command must declare exactly one help entry", command.At);
+        if (arguments.Length == 0)
+            Add("E_COMMAND_DECL", "A command must declare at least one positional argument", command.At);
+        if (handlers.Length != 1)
+            Add("E_COMMAND_DECL", "A command must declare exactly one handler entry", command.At);
+        if (errors.Length != 1)
+            Add("E_COMMAND_DECL", "A command must declare exactly one error formatter entry", command.At);
+
+        var inputs = new List<CheckedCommandInput>();
+        var inputTokens = new List<Token>();
+        var fieldNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            switch (entry)
+            {
+                case CommandArgumentSyntax argument:
+                {
+                    if (!fieldNames.Add(argument.Name))
+                        Add("E_COMMAND_DECL", $"Command input '{argument.Name}' is declared more than once", argument.At);
+                    var type = ResolveCommandInputType(argument.Type, argument.At);
+                    inputs.Add(new CheckedCommandInput(argument.Name, type, CheckedCommandInputKind.Argument,
+                        inputs.Count, argument.Help, null));
+                    inputTokens.Add(argument.At);
+                    break;
+                }
+                case CommandOptionSyntax option:
+                {
+                    if (!fieldNames.Add(option.Name))
+                        Add("E_COMMAND_DECL", $"Command input '{option.Name}' is declared more than once", option.At);
+                    var type = ResolveCommandInputType(option.Type, option.At);
+                    var value = ToCheckedCommandLiteral(option.Default);
+                    if (!type.IsError && !CommandDefaultMatches(type, option.Default))
+                        Add("E_COMMAND_DECL", $"Default for command option '{option.Name}' does not match its supported type", option.Default.At);
+                    inputs.Add(new CheckedCommandInput(option.Name, type, CheckedCommandInputKind.Option,
+                        inputs.Count, option.Help, value));
+                    inputTokens.Add(option.At);
+                    break;
+                }
+                case CommandFlagSyntax flag:
+                {
+                    if (!fieldNames.Add(flag.Name))
+                        Add("E_COMMAND_DECL", $"Command input '{flag.Name}' is declared more than once", flag.At);
+                    inputs.Add(new CheckedCommandInput(flag.Name, LangType.Bool, CheckedCommandInputKind.Flag,
+                        inputs.Count, flag.Help, null));
+                    inputTokens.Add(flag.At);
+                    break;
+                }
+            }
+        }
+
+        var generatedName = CommandArgsTypeName(command.Name);
+        if (IsReservedTypeName(generatedName) || module.TypeNames.Contains(generatedName))
+        {
+            Add("E_COMMAND_DECL", $"Generated command argument type '{generatedName}' collides with a declared type", command.At);
+            return;
+        }
+        module.TypeNames.Add(generatedName);
+
+        var generatedFields = inputs.Select((input, index) => new StructFieldDecl(
+            input.Name,
+            TypeSyntaxForCommandInput(input.Type, command.At),
+            inputTokens[index])).ToArray();
+        var generatedDecl = new StructDecl(generatedName, true, generatedFields, command.At);
+        var argsType = LangType.ForStruct(_structs.Count, generatedName);
+        var argsStruct = new StructSymbol(_structs.Count, module.Identity, generatedDecl, argsType);
+        argsStruct.Fields.AddRange(inputs.Select((input, index) => new CheckedStructField(
+            input.Name, input.Type, index, generatedFields[index].At)));
+        _structs.Add(argsStruct);
+        module.DeclaredStructs.Add(generatedName, argsStruct);
+
+        var symbol = new CommandSymbol(
+            _commands.Count,
+            module.PackageId,
+            module.Identity,
+            command,
+            helps.FirstOrDefault()?.Text ?? string.Empty,
+            argsStruct,
+            inputs,
+            handlers.FirstOrDefault(),
+            errors.FirstOrDefault());
+        module.Command = symbol;
+        _commands.Add(symbol);
+    }
+
+    private static string CommandArgsTypeName(string commandName)
+    {
+        var words = commandName.Split('_', StringSplitOptions.RemoveEmptyEntries);
+        var name = string.Concat(words.Select(word => char.ToUpperInvariant(word[0]) + word[1..]));
+        return name + "Args";
+    }
+
+    private static TypeSyntax TypeSyntaxForCommandInput(LangType type, Token at)
+    {
+        var name = type.Kind switch
+        {
+            LangTypeKind.I32 => "i32",
+            LangTypeKind.Bool => "bool",
+            LangTypeKind.Text => "Text",
+            LangTypeKind.FilePath => "FilePath",
+            _ => "<error>"
+        };
+        return new TypeSyntax(new SourceDeclarationRefSyntax(null, [], name, at), [], at);
+    }
+
+    private LangType ResolveCommandInputType(TypeSyntax syntax, Token at)
+    {
+        if (syntax.Reference.IsQualified || syntax.Args.Count != 0)
+        {
+            Add("E_COMMAND_DECL", "Command inputs support only FilePath, Text, and i32", at);
+            return LangType.Error;
+        }
+
+        return syntax.Reference.Declaration switch
+        {
+            "FilePath" => LangType.FilePath,
+            "Text" => LangType.Text,
+            "i32" => LangType.I32,
+            _ => ReportUnsupportedCommandInputType(syntax.Reference.Declaration, at)
+        };
+    }
+
+    private LangType ReportUnsupportedCommandInputType(string name, Token at)
+    {
+        Add("E_COMMAND_DECL", $"Command input type '{name}' is not supported; use FilePath, Text, or i32", at);
+        return LangType.Error;
+    }
+
+    private static bool CommandDefaultMatches(LangType type, CommandLiteralSyntax value) =>
+        (type.IsI32 && value is CommandIntegerLiteralSyntax) ||
+        (type.IsText && value is CommandTextLiteralSyntax) ||
+        (type.IsFilePath && value is CommandTextLiteralSyntax path &&
+            !string.IsNullOrEmpty(path.Value) && !path.Value.Contains('\0'));
+
+    private static CheckedCommandLiteral ToCheckedCommandLiteral(CommandLiteralSyntax literal) => literal switch
+    {
+        CommandTextLiteralSyntax text => new CheckedCommandLiteral(CheckedCommandLiteralKind.Text, TextValue: text.Value),
+        CommandIntegerLiteralSyntax integer => new CheckedCommandLiteral(CheckedCommandLiteralKind.I32, IntegerValue: integer.Value),
+        CommandBooleanLiteralSyntax boolean => new CheckedCommandLiteral(CheckedCommandLiteralKind.Boolean, BooleanValue: boolean.Value),
+        _ => throw new InvalidOperationException("Unknown command literal")
+    };
+
+    private void RegisterCommandSignatures(ModuleSymbols module)
+    {
+        _currentModule = module.Identity;
+        var command = module.Command;
+        if (command is null) return;
+
+        if (command.HandlerSyntax is not null)
+        {
+            var handler = ResolveFunctionReference(command.HandlerSyntax.Reference);
+            if (handler is not null)
+            {
+                command.HandlerFunction = handler;
+                var validReturn = handler.ReturnType.Kind == LangTypeKind.Result &&
+                    handler.ReturnType.Arguments.Count == 2 &&
+                    handler.ReturnType.Arguments[0].IsText &&
+                    IsConcreteSupportedCommandError(handler.ReturnType.Arguments[1]);
+                if (validReturn)
+                    command.ErrorType = handler.ReturnType.Arguments[1];
+                if (handler.TypeParameters.Count != 0 || handler.Parameters.Count != 1 ||
+                    handler.Parameters.Count == 1 && handler.Parameters[0].Type != command.ArgsStruct.Type ||
+                    !validReturn)
+                {
+                    Add("E_COMMAND_HANDLER", "Command handler must take exactly the generated args type and return Result<Text, E> for a concrete error type", command.HandlerSyntax.Reference.At);
+                }
+            }
+        }
+
+        if (command.ErrorSyntax is not null)
+        {
+            var formatter = ResolveFunctionReference(command.ErrorSyntax.Reference);
+            if (formatter is not null)
+            {
+                command.ErrorFormatter = formatter;
+                var validSignature = formatter.TypeParameters.Count == 0 &&
+                    formatter.Parameters.Count == 1 &&
+                    (command.ErrorType.IsError || formatter.Parameters[0].Type == command.ErrorType) &&
+                    formatter.ReturnType.IsText;
+                if (!validSignature)
+                    Add("E_COMMAND_HANDLER", "Command error formatter must take exactly E and return Text", command.ErrorSyntax.Reference.At);
+                if (formatter.DeclaredEffects.Count != 0)
+                    Add("E_COMMAND_HANDLER", "Command error formatter must declare effects {}", command.ErrorSyntax.Reference.At);
+            }
+        }
+    }
+
+    private static bool IsConcreteSupportedCommandError(LangType type)
+    {
+        if (type.IsError || type.Kind == LangTypeKind.TypeParameter) return false;
+        return type.Arguments.All(IsConcreteSupportedCommandError);
+    }
+
+    private void ValidateCommandFormatterEffects()
+    {
+        foreach (var command in _commands)
+        {
+            if (command.ErrorFormatter?.CheckedFunction is { InferredEffects.Count: > 0 })
+                Add("E_COMMAND_HANDLER", "Command error formatter must be pure", command.ErrorSyntax!.Reference.At);
         }
     }
 
@@ -740,7 +1036,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsReservedTypeName(string name) =>
-        name is "i32" or "bool" or "Text" or "Option" or "Result" or "FsRead" or "FsError";
+        name is "i32" or "bool" or "Text" or "FilePath" or "Option" or "Result" or "FsRead" or "FsError";
 
     private void ValidatePublicSignatures()
     {
@@ -1817,6 +2113,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":
                 return NoTypeArguments(syntax, LangType.Text);
+            case "FilePath":
+                return NoTypeArguments(syntax, LangType.FilePath);
             case "FsRead":
                 return NoTypeArguments(syntax, LangType.FsRead);
             case "FsError":
@@ -1911,6 +2209,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public Dictionary<string, UnionSymbol> DeclaredUnions { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, StructSymbol> DeclaredStructs { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, FunctionSymbol> DeclaredFunctions { get; } = new(StringComparer.Ordinal);
+        public CommandSymbol? Command { get; set; }
     }
 
     private sealed class UnionSymbol(int id, ModuleIdentity moduleIdentity, UnionDecl declaration, LangType type)
@@ -1931,6 +2230,48 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public StructDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
         public List<CheckedStructField> Fields { get; } = [];
+    }
+
+    private sealed class CommandSymbol(
+        int id,
+        string packageId,
+        ModuleIdentity moduleIdentity,
+        CommandDecl declaration,
+        string help,
+        StructSymbol argsStruct,
+        IReadOnlyList<CheckedCommandInput> inputs,
+        CommandHandlerSyntax? handlerSyntax,
+        CommandErrorSyntax? errorSyntax)
+    {
+        public int Id { get; } = id;
+        public string PackageId { get; } = packageId;
+        public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string ModuleName => ModuleIdentity.ModuleName;
+        public CommandDecl Declaration { get; } = declaration;
+        public string Help { get; } = help;
+        public StructSymbol ArgsStruct { get; } = argsStruct;
+        public IReadOnlyList<CheckedCommandInput> Inputs { get; } = Array.AsReadOnly(inputs.ToArray());
+        public CommandHandlerSyntax? HandlerSyntax { get; } = handlerSyntax;
+        public CommandErrorSyntax? ErrorSyntax { get; } = errorSyntax;
+        public FunctionSymbol? HandlerFunction { get; set; }
+        public FunctionSymbol? ErrorFormatter { get; set; }
+        public LangType ErrorType { get; set; } = LangType.Error;
+
+        public CheckedCommand ToCheckedCommand() => new(
+            Id,
+            PackageId,
+            ModuleName,
+            Declaration.Name,
+            Help,
+            ArgsStruct.Id,
+            ArgsStruct.Type,
+            Inputs,
+            HandlerFunction!.Id,
+            SemanticChecker.FormatReference(HandlerSyntax!.Reference),
+            ErrorFormatter!.Id,
+            SemanticChecker.FormatReference(ErrorSyntax!.Reference),
+            ErrorType,
+            Declaration.At);
     }
 
     private sealed class FunctionSymbol(

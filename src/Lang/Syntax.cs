@@ -28,6 +28,23 @@ internal sealed record VariantDecl(string Name, IReadOnlyList<VariantFieldDecl> 
 internal sealed record UnionDecl(string Name, bool Public, IReadOnlyList<VariantDecl> Variants, Token At);
 internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record StructDecl(string Name, bool Public, IReadOnlyList<StructFieldDecl> Fields, Token At);
+internal abstract record CommandEntrySyntax(Token At);
+internal sealed record CommandHelpSyntax(Token At, string Text) : CommandEntrySyntax(At);
+internal sealed record CommandArgumentSyntax(Token At, string Name, TypeSyntax Type, string Help) : CommandEntrySyntax(At);
+internal sealed record CommandOptionSyntax(
+    Token At,
+    string Name,
+    TypeSyntax Type,
+    CommandLiteralSyntax Default,
+    string Help) : CommandEntrySyntax(At);
+internal sealed record CommandFlagSyntax(Token At, string Name, string Help) : CommandEntrySyntax(At);
+internal sealed record CommandHandlerSyntax(Token At, SourceDeclarationRefSyntax Reference) : CommandEntrySyntax(At);
+internal sealed record CommandErrorSyntax(Token At, SourceDeclarationRefSyntax Reference) : CommandEntrySyntax(At);
+internal abstract record CommandLiteralSyntax(Token At);
+internal sealed record CommandTextLiteralSyntax(Token At, string Value) : CommandLiteralSyntax(At);
+internal sealed record CommandIntegerLiteralSyntax(Token At, int Value) : CommandLiteralSyntax(At);
+internal sealed record CommandBooleanLiteralSyntax(Token At, bool Value) : CommandLiteralSyntax(At);
+internal sealed record CommandDecl(string Name, IReadOnlyList<CommandEntrySyntax> Entries, Token At);
 internal sealed record FunctionDecl(
     string Name,
     IReadOnlyList<TypeParameterSyntax> TypeParameters,
@@ -44,7 +61,8 @@ internal sealed record ParsedProgram(
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs,
-    IReadOnlyList<TestDecl> Tests);
+    IReadOnlyList<TestDecl> Tests,
+    IReadOnlyList<CommandDecl> Commands);
 
 internal sealed record TestDecl(
     string Name,
