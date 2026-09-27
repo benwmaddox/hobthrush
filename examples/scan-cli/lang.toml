@@ -1,0 +1,11 @@
+name = "scan-cli"
+version = "0.1.0"
+kind = "cli"
+source_root = "src"
+entry_module = "app::main"
+
+[capabilities]
+fs.read = "allow"
+
+[dependencies]
+validation = "../text-validation"

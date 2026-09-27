@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text;
 
 internal sealed record PackageManifest(
@@ -6,6 +7,7 @@ internal sealed record PackageManifest(
     string Kind,
     string SourceRoot,
     string? EntryModule,
+    IReadOnlySet<string> Capabilities,
     IReadOnlyList<PackageDependency> Dependencies)
 {
     public bool IsLibrary => Kind == "lib";
@@ -136,7 +138,7 @@ internal static class PackageLoader
         }
 
         var parsedManifest = ParseManifest(manifestText, manifestFile, diagnostics);
-        ValidateManifest(parsedManifest.Values, manifestFile, diagnostics);
+        ValidateManifest(parsedManifest.Values, parsedManifest.Capabilities, manifestFile, diagnostics);
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
@@ -146,6 +148,7 @@ internal static class PackageLoader
             parsedManifest.Values["kind"],
             parsedManifest.Values["source_root"],
             parsedManifest.Values.GetValueOrDefault("entry_module"),
+            parsedManifest.Capabilities,
             parsedManifest.Dependencies);
 
         string sourceDirectory;
@@ -380,7 +383,8 @@ internal static class PackageLoader
 
     private sealed record ParsedManifest(
         Dictionary<string, string> Values,
-        IReadOnlyList<PackageDependency> Dependencies);
+        IReadOnlyList<PackageDependency> Dependencies,
+        IReadOnlySet<string> Capabilities);
 
     private static ParsedManifest ParseManifest(
         string text,
@@ -389,8 +393,11 @@ internal static class PackageLoader
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var dependencies = new List<PackageDependency>();
+        var capabilities = new HashSet<string>(StringComparer.Ordinal);
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inCapabilities = false;
         var inDependencies = false;
+        var capabilitiesSeen = false;
         var dependenciesSeen = false;
         using var reader = new StringReader(text);
         var lineNumber = 0;
@@ -403,8 +410,17 @@ internal static class PackageLoader
 
             if (trimmed.StartsWith('['))
             {
+                if (trimmed == "[capabilities]" && !capabilitiesSeen && !dependenciesSeen)
+                {
+                    inCapabilities = true;
+                    inDependencies = false;
+                    capabilitiesSeen = true;
+                    continue;
+                }
+
                 if (trimmed == "[dependencies]" && !dependenciesSeen)
                 {
+                    inCapabilities = false;
                     inDependencies = true;
                     dependenciesSeen = true;
                     continue;
@@ -412,6 +428,8 @@ internal static class PackageLoader
 
                 var sectionMessage = trimmed == "[dependencies]"
                     ? "The [dependencies] section may appear only once"
+                    : trimmed == "[capabilities]"
+                        ? "The [capabilities] section may appear once before [dependencies]"
                     : $"Unknown manifest section '{trimmed}'";
                 diagnostics.Add(AtLine("E_MANIFEST", sectionMessage, file, lineNumber));
                 continue;
@@ -438,6 +456,29 @@ internal static class PackageLoader
 
             var key = trimmed[..equals].Trim();
             var rawValue = trimmed[(equals + 1)..].Trim();
+            if (inCapabilities)
+            {
+                if (key != "fs.read")
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
+                    continue;
+                }
+
+                if (!capabilities.Add(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Duplicate capability '{key}'", file, lineNumber));
+                    continue;
+                }
+
+                if (!TryReadStringValue(rawValue, out var grant) || grant != "allow")
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Capability '{key}' must be assigned the value \"allow\"", file, lineNumber));
+                    continue;
+                }
+
+                continue;
+            }
+
             if (inDependencies)
             {
                 if (!IsDependencyAlias(key))
@@ -511,11 +552,12 @@ internal static class PackageLoader
             values.Add(key, value);
         }
 
-        return new ParsedManifest(values, dependencies);
+        return new ParsedManifest(values, dependencies, capabilities.ToFrozenSet(StringComparer.Ordinal));
     }
 
     private static void ValidateManifest(
         IReadOnlyDictionary<string, string> values,
+        IReadOnlySet<string> capabilities,
         string file,
         List<Diagnostic> diagnostics)
     {
@@ -549,6 +591,9 @@ internal static class PackageLoader
                 diagnostics.Add(AtStart("E_MANIFEST", "CLI packages require entry_module", file));
             else if (kind == "lib" && hasEntryModule)
                 diagnostics.Add(AtStart("E_MANIFEST", "Library packages must not declare entry_module", file));
+
+            if (kind == "lib" && capabilities.Count != 0)
+                diagnostics.Add(AtStart("E_MANIFEST", "Library packages cannot declare capabilities", file));
         }
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))

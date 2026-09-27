@@ -279,7 +279,9 @@ internal static class Driver
         var checkedPackage = Compiler.CheckPackage(
             parsed.Modules,
             graph.Root.Id,
-            entryModuleExists ? entryModule : null);
+            entryModuleExists ? entryModule : null,
+            package.Manifest.Capabilities,
+            rootIsCliPackage: !package.Manifest.IsLibrary);
         if (checkedPackage.Diagnostics.Count != 0 || !entryModuleExists)
         {
             var diagnostics = checkedPackage.Diagnostics.ToList();

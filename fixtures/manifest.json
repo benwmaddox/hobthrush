@@ -71,7 +71,7 @@
   },
   {
     "file": "15-capability-missing.lang",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_CAPABILITY_MISSING"
   },
   {
