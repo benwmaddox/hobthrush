@@ -75,20 +75,28 @@ fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::
         return self::app::main::CreateReply.Invalid("city must contain non-whitespace text");
     }
 
-    let written: Result<i32, DbError> = db.execute(
-        "INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city",
-        self::app::main::GreetingWriteParameters { id: 1, name: normalized, city: city }
-    );
-    return match written {
-        Ok(count) => self::app::main::CreateReply.Created(self::app::main::Greeting {
-            message: normalized,
-            profile: self::app::main::Profile { city: city }
-        }),
-        Err(error) => match error {
-            DbError.Statement => self::app::main::CreateReply.StorageFailure("database statement failed"),
-            DbError.RowShape => self::app::main::CreateReply.StorageFailure("database row shape is invalid")
-        }
-    };
+    with db.begin() as tx {
+        let written: Result<i32, DbError> = tx.execute(
+            "INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city",
+            self::app::main::GreetingWriteParameters { id: 1, name: normalized, city: city }
+        );
+        return match written {
+            Ok(count) => match tx.commit() {
+                Ok(committed) => self::app::main::CreateReply.Created(self::app::main::Greeting {
+                    message: normalized,
+                    profile: self::app::main::Profile { city: city }
+                }),
+                Err(error) => match error {
+                    DbError.Statement => self::app::main::CreateReply.StorageFailure("database statement failed"),
+                    DbError.RowShape => self::app::main::CreateReply.StorageFailure("database row shape is invalid")
+                }
+            },
+            Err(error) => match error {
+                DbError.Statement => self::app::main::CreateReply.StorageFailure("database statement failed"),
+                DbError.RowShape => self::app::main::CreateReply.StorageFailure("database row shape is invalid")
+            }
+        };
+    }
 }
 
 fn health() -> self::app::main::HealthReply effects {} {

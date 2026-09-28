@@ -99,6 +99,7 @@ internal static class IntegrationTests
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("maintained web package serves typed routes with bounded request handling", TestMaintainedWebExample),
+            ("SQLite transactions commit once and roll back on scope exit and early return", TestSqliteTransactions),
             ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
             ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
             ("SQLite library operations build without web database configuration", TestSqliteLibraryBuild),
@@ -648,12 +649,18 @@ internal static class IntegrationTests
         const string source = """
             module true::false::null::match::if::await::with::route::command::effects::return::fn;
             struct effects { route: i32, return: i32, if: i32, true: i32, null: i32 }
+            struct WithField { with: i32 }
             union Choice { return(null: i32) }
 
             fn route(command: i32) -> i32 effects {} {
                 let return: i32 = command;
                 let route: i32 = return;
                 return route;
+            }
+
+            fn with(value: i32) -> i32 effects {} {
+                let with: i32 = value;
+                return with;
             }
 
             fn make_choice(value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects) -> self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice effects {} {
@@ -663,9 +670,11 @@ internal static class IntegrationTests
             pub fn main() -> i32 effects {} {
                 let value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects = self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects { route: 1, return: 2, if: 3, true: 4, null: 5 };
                 let choice: self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice = self::true::false::null::match::if::await::with::route::command::effects::return::fn::make_choice(value);
-                return match choice {
+                let payload_value: i32 = match choice {
                     self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice.return(payload) => self::true::false::null::match::if::await::with::route::command::effects::return::fn::route(payload),
                 };
+                let with_field: self::true::false::null::match::if::await::with::route::command::effects::return::fn::WithField = self::true::false::null::match::if::await::with::route::command::effects::return::fn::WithField { with: self::true::false::null::match::if::await::with::route::command::effects::return::fn::with(payload_value) };
+                return with_field.with;
             }
             """;
 
@@ -1223,6 +1232,12 @@ internal static class IntegrationTests
             + "    let written: Result<i32, DbError> = db.execute(\"INSERT INTO sample (id) VALUES ($id)\", self::app::main::WriteParameters { id: 2 });\n"
             + "    return written;\n"
             + "}\n"
+            + "fn transaction_record(db: DbWrite) -> Result<bool, DbError> effects { db.write } {\n"
+            + "    with db.begin() as tx {\n"
+            + "        let written: Result<i32, DbError> = tx.execute(\"INSERT INTO sample (id) VALUES ($id)\", self::app::main::WriteParameters { id: 3 });\n"
+            + "        return match written { Ok(count) => tx.commit(), Err(error) => Err(error) };\n"
+            + "    }\n"
+            + "}\n"
             + "fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {\n"
             + "    let loaded: Result<Option<self::app::main::Row>, DbError> = self::app::main::load_record(db);\n"
             + "    return self::app::main::Reply.Ready;\n"
@@ -1270,6 +1285,24 @@ internal static class IntegrationTests
             AssertEqual("DbWrite.execute", operations[0].GetProperty("operation").GetString(), "The write adapter operation should be named.");
             AssertEqual("trusted_adapter", operations[0].GetProperty("trust").GetString(), "The write adapter should be identified as trusted runtime code.");
             AssertEqual("db.write", JsonStringArrayText(operations[0].GetProperty("effects")), "The write adapter should carry db.write.");
+        }
+
+        var transaction = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::app::main::transaction_record", "--json");
+        AssertEqual(0, transaction.ExitCode, Describe(transaction));
+        using (var transactionJson = JsonDocument.Parse(transaction.StandardOutput))
+        {
+            var report = transactionJson.RootElement;
+            AssertEqual("db.write", JsonStringArrayText(report.GetProperty("inferred_effects")),
+                "A transaction-only function should retain its db.write effect.");
+            var operations = report.GetProperty("trusted_operations").EnumerateArray().ToArray();
+            AssertEqual("DbWrite.begin,Transaction.commit,Transaction.execute",
+                string.Join(",", operations.Select(operation => operation.GetProperty("operation").GetString())),
+                "Inspect effects should report the actual transaction boundary and operations, not DbWrite.execute.");
+            AssertTrue(operations.All(operation =>
+                    operation.GetProperty("trust").GetString() == "trusted_adapter"
+                    && JsonStringArrayText(operation.GetProperty("effects")) == "db.write"),
+                "Every transaction adapter operation should be labeled as trusted db.write runtime code.");
         }
 
         static string JsonStringArrayText(JsonElement element) =>
@@ -3330,11 +3363,11 @@ internal static class IntegrationTests
         AssertTrue(source.Contains("validation::text::validation::normalize", StringComparison.Ordinal),
             "The POST handler must normalize its request through the shared validation library.");
         AssertTrue(source.Contains("db.query_one", StringComparison.Ordinal)
-            && source.Contains("db.execute", StringComparison.Ordinal)
+            && source.Contains("tx.execute", StringComparison.Ordinal)
             && source.Contains("DbError.Statement", StringComparison.Ordinal)
             && source.Contains("DbError.RowShape", StringComparison.Ordinal)
             && source.Contains("route GET \"/health\"", StringComparison.Ordinal),
-            "The maintained web sample must read/write SQLite, match typed database errors, and declare /health.");
+            "The maintained web sample must read SQLite, write in a transaction, match typed database errors, and declare /health.");
 
         var check = await harness.InvokePackageDirectoryAsync("maintained-web-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -3740,6 +3773,336 @@ internal static class IntegrationTests
             await AssertLoopbackPortReleasedAsync(directPort);
         }
 
+    }
+
+    private static async Task TestSqliteTransactions(Harness harness)
+    {
+        const string source = """
+            module app::main;
+
+            struct WriteParameters { id: i32, value: Text }
+            struct EmptyParameters {}
+            struct CountRow { total: i32 }
+
+            union CommitReply { Committed(bool), Failure }
+            union SimpleReply { Done, Failure }
+            union FailedReply { ExpectedCommitFailure, CommitSucceeded(bool), Failure }
+            union StateReply { Count(i32), Failure }
+
+            fn commit_first(db: DbWrite) -> self::app::main::CommitReply effects { db.write } {
+                with db.begin() as tx {
+                    let written: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 1, value: "committed" }
+                    );
+                    return match written {
+                        Ok(count) => match tx.commit() {
+                            Ok(committed) => self::app::main::CommitReply.Committed(committed),
+                            Err(error) => self::app::main::CommitReply.Failure
+                        },
+                        Err(error) => self::app::main::CommitReply.Failure
+                    };
+                }
+            }
+
+            fn rollback_by_scope_exit(db: DbWrite) -> self::app::main::SimpleReply effects { db.write } {
+                with db.begin() as tx {
+                    let written: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 2, value: "implicit rollback" }
+                    );
+                    let succeeded: bool = match written {
+                        Ok(count) => true,
+                        Err(error) => false
+                    };
+                    if succeeded == false {
+                        return self::app::main::SimpleReply.Failure;
+                    }
+                }
+                return self::app::main::SimpleReply.Done;
+            }
+
+            fn failed_statement_blocks_commit(db: DbWrite) -> self::app::main::FailedReply effects { db.write } {
+                with db.begin() as tx {
+                    let first: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 3, value: "must roll back" }
+                    );
+                    let first_succeeded: bool = match first {
+                        Ok(count) => true,
+                        Err(error) => false
+                    };
+                    if first_succeeded == false {
+                        return self::app::main::FailedReply.Failure;
+                    }
+
+                    let duplicate: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 3, value: "duplicate" }
+                    );
+                    let duplicate_succeeded: bool = match duplicate {
+                        Ok(count) => true,
+                        Err(error) => false
+                    };
+                    if duplicate_succeeded {
+                        return self::app::main::FailedReply.Failure;
+                    }
+
+                    let commit_result: Result<bool, DbError> = tx.commit();
+                    return match commit_result {
+                        Ok(committed) => self::app::main::FailedReply.CommitSucceeded(committed),
+                        Err(error) => match error {
+                            DbError.Statement => self::app::main::FailedReply.ExpectedCommitFailure,
+                            DbError.RowShape => self::app::main::FailedReply.Failure
+                        }
+                    };
+                }
+            }
+
+            fn rollback_by_early_return(db: DbWrite) -> self::app::main::SimpleReply effects { db.write } {
+                with db.begin() as tx {
+                    let written: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 4, value: "early return" }
+                    );
+                    return match written {
+                        Ok(count) => self::app::main::SimpleReply.Done,
+                        Err(error) => self::app::main::SimpleReply.Failure
+                    };
+                }
+            }
+
+            fn state(db: DbRead) -> self::app::main::StateReply effects { db.read } {
+                let loaded: Result<Option<self::app::main::CountRow>, DbError> = db.query_one(
+                    "SELECT COUNT(*) AS total FROM record",
+                    self::app::main::EmptyParameters {}
+                );
+                return match loaded {
+                    Ok(value) => match value {
+                        Some(row) => self::app::main::StateReply.Count(row.total),
+                        None => self::app::main::StateReply.Failure
+                    },
+                    Err(error) => self::app::main::StateReply.Failure
+                };
+            }
+
+            route GET "/" {
+                handler: self::app::main::state;
+                response Count: 200 json i32;
+                response Failure: 500;
+            }
+
+            route GET "/commit" {
+                handler: self::app::main::commit_first;
+                response Committed: 200 json bool;
+                response Failure: 500;
+            }
+
+            route GET "/rollback" {
+                handler: self::app::main::rollback_by_scope_exit;
+                response Done: 200;
+                response Failure: 500;
+            }
+
+            route GET "/failed" {
+                handler: self::app::main::failed_statement_blocks_commit;
+                response ExpectedCommitFailure: 200;
+                response CommitSucceeded: 409 json bool;
+                response Failure: 500;
+            }
+
+            route GET "/early-return" {
+                handler: self::app::main::rollback_by_early_return;
+                response Done: 200;
+                response Failure: 500;
+            }
+            """;
+        const string manifest = "name = \"sqlite-transaction-runtime\"\n"
+            + "version = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+            + "sqlite_path = \"data/transactions.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+            + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "sqlite-transaction-runtime",
+            manifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source,
+                ["db/schema.sql"] = "CREATE TABLE IF NOT EXISTS record (id INTEGER PRIMARY KEY, value TEXT NOT NULL);\n"
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("sqlite-transaction-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-transaction-alias-escape",
+            "name = \"sqlite-transaction-alias-escape\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main;\n"
+                    + "fn invalid(db: DbWrite) -> bool effects { db.write } {\n"
+                    + "    with db.begin() as tx { let alias: Transaction = tx; return true; }\n}\n"
+            },
+            "E_RESOURCE_ESCAPE",
+            "src/app/main.lang");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-transaction-argument-escape",
+            "name = \"sqlite-transaction-argument-escape\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main;\n"
+                    + "fn accept(tx: Transaction) -> bool effects {} { return true; }\n"
+                    + "fn invalid(db: DbWrite) -> bool effects { db.write } {\n"
+                    + "    with db.begin() as tx { return self::app::main::accept(tx); }\n}\n"
+            },
+            "E_RESOURCE_ESCAPE",
+            "src/app/main.lang");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-transaction-store-escape",
+            "name = \"sqlite-transaction-store-escape\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main;\n"
+                    + "struct Holder { transaction: Transaction }\n"
+                    + "fn invalid(db: DbWrite) -> bool effects { db.write } {\n"
+                    + "    with db.begin() as tx {\n"
+                    + "        let holder: self::app::main::Holder = self::app::main::Holder { transaction: tx };\n"
+                    + "        return true;\n"
+                    + "    }\n}\n"
+            },
+            "E_RESOURCE_ESCAPE",
+            "src/app/main.lang");
+
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-parameter-type",
+            "fn invalid(tx: Transaction) -> bool effects {} { return true; }\n");
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-local-type",
+            "fn invalid(db: DbWrite) -> bool effects { db.write } {\n"
+                + "    with db.begin() as tx { let alias: Transaction = tx; return true; }\n}\n");
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-struct-field-type",
+            "struct Holder { transaction: Transaction }\n");
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-union-payload-type",
+            "union Holder { Stored(Transaction), Empty }\n");
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-generic-wrapper-type",
+            "struct Holder { transaction: Option<Transaction> }\n");
+        await ExpectTransactionTypeEscapeAsync(
+            "sqlite-transaction-recursive-return-type",
+            "fn recursive() -> Transaction effects {} { return self::app::main::recursive(); }\n");
+
+        await ExpectTransactionSqlDiagnosticAsync("sqlite-transaction-sql-commit", "COMMIT");
+        await ExpectTransactionSqlDiagnosticAsync("sqlite-transaction-sql-rollback", "ROLLBACK");
+        await ExpectTransactionSqlDiagnosticAsync("sqlite-transaction-sql-begin", "BEGIN");
+        await ExpectTransactionSqlDiagnosticAsync(
+            "sqlite-transaction-sql-multiple-statements",
+            "INSERT INTO sample DEFAULT VALUES; DELETE FROM sample");
+
+        var databasePath = Path.Combine(harness.TemporaryRoot, "sqlite-transactions.sqlite3");
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal) { ["LANG_SQLITE_PATH"] = databasePath };
+        var port = GetUnusedLoopbackPort();
+        var address = new Uri($"http://127.0.0.1:{port}");
+        using var client = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(4) };
+        using var process = harness.StartWebPackageProcessWithEnvironment(
+            "sqlite-transaction-run", packageRoot, environment, "--urls", address.ToString().TrimEnd('/'));
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var assertionsCompleted = false;
+        try
+        {
+            await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
+            AssertEqual(0, await ReadTransactionCountAsync(client), "A new SQLite transaction fixture should start with no rows.");
+
+            using (var committed = await client.GetAsync("/commit"))
+            {
+                AssertEqual(HttpStatusCode.OK, committed.StatusCode, "The transaction commit route should return success.");
+                AssertEqual("true", await committed.Content.ReadAsStringAsync(),
+                    "The first successful transaction commit should return Ok(true).");
+            }
+            AssertEqual(1, await ReadTransactionCountAsync(client), "A committed write must persist after leaving its scope.");
+
+            using (var rolledBack = await client.GetAsync("/rollback"))
+                AssertEqual(HttpStatusCode.OK, rolledBack.StatusCode, "A write-only transaction should be allowed to leave scope without committing.");
+            AssertEqual(1, await ReadTransactionCountAsync(client), "Normal scope exit without commit must roll back its write.");
+
+            using (var failed = await client.GetAsync("/failed"))
+                AssertEqual(HttpStatusCode.OK, failed.StatusCode,
+                    "A failed statement should make a subsequent commit return Err(DbError.Statement).");
+            AssertEqual(1, await ReadTransactionCountAsync(client),
+                "A failed statement must roll back an earlier successful write in the same transaction.");
+
+            using (var earlyReturn = await client.GetAsync("/early-return"))
+                AssertEqual(HttpStatusCode.OK, earlyReturn.StatusCode, "The early-return transaction route should report its successful write.");
+            AssertEqual(1, await ReadTransactionCountAsync(client), "An early function return must leave the transaction uncommitted and roll it back.");
+
+            assertionsCompleted = true;
+        }
+        finally
+        {
+            client.Dispose();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: !assertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await process.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The SQLite transaction fixture host did not stop within 10 seconds.");
+                }
+            }
+
+            await Task.WhenAll(stdoutTask, stderrTask);
+            await AssertLoopbackPortReleasedAsync(port);
+        }
+
+        static async Task<int> ReadTransactionCountAsync(HttpClient client)
+        {
+            using var response = await client.GetAsync("/");
+            AssertEqual(HttpStatusCode.OK, response.StatusCode, "The transaction state route should return 200.");
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return json.RootElement.GetInt32();
+        }
+
+        async Task ExpectTransactionTypeEscapeAsync(string caseName, string declaration)
+        {
+            var sourceText = "module app::main;\n" + declaration;
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                caseName,
+                "name = \"" + caseName + "\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = sourceText },
+                "E_RESOURCE_ESCAPE",
+                "src/app/main.lang");
+        }
+
+        async Task ExpectTransactionSqlDiagnosticAsync(string caseName, string sql)
+        {
+            var sourceText = "module app::main;\n"
+                + "struct Parameters {}\n"
+                + "fn invalid(db: DbWrite) -> bool effects { db.write } {\n"
+                + "    with db.begin() as tx {\n"
+                + "        let result: Result<i32, DbError> = tx.execute("
+                + JsonSerializer.Serialize(sql)
+                + ", self::app::main::Parameters {});\n"
+                + "        return true;\n"
+                + "    }\n"
+                + "}\n";
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                caseName,
+                "name = \"" + caseName + "\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = sourceText },
+                "E_DB_TRANSACTION_STATEMENT",
+                "src/app/main.lang");
+        }
     }
 
     private static async Task TestSqliteRowDecoding(Harness harness)
@@ -4684,7 +5047,7 @@ internal static class IntegrationTests
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(result));
-        AssertTrue(result.StandardOutput.EndsWith("41 active, 1 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(result.StandardOutput.EndsWith("42 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(result));
         AssertEqual(string.Empty, result.StandardError, Describe(result));
     }

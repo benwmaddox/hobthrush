@@ -448,20 +448,7 @@ internal static class Driver
             trustedOperations.Add(new TrustedOperation("cli.output", "trusted_host", []));
         }
 
-        if (inferredEffects.Contains("fs.read", StringComparer.Ordinal))
-        {
-            trustedOperations.Add(new TrustedOperation("FsRead.read_text", "trusted_adapter", ["fs.read"]));
-        }
-
-        if (inferredEffects.Contains("db.read", StringComparer.Ordinal))
-        {
-            trustedOperations.Add(new TrustedOperation("DbRead.query_one", "trusted_adapter", ["db.read"]));
-        }
-
-        if (inferredEffects.Contains("db.write", StringComparer.Ordinal))
-        {
-            trustedOperations.Add(new TrustedOperation("DbWrite.execute", "trusted_adapter", ["db.write"]));
-        }
+        trustedOperations.AddRange(FindTrustedAdapterOperations(checkedPackage.Program, function));
 
         var output = new
         {
@@ -478,6 +465,131 @@ internal static class Driver
         };
         Console.WriteLine(JsonSerializer.Serialize(output, JsonOptions));
         return 0;
+    }
+
+    private static IReadOnlyList<TrustedOperation> FindTrustedAdapterOperations(
+        CheckedProgram program,
+        CheckedFunction root)
+    {
+        var functionById = program.Functions.ToDictionary(function => function.Id);
+        var visitedFunctions = new HashSet<int>();
+        var operationNames = new SortedSet<string>(StringComparer.Ordinal);
+
+        VisitFunction(root);
+        return operationNames.Select(operation => new TrustedOperation(
+            operation,
+            "trusted_adapter",
+            [operation switch
+            {
+                "FsRead.read_text" => "fs.read",
+                "DbRead.query_one" => "db.read",
+                _ => "db.write"
+            }])).ToArray();
+
+        void VisitFunction(CheckedFunction function)
+        {
+            if (!visitedFunctions.Add(function.Id))
+                return;
+
+            foreach (var statement in function.Body)
+                VisitStatement(statement);
+        }
+
+        void VisitStatement(TypedStmt statement)
+        {
+            switch (statement)
+            {
+                case TypedLetStmt let:
+                    VisitExpression(let.Value);
+                    break;
+                case TypedReturnStmt returned:
+                    VisitExpression(returned.Value);
+                    break;
+                case TypedIfStmt conditional:
+                    VisitExpression(conditional.Condition);
+                    foreach (var nested in conditional.ThenBody)
+                        VisitStatement(nested);
+                    if (conditional.ElseBody is not null)
+                    {
+                        foreach (var nested in conditional.ElseBody)
+                            VisitStatement(nested);
+                    }
+                    break;
+                case TypedWithTransactionStmt transaction:
+                    operationNames.Add("DbWrite.begin");
+                    VisitExpression(transaction.Database);
+                    foreach (var nested in transaction.Body)
+                        VisitStatement(nested);
+                    break;
+            }
+        }
+
+        void VisitExpression(TypedExpr expression)
+        {
+            switch (expression)
+            {
+                case TypedBinaryExpr binary:
+                    VisitExpression(binary.Left);
+                    VisitExpression(binary.Right);
+                    break;
+                case TypedCompareExpr comparison:
+                    VisitExpression(comparison.Left);
+                    VisitExpression(comparison.Right);
+                    break;
+                case TypedTextLengthExpr length:
+                    VisitExpression(length.Target);
+                    break;
+                case TypedTextTrimExpr trim:
+                    VisitExpression(trim.Target);
+                    break;
+                case TypedCallExpr call:
+                    foreach (var argument in call.Arguments)
+                        VisitExpression(argument);
+                    if (functionById.TryGetValue(call.FunctionId, out var calledFunction))
+                        VisitFunction(calledFunction);
+                    break;
+                case TypedIntrinsicCallExpr intrinsic:
+                    if (intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText)
+                        operationNames.Add("FsRead.read_text");
+                    foreach (var argument in intrinsic.Arguments)
+                        VisitExpression(argument);
+                    break;
+                case TypedDatabaseCallExpr databaseCall:
+                    operationNames.Add(databaseCall.Operation.Kind switch
+                    {
+                        CheckedDatabaseOperationKind.QueryOne => "DbRead.query_one",
+                        CheckedDatabaseOperationKind.Execute => "DbWrite.execute",
+                        CheckedDatabaseOperationKind.TransactionExecute => "Transaction.execute",
+                        _ => throw new InvalidOperationException("Unknown checked database operation")
+                    });
+                    VisitExpression(databaseCall.Receiver);
+                    VisitExpression(databaseCall.Parameters);
+                    break;
+                case TypedTransactionCommitExpr:
+                    operationNames.Add("Transaction.commit");
+                    break;
+                case TypedBuiltinConstructExpr builtin:
+                    foreach (var argument in builtin.Arguments)
+                        VisitExpression(argument);
+                    break;
+                case TypedUnionConstructExpr union:
+                    foreach (var argument in union.Arguments)
+                        VisitExpression(argument);
+                    break;
+                case TypedStructConstructExpr structure:
+                    foreach (var field in structure.Fields)
+                        VisitExpression(field.Value);
+                    break;
+                case TypedFieldAccessExpr field:
+                    VisitExpression(field.Target);
+                    break;
+                case TypedMatchExpr match:
+                    VisitExpression(match.Value);
+                    foreach (var arm in match.Arms)
+                        VisitExpression(arm.Body);
+                    break;
+            }
+        }
     }
 
     private static bool TryParseInspectSymbol(string symbol, out string module, out string function)

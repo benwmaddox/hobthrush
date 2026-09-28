@@ -76,7 +76,7 @@
   },
   {
     "file": "16-resource-escape.lang",
-    "status": "pending",
+    "status": "active",
     "expectedCode": "E_RESOURCE_ESCAPE"
   },
   {
