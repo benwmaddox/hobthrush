@@ -132,21 +132,30 @@ internal sealed class LangType : IEquatable<LangType>
 
 internal sealed record CheckedVariantField(string? Name, LangType Type, int Index, Token At);
 internal sealed record CheckedVariant(int Id, string Name, IReadOnlyList<CheckedVariantField> Fields, Token At);
-internal sealed record CheckedUnion(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
+internal sealed record CheckedUnion(int Id, string PackageId, string Module, string Name, bool Public, LangType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
 internal sealed record CheckedStructField(string Name, LangType Type, int Index, Token At);
-internal sealed record CheckedStruct(int Id, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
+internal sealed record CheckedStruct(int Id, string PackageId, string Module, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
+internal sealed record CheckedDirectCall(string PackageId, string Module, string Name);
 internal sealed record CheckedTest(string Name, string PackageId, string Module, int FunctionId, Token At);
 internal sealed record CheckedEffectPath
 {
-    internal CheckedEffectPath(string effect, IEnumerable<string> steps)
+    internal CheckedEffectPath(
+        string effect,
+        IEnumerable<string> steps,
+        IEnumerable<int> functionIds,
+        string intrinsicName)
     {
         Effect = effect;
         Steps = Array.AsReadOnly(steps.ToArray());
+        FunctionIds = Array.AsReadOnly(functionIds.ToArray());
+        IntrinsicName = intrinsicName;
     }
 
     public string Effect { get; }
     public IReadOnlyList<string> Steps { get; }
+    internal IReadOnlyList<int> FunctionIds { get; }
+    internal string IntrinsicName { get; }
 }
 internal enum CheckedCommandInputKind { Argument, Option, Flag }
 internal enum CheckedCommandLiteralKind { Text, I32, Boolean }
@@ -387,6 +396,7 @@ internal sealed class CheckedFunction
 {
     internal CheckedFunction(
         int id,
+        string packageId,
         string module,
         string name,
         bool isPublic,
@@ -394,10 +404,12 @@ internal sealed class CheckedFunction
         IReadOnlyList<LangType> typeParameters,
         LangType returnType,
         IReadOnlyList<TypedStmt> body,
+        IEnumerable<CheckedDirectCall> calls,
         IReadOnlyList<string> declaredEffects,
         Token at)
     {
         Id = id;
+        PackageId = packageId;
         Module = module;
         Name = name;
         Public = isPublic;
@@ -405,6 +417,7 @@ internal sealed class CheckedFunction
         TypeParameters = ReadOnly(typeParameters);
         ReturnType = returnType;
         Body = ReadOnly(body);
+        Calls = ReadOnly(calls);
         DeclaredEffects = ReadOnly(declaredEffects);
         InferredEffects = [];
         InferredEffectPaths = [];
@@ -412,12 +425,14 @@ internal sealed class CheckedFunction
     }
 
     public int Id { get; }
+    public string PackageId { get; }
     public string Module { get; }
     public string Name { get; }
     public bool Public { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
     public IReadOnlyList<LangType> TypeParameters { get; }
     public LangType ReturnType { get; }
+    public IReadOnlyList<CheckedDirectCall> Calls { get; }
     public IReadOnlyList<string> DeclaredEffects { get; }
     public IReadOnlyList<string> InferredEffects { get; private set; }
     public IReadOnlyList<CheckedEffectPath> InferredEffectPaths { get; private set; }
@@ -723,6 +738,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         var unions = _unions.Select(symbol => new CheckedUnion(
             symbol.Id,
+            symbol.ModuleIdentity.PackageId,
+            symbol.Module,
             symbol.Declaration.Name,
             symbol.Declaration.Public,
             symbol.Type,
@@ -731,6 +748,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var functions = _functions.Select(symbol => symbol.CheckedFunction!);
         var structs = _structs.Select(symbol => new CheckedStruct(
             symbol.Id,
+            symbol.ModuleIdentity.PackageId,
+            symbol.Module,
             symbol.Declaration.Name,
             symbol.Declaration.Public,
             symbol.Type,
@@ -1744,6 +1763,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         function.CheckedFunction = new CheckedFunction(
             function.Id,
+            function.PackageId,
             function.ModuleName,
             function.Declaration.Name,
             function.Declaration.Public,
@@ -1751,6 +1771,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.TypeParameters,
             function.ReturnType,
             ReadOnly(body),
+            function.Calls
+                .Select(call => new CheckedDirectCall(
+                    call.Target.PackageId,
+                    call.Target.ModuleName,
+                    call.Target.Declaration.Name)),
             function.DeclaredEffects,
             function.Declaration.At);
     }
@@ -2316,21 +2341,21 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var current = queue.Dequeue();
             var direct = current.Function.DirectEffects
                 .Where(call => call.Effect == effect)
-                .OrderBy(call => call.At.File, StringComparer.Ordinal)
-                .ThenBy(call => call.At.Line)
+                .OrderBy(call => call.At.Line)
                 .ThenBy(call => call.At.Column)
                 .FirstOrDefault();
             if (direct is not null)
             {
                 var steps = current.Path.Select(FormatFunctionName).Append(direct.IntrinsicName);
-                return new CheckedEffectPath(effect, steps);
+                return new CheckedEffectPath(
+                    effect,
+                    steps,
+                    current.Path.Select(pathFunction => pathFunction.Id),
+                    direct.IntrinsicName);
             }
 
             foreach (var call in current.Function.Calls
-                         .OrderBy(call => call.Target.PackageId, StringComparer.Ordinal)
-                         .ThenBy(call => call.Target.Module, StringComparer.Ordinal)
-                         .ThenBy(call => call.Target.Declaration.Name, StringComparer.Ordinal)
-                         .ThenBy(call => call.At.File, StringComparer.Ordinal)
+                         .OrderBy(call => StableFunctionOrderKey(call.Target), StringComparer.Ordinal)
                          .ThenBy(call => call.At.Line)
                          .ThenBy(call => call.At.Column))
             {
@@ -2341,6 +2366,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         throw new InvalidOperationException(
             $"Inferred effect '{effect}' has no direct intrinsic path from '{FormatFunctionName(root)}'");
+    }
+
+    private string StableFunctionOrderKey(FunctionSymbol function)
+    {
+        if (!_packageDisplayLabels.TryGetValue(function.PackageId, out var packageDisplayLabel))
+            throw new InvalidOperationException("A function package ID has no validated display label");
+
+        var functionName = function.TestName ?? function.Declaration.Name;
+        return $"{packageDisplayLabel}::{function.ModuleName}::{functionName}";
     }
 
     private string FormatFunctionName(FunctionSymbol function)

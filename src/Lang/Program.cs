@@ -33,7 +33,9 @@ internal static class Driver
             return RunLock(args);
 
         if (args.Length != 0 && args[0] == "inspect")
-            return InspectEffects(args);
+            return args.Length > 1 && args[1] == "api"
+                ? InspectApi(args)
+                : InspectEffects(args);
 
         var hasApplicationSeparator = false;
         string[] applicationArguments = [];
@@ -467,6 +469,460 @@ internal static class Driver
         return 0;
     }
 
+    private static int InspectApi(string[] args)
+    {
+        if (args.Length != 4 || args[1] != "api" || args[3] != "--json")
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
+        try
+        {
+            packageDirectory = Path.GetFullPath(args[2]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Invalid package directory: {error.Message}", args[2])
+            ],
+            json: true);
+            return 1;
+        }
+
+        var resolved = ResolvePackageGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            PrintDiagnostics(resolved.Diagnostics, json: true);
+            return 1;
+        }
+
+        var graph = resolved.Graph!;
+        var checkedPackage = CheckPackageGraph(graph);
+        if (checkedPackage.Diagnostics.Count != 0 || checkedPackage.Program is null)
+        {
+            PrintDiagnostics(checkedPackage.Diagnostics, json: true);
+            return 1;
+        }
+
+        var program = checkedPackage.Program;
+        var packageIdentities = graph.Nodes.ToDictionary(
+            node => node.Id,
+            node => new ApiPackageIdentity(node.Package.Manifest.Name, node.Package.Manifest.Version),
+            StringComparer.Ordinal);
+        var sourceAliasesByPackageId = graph.Root.DependencyIds
+            .GroupBy(dependency => dependency.Value, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Select(dependency => dependency.Key)
+                    .OrderBy(alias => alias, StringComparer.Ordinal)
+                    .ToArray(),
+                StringComparer.Ordinal);
+        sourceAliasesByPackageId[graph.Root.Id] = ["self"];
+        var packageReferences = new Dictionary<string, ApiPackageReference>(StringComparer.Ordinal)
+        {
+            [graph.Root.Id] = new(
+                "self",
+                packageIdentities[graph.Root.Id].Name,
+                packageIdentities[graph.Root.Id].Version)
+        };
+        var dependencies = graph.Root.DependencyIds
+            .OrderBy(dependency => dependency.Key, StringComparer.Ordinal)
+            .Select(dependency =>
+            {
+                var package = packageIdentities[dependency.Value];
+                packageReferences.TryAdd(dependency.Value, new ApiPackageReference(
+                    dependency.Key,
+                    package.Name,
+                    package.Version));
+                return new ApiPackageReference(dependency.Key, package.Name, package.Version);
+            })
+            .ToArray();
+        var visiblePackageIds = packageReferences.Keys.ToHashSet(StringComparer.Ordinal);
+        var functionsById = program.Functions.ToDictionary(function => function.Id);
+        var unionsById = program.Unions.ToDictionary(union => union.Id);
+        var structsById = program.Structs.ToDictionary(structure => structure.Id);
+
+        var functions = program.Functions
+            .Where(function => function.Public && visiblePackageIds.Contains(function.PackageId))
+            .Select(function => new
+            {
+                id = ApiDeclarationId(function.PackageId, function.Module, function.Name, packageReferences),
+                source_ids = ApiDeclarationIds(function.PackageId, function.Module, function.Name, sourceAliasesByPackageId),
+                package = packageReferences[function.PackageId],
+                type_parameters = function.TypeParameters
+                    .Select(typeParameter => new
+                    {
+                        name = typeParameter.DisplayName,
+                        ordinal = typeParameter.TypeParameterOrdinal
+                    })
+                    .ToArray(),
+                parameters = function.Parameters
+                    .Select(parameter => new
+                    {
+                        name = parameter.Name,
+                        type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                    })
+                    .ToArray(),
+                return_type = ApiType(function.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                declared_effects = function.DeclaredEffects,
+                inferred_effects = function.InferredEffects,
+                effect_paths = function.InferredEffectPaths
+                    .Select(path => new
+                    {
+                        effect = path.Effect,
+                        steps = ApiEffectPathSteps(path, functionsById, packageReferences, packageIdentities, sourceAliasesByPackageId)
+                    })
+                    .ToArray(),
+                calls = ApiDirectCalls(function, packageIdentities, sourceAliasesByPackageId),
+                required_capabilities = RequiredCapabilities(function.InferredEffects)
+            })
+            .OrderBy(function => function.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var structs = program.Structs
+            .Where(structure => structure.Public && visiblePackageIds.Contains(structure.PackageId))
+            .Select(structure => new
+            {
+                id = ApiDeclarationId(structure.PackageId, structure.Module, structure.Name, packageReferences),
+                source_ids = ApiDeclarationIds(structure.PackageId, structure.Module, structure.Name, sourceAliasesByPackageId),
+                package = packageReferences[structure.PackageId],
+                fields = structure.Fields
+                    .Select(field => new
+                    {
+                        name = field.Name,
+                        type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                    })
+                    .ToArray()
+            })
+            .OrderBy(structure => structure.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var unions = program.Unions
+            .Where(union => union.Public && visiblePackageIds.Contains(union.PackageId))
+            .Select(union => new
+            {
+                id = ApiDeclarationId(union.PackageId, union.Module, union.Name, packageReferences),
+                source_ids = ApiDeclarationIds(union.PackageId, union.Module, union.Name, sourceAliasesByPackageId),
+                package = packageReferences[union.PackageId],
+                variants = union.Variants
+                    .Select(variant => new
+                    {
+                        name = variant.Name,
+                        payload = variant.Fields
+                            .Select(field => new
+                            {
+                                name = field.Name,
+                                type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                            })
+                            .ToArray()
+                    })
+                    .ToArray()
+            })
+            .OrderBy(union => union.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var commands = program.Commands
+            .Where(command => command.PackageId == graph.Root.Id)
+            .Select(command => new
+            {
+                id = ApiDeclarationId(command.PackageId, command.Module, command.Name, packageReferences),
+                package = packageReferences[command.PackageId],
+                help = command.Help,
+                inputs = command.Inputs
+                    .Select(input => new
+                    {
+                        name = input.Name,
+                        kind = input.Kind.ToString().ToLowerInvariant(),
+                        type = ApiType(input.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                        help = input.Help,
+                        default_value = ApiCommandDefault(input.Default)
+                })
+                .ToArray(),
+                handler = ApiFunctionId(command.HandlerFunctionId, functionsById, packageReferences),
+                handler_source_ids = ApiFunctionSourceIds(command.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
+                error_formatter = ApiFunctionId(command.ErrorFunctionId, functionsById, packageReferences),
+                error_formatter_source_ids = ApiFunctionSourceIds(command.ErrorFunctionId, functionsById, sourceAliasesByPackageId),
+                error_type = ApiType(command.ErrorType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                required_capabilities = command.RequiresFsRead ? new[] { "fs.read" } : Array.Empty<string>()
+            })
+            .OrderBy(command => command.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var routes = program.Routes
+            .Select(route => new
+            {
+                method = route.Method,
+                path = route.Path,
+                body_type = route.BodyType is null
+                    ? null
+                    : ApiType(route.BodyType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                handler = ApiFunctionId(route.HandlerFunctionId, functionsById, packageReferences),
+                response_type = ApiNominalType(
+                    "union",
+                    unionsById[route.ReplyUnionId].PackageId,
+                    unionsById[route.ReplyUnionId].Module,
+                    unionsById[route.ReplyUnionId].Name,
+                    packageReferences,
+                    packageIdentities,
+                    sourceAliasesByPackageId),
+                handler_source_ids = ApiFunctionSourceIds(route.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
+                responses = route.Responses
+                    .Select(response => new
+                    {
+                        variant = response.VariantName,
+                        status = response.StatusCode,
+                        content_type = response.ContentKind?.ToString().ToLowerInvariant(),
+                        payload_type = response.PayloadType is null
+                            ? null
+                            : ApiType(response.PayloadType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                    })
+                    .ToArray(),
+                required_capabilities = route.Capabilities
+                    .Select(capability => capability.Kind switch
+                    {
+                        CheckedRouteCapabilityKind.DbRead => "db.read",
+                        CheckedRouteCapabilityKind.DbWrite => "db.write",
+                        _ => throw new InvalidOperationException("Unknown checked route capability")
+                    })
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(capability => capability, StringComparer.Ordinal)
+                    .ToArray(),
+                capability_parameters = route.Capabilities
+                    .Select(capability => new
+                    {
+                        name = capability.ParameterName,
+                        capability = capability.Kind switch
+                        {
+                            CheckedRouteCapabilityKind.DbRead => "db.read",
+                            CheckedRouteCapabilityKind.DbWrite => "db.write",
+                            _ => throw new InvalidOperationException("Unknown checked route capability")
+                        }
+                    })
+                    .ToArray()
+            })
+            .OrderBy(route => route.method, StringComparer.Ordinal)
+            .ThenBy(route => route.path, StringComparer.Ordinal)
+            .ToArray();
+
+        var output = new
+        {
+            schema_version = 1,
+            package = packageReferences[graph.Root.Id],
+            dependencies,
+            manifest_grants = graph.Root.Package.Manifest.Capabilities
+                .OrderBy(capability => capability, StringComparer.Ordinal)
+                .ToArray(),
+            functions,
+            structs,
+            unions,
+            commands,
+            routes
+        };
+        Console.WriteLine(JsonSerializer.Serialize(output, JsonOptions));
+        return 0;
+    }
+
+    private static object ApiType(
+        LangType type,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById) => type.Kind switch
+    {
+        LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
+        LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
+        LangTypeKind.Text => new { kind = "primitive", name = "Text" },
+        LangTypeKind.Html => new { kind = "primitive", name = "Html" },
+        LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
+        LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
+        LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
+        LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
+        LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
+        LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
+        LangTypeKind.DbError => new { kind = "primitive", name = "DbError" },
+        LangTypeKind.TypeParameter => new
+        {
+            kind = "type_parameter",
+            name = type.DisplayName,
+            ordinal = type.TypeParameterOrdinal
+        },
+        LangTypeKind.List => new
+        {
+            kind = "list",
+            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+        },
+        LangTypeKind.Option => new
+        {
+            kind = "option",
+            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+        },
+        LangTypeKind.Result => new
+        {
+            kind = "result",
+            ok = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+            error = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+        },
+        LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) =>
+            ApiNominalType("struct", structure.PackageId, structure.Module, structure.Name, packageReferences, packageIdentities, sourceAliasesByPackageId),
+        LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) =>
+            ApiNominalType("union", union.PackageId, union.Module, union.Name, packageReferences, packageIdentities, sourceAliasesByPackageId),
+        LangTypeKind.Error => throw new InvalidOperationException("A checked API cannot contain an error type"),
+        LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
+        _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
+    };
+
+    private static object ApiNominalType(
+        string declarationKind,
+        string packageId,
+        string module,
+        string name,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
+    {
+        if (!packageIdentities.TryGetValue(packageId, out var package))
+            throw new InvalidOperationException("A checked nominal type has no resolved package identity");
+
+        var sourceIds = ApiDeclarationIds(packageId, module, name, sourceAliasesByPackageId);
+        return new
+        {
+            kind = "nominal",
+            declaration_kind = declarationKind,
+            source_id = sourceIds.FirstOrDefault(),
+            source_ids = sourceIds,
+            package,
+            module,
+            name
+        };
+    }
+
+    private static object[] ApiEffectPathSteps(
+        CheckedEffectPath path,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
+    {
+        var steps = new List<object>(path.FunctionIds.Count + 1);
+        foreach (var functionId in path.FunctionIds)
+        {
+            if (!functionsById.TryGetValue(functionId, out var function) ||
+                !packageIdentities.TryGetValue(function.PackageId, out var package))
+                throw new InvalidOperationException("A checked effect path refers to unresolved package metadata");
+
+            var sourceIds = ApiDeclarationIds(function.PackageId, function.Module, function.Name, sourceAliasesByPackageId);
+            steps.Add(new
+            {
+                kind = "function",
+                source_id = sourceIds.FirstOrDefault(),
+                source_ids = sourceIds,
+                package,
+                module = function.Module,
+                name = function.Name
+            });
+        }
+
+        steps.Add(new { kind = "operation", name = path.IntrinsicName });
+        return steps.ToArray();
+    }
+
+    private static object[] ApiDirectCalls(
+        CheckedFunction function,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
+    {
+        return function.Calls
+            .Distinct()
+            .Select(call =>
+            {
+                if (!packageIdentities.TryGetValue(call.PackageId, out var package))
+                    throw new InvalidOperationException("A checked direct call has no resolved package identity");
+
+                return new
+                {
+                    Call = call,
+                    Package = package,
+                    SourceIds = ApiDeclarationIds(call.PackageId, call.Module, call.Name, sourceAliasesByPackageId)
+                };
+            })
+            .OrderBy(call => call.SourceIds.FirstOrDefault() ?? string.Empty, StringComparer.Ordinal)
+            .ThenBy(call => call.Package.Name, StringComparer.Ordinal)
+            .ThenBy(call => call.Package.Version, StringComparer.Ordinal)
+            .ThenBy(call => call.Call.Module, StringComparer.Ordinal)
+            .ThenBy(call => call.Call.Name, StringComparer.Ordinal)
+            .Select(call => (object)new
+            {
+                source_id = call.SourceIds.FirstOrDefault(),
+                source_ids = call.SourceIds,
+                package = call.Package,
+                module = call.Call.Module,
+                name = call.Call.Name
+            })
+            .ToArray();
+    }
+
+    private static string ApiFunctionId(
+        int functionId,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences)
+    {
+        if (!functionsById.TryGetValue(functionId, out var function))
+            throw new InvalidOperationException("A checked application reference points to an unknown function");
+        return ApiDeclarationId(function.PackageId, function.Module, function.Name, packageReferences);
+    }
+
+    private static string[] ApiFunctionSourceIds(
+        int functionId,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
+    {
+        if (!functionsById.TryGetValue(functionId, out var function))
+            throw new InvalidOperationException("A checked application reference points to an unknown function");
+        return ApiDeclarationIds(function.PackageId, function.Module, function.Name, sourceAliasesByPackageId);
+    }
+
+    private static string ApiDeclarationId(
+        string packageId,
+        string module,
+        string name,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences)
+    {
+        if (!packageReferences.TryGetValue(packageId, out var package))
+            throw new InvalidOperationException("A source-facing API reference has no root dependency alias");
+        return $"{package.Alias}::{module}::{name}";
+    }
+
+    private static string[] ApiDeclarationIds(
+        string packageId,
+        string module,
+        string name,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId) =>
+        sourceAliasesByPackageId.TryGetValue(packageId, out var aliases)
+            ? aliases.Select(alias => $"{alias}::{module}::{name}").ToArray()
+            : [];
+
+    private static object? ApiCommandDefault(CheckedCommandLiteral? value) => value switch
+    {
+        null => null,
+        { Kind: CheckedCommandLiteralKind.Text } text => new { kind = "text", value = text.TextValue },
+        { Kind: CheckedCommandLiteralKind.I32 } integer => new { kind = "i32", value = integer.IntegerValue },
+        { Kind: CheckedCommandLiteralKind.Boolean } boolean => new { kind = "bool", value = boolean.BooleanValue },
+        _ => throw new InvalidOperationException("Unknown checked command default value")
+    };
+
+    private static string[] RequiredCapabilities(IEnumerable<string> effects) => effects
+        .Where(effect => effect is "fs.read" or "db.read" or "db.write")
+        .Distinct(StringComparer.Ordinal)
+        .OrderBy(effect => effect, StringComparer.Ordinal)
+        .ToArray();
+
+    private sealed record ApiPackageReference(string Alias, string Name, string Version);
+    private sealed record ApiPackageIdentity(string Name, string Version);
+
     private static IReadOnlyList<TrustedOperation> FindTrustedAdapterOperations(
         CheckedProgram program,
         CheckedFunction root)
@@ -718,7 +1174,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang inspect api PACKAGE_DIRECTORY --json | lang test [FILE_OR_PACKAGE]");
 
     private static int ReportBuildTargetError(string message, string file)
     {
