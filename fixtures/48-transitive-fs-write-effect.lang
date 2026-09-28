@@ -1,0 +1,9 @@
+module fixture::transitive_fs_write;
+
+fn write(fs: FsWrite) -> Result<bool, FsError> effects { fs.write } {
+    return fs.write_text("output.txt", "written");
+}
+
+pub fn bad(fs: FsWrite) -> Result<bool, FsError> effects {} {
+    return self::fixture::transitive_fs_write::write(fs);
+}

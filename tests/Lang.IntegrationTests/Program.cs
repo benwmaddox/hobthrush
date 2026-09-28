@@ -83,10 +83,12 @@ internal static class IntegrationTests
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
+            ("managed FsWrite maps strict UTF-8 writes and filesystem errors", TestFsWriteManagedLibrary),
             ("managed build receipts bind checked inputs and artifact bytes", TestStandaloneBuildReceipt),
-            ("CLI capability grants are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
+            ("CLI capability grants including FsWrite are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
+            ("FsWrite CLI grants, reports, receipts, and web route projections are checked", TestFsWritePackageContracts),
             ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
             ("typed CLI declarations validate entries, signatures, and parser spans", TestTypedCliCommandDiagnostics),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
@@ -2706,6 +2708,120 @@ internal static class IntegrationTests
         Directory.Delete(probeDirectory, recursive: true);
     }
 
+    private static async Task TestFsWriteManagedLibrary(Harness harness)
+    {
+        const string source = "module harness::fs_write_library;\n"
+            + "pub fn write(fs: FsWrite, path: Text, value: Text) -> Result<bool, FsError> effects { fs.write } { return fs.write_text(path, value); }\n";
+        var check = await harness.InvokeAsync("fs-write-library-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length,
+            "A declared direct filesystem write effect should pass library checking.");
+
+        var build = await harness.InvokeAsync("fs-write-library-build", "build", source);
+        AssertBuiltDll(build, Path.GetDirectoryName(harness.LastSourcePath)!);
+
+        var dllPath = ParseBuiltArtifact(build, "Built library: ");
+        var probeDirectory = Path.Combine(harness.TemporaryRoot, $"fs-write-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(probeDirectory);
+        var loadContext = ProbeFsWriteRuntimeMappings(dllPath, probeDirectory);
+        for (var attempt = 0; attempt < 10 && loadContext.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        AssertTrue(!loadContext.IsAlive, "The generated FsWrite library's collectible load context should unload after the trusted probe.");
+        Directory.Delete(probeDirectory, recursive: true);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ProbeFsWriteRuntimeMappings(string dllPath, string probeDirectory)
+    {
+        var loadContext = new AssemblyLoadContext($"fs-write-probe-{Guid.NewGuid():N}", isCollectible: true);
+        var weakReference = new WeakReference(loadContext);
+        try
+        {
+            var assembly = loadContext.LoadFromAssemblyPath(Path.GetFullPath(dllPath));
+            var moduleType = assembly.GetType("LangModule", throwOnError: true)!;
+            var fsWriteType = moduleType.GetNestedType("FsWrite", BindingFlags.Public)
+                ?? throw new InvalidOperationException("Generated library does not expose its nested opaque FsWrite runtime type.");
+            var fsWriteConstructor = fsWriteType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                Type.EmptyTypes,
+                modifiers: null)
+                ?? throw new InvalidOperationException("Generated FsWrite has no trusted non-public constructor.");
+            var fsWrite = fsWriteConstructor.Invoke(null);
+            var writeFunction = moduleType.GetMethod("Function_0", BindingFlags.Public | BindingFlags.Static)
+                ?? throw new InvalidOperationException("Generated library does not contain Function_0.");
+
+            object InvokeWrite(string path, string value) => writeFunction.Invoke(null, [fsWrite, path, value])
+                ?? throw new InvalidOperationException("Generated write_text returned null instead of Result<bool, FsError>.");
+
+            void AssertSuccess(object result, string operation)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Ok", StringComparison.Ordinal),
+                    $"{operation} should map to Result.Ok, got {result.GetType().FullName}.");
+                AssertEqual(true, result.GetType().GetProperty("Value")?.GetValue(result) as bool?,
+                    $"{operation} should return true in Result.Ok.");
+            }
+
+            string AssertError(object result, string expectedVariant, string operation)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                    $"{operation} should map to Result.Err, got {result.GetType().FullName}.");
+                var error = result.GetType().GetProperty("Error")?.GetValue(result)
+                    ?? throw new InvalidOperationException($"{operation} did not expose its FsError value.");
+                var variant = error.GetType().Name;
+                AssertTrue(variant.StartsWith(expectedVariant, StringComparison.Ordinal),
+                    $"{operation} should map to FsError.{expectedVariant}, got {error.GetType().FullName}.");
+                return variant;
+            }
+
+            void AssertNoTemporaryFiles(string operation)
+            {
+                AssertTrue(!Directory.EnumerateFiles(probeDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+                    $"{operation} must not leave a temporary file beside the destination.");
+            }
+
+            var destination = Path.Combine(probeDirectory, "target.txt");
+            const string unicodeText = "strict UTF-8 λ";
+            AssertSuccess(InvokeWrite(destination, "longer existing contents"), "Initial overwrite");
+            AssertSuccess(InvokeWrite(destination, unicodeText), "Unicode write");
+            var expectedBytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(unicodeText);
+            AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(expectedBytes),
+                "FsWrite should write strict UTF-8 bytes without a BOM and replace longer contents exactly.");
+            AssertNoTemporaryFiles("A successful write");
+
+            AssertSuccess(InvokeWrite(destination, "x"), "Short overwrite");
+            AssertTrue(File.ReadAllBytes(destination).SequenceEqual([(byte)'x']),
+                "Replacing a longer destination with shorter text should leave only the exact new bytes.");
+            AssertNoTemporaryFiles("A shorter overwrite");
+
+            var preservedBytes = File.ReadAllBytes(destination);
+            AssertError(InvokeWrite(destination, "\uD800"), "InvalidText", "An unpaired surrogate write");
+            AssertTrue(File.ReadAllBytes(destination).SequenceEqual(preservedBytes),
+                "Invalid text must fail before changing the destination.");
+            AssertNoTemporaryFiles("An invalid text write");
+
+            var missingParentPath = Path.Combine(probeDirectory, "missing-parent", "child.txt");
+            AssertError(InvokeWrite(missingParentPath, "value"), "NotFound", "A write to a missing parent directory");
+            AssertTrue(!Directory.Exists(Path.GetDirectoryName(missingParentPath)),
+                "A write to a missing parent must not create directories.");
+            AssertNoTemporaryFiles("A write to a missing parent");
+
+            AssertError(InvokeWrite(string.Empty, "value"), "InvalidPath", "An empty path write");
+            AssertError(InvokeWrite("invalid\0path", "value"), "InvalidPath", "A NUL path write");
+            AssertNoTemporaryFiles("Invalid path writes");
+        }
+        finally
+        {
+            loadContext.Unload();
+        }
+
+        return weakReference;
+    }
+
     private static async Task TestCliCapabilityManifestAndLock(Harness harness)
     {
         const string source = """
@@ -2716,7 +2832,8 @@ internal static class IntegrationTests
                 handler: self::app::main::read_file;
                 error: self::app::main::describe_error;
             }
-            pub fn read_file(args: self::app::main::ReadArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+            pub fn read_file(args: self::app::main::ReadArgs, fs: FsRead, writer: FsWrite) -> Result<Text, FsError> effects { fs.read, fs.write } {
+                let written: Result<bool, FsError> = writer.write_text(args.input, "locked");
                 return fs.read_text(args.input);
             }
             pub fn describe_error(error: FsError) -> Text effects {} {
@@ -2790,7 +2907,7 @@ internal static class IntegrationTests
             """;
         var argsOnlyRoot = await harness.WritePackageAsync(
             "cli-fsread-grant-not-used",
-            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\n",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\nfs.write = \"allow\"\n",
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = argsOnlySource
@@ -2806,7 +2923,7 @@ internal static class IntegrationTests
                 "Command schemas with the capabilities field must use version 2.");
             AssertEqual(0, unusedGrantSchema.RootElement.GetProperty("commands")[0]
                     .GetProperty("capabilities").GetArrayLength(),
-                "A manifest grant unused by an args-only handler must not appear as an injected capability.");
+                "Unused fs.read and fs.write grants must not appear as injected capabilities for an args-only handler.");
         }
 
         const string withGrant = "name = \"harness-package\"\n"
@@ -2814,13 +2931,14 @@ internal static class IntegrationTests
             + "kind = \"cli\"\n"
             + "source_root = \"src\"\n"
             + "entry_module = \"app::main\"\n"
-            + "\n[capabilities]\nfs.read = \"allow\"\n"
+            + "\n[capabilities]\nfs.read = \"allow\"\nfs.write = \"allow\"\n"
             + "\n[dependencies]\nvalidation = \"../validation\"\n";
         const string withoutGrant = "name = \"harness-package\"\n"
             + "version = \"0.1.0\"\n"
             + "kind = \"cli\"\n"
             + "source_root = \"src\"\n"
             + "entry_module = \"app::main\"\n"
+            + "\n[capabilities]\nfs.read = \"allow\"\n"
             + "\n[dependencies]\nvalidation = \"../validation\"\n";
         var graphRoot = await harness.WritePackageGraphAsync(
             "cli-fsread-grant-lock",
@@ -2853,6 +2971,11 @@ internal static class IntegrationTests
         AssertTrue(missingAfterRefresh.ExitCode != 0
             && missingAfterRefresh.StandardOutput.Contains("E_CAPABILITY_MISSING", StringComparison.Ordinal),
             $"After refreshing the lock, the absent grant should fail capability checking. {Describe(missingAfterRefresh)}");
+        var missingWriteDiagnostics = ParseDiagnosticSnapshots(missingAfterRefresh.StandardOutput);
+        AssertEqual(1, missingWriteDiagnostics.Length, Describe(missingAfterRefresh));
+        AssertEqual("Command handler requires the root package's fs.write capability grant",
+            missingWriteDiagnostics[0].Message,
+            "Removing only fs.write should identify the missing write grant after lock refresh.");
 
         await File.WriteAllTextAsync(rootManifestPath, withGrant);
         var staleAfterAddingGrant = await harness.InvokePackageDirectoryAsync(
@@ -3232,6 +3355,274 @@ internal static class IntegrationTests
             "Control characters in CLI diagnostic subjects must be escaped on one physical stderr line.");
         AssertEqual(2, Directory.EnumerateFiles(Path.Combine(packageRoot, "out"), "build-receipt.json", SearchOption.AllDirectories).Count(),
             "Typed CLI run commands should not add build receipts after the two explicit builds.");
+    }
+
+    private static async Task TestFsWritePackageContracts(Harness harness)
+    {
+        const string commandSource = """
+            module app::main;
+            command save {
+                help "Write and read a file.";
+                argument output: FilePath help "Destination path.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlerSource = """
+            module handlers;
+            pub union SaveError { Failed }
+
+            pub fn run(args: self::app::main::SaveArgs, fs: FsRead, writer: FsWrite) -> Result<Text, self::handlers::SaveError> effects { fs.read, fs.write } {
+                let written: Result<bool, FsError> = writer.write_text(args.output, "roundtrip λ");
+                return match fs.read_text(args.output) {
+                    Ok(text) => Ok(text),
+                    Err(error) => Err(self::handlers::SaveError.Failed)
+                };
+            }
+
+            pub fn describe(error: self::handlers::SaveError) -> Text effects {} {
+                return match error { self::handlers::SaveError.Failed => "save failed" };
+            }
+            """;
+        const string bothGrants = "\n[capabilities]\nfs.read = \"allow\"\nfs.write = \"allow\"\n";
+        var commandSources = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = commandSource,
+            ["src/handlers.lang"] = handlerSource
+        };
+        var packageRoot = await harness.WritePackageAsync(
+            "fs-write-cli",
+            CliPackageManifest() + bothGrants,
+            commandSources);
+
+        var check = await harness.InvokePackageDirectoryAsync("fs-write-cli-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(string.Empty, check.StandardError, Describe(check));
+
+        var artifactBuild = await harness.InvokePackageDirectoryAsync("fs-write-cli-build", packageRoot, "build");
+        AssertEqual(0, artifactBuild.ExitCode, Describe(artifactBuild));
+        var artifact = ParseBuiltArtifact(artifactBuild, "Built executable: ");
+        var outputPath = Path.Combine(harness.TemporaryRoot, "fs-write-cli-output.txt");
+        var run = await harness.InvokePackageDirectoryAsync("fs-write-cli-run", packageRoot, "run", "--", "save", outputPath);
+        AssertRunOutput("roundtrip λ" + Environment.NewLine, run);
+        var expectedOutputBytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+            .GetBytes("roundtrip λ");
+        AssertTrue(File.ReadAllBytes(outputPath).AsSpan().SequenceEqual(expectedOutputBytes),
+            "The FsRead/FsWrite CLI handler should round-trip exact strict UTF-8 bytes without a BOM.");
+
+        var schemaPath = Path.Combine(Path.GetDirectoryName(artifact)!, "command-schema.json");
+        var schemaBytes = await File.ReadAllBytesAsync(schemaPath);
+        AssertTrue(schemaBytes.Length > 0 && schemaBytes[^1] == (byte)'\n' && !schemaBytes.Contains((byte)'\r'),
+            "The FsWrite command schema should remain UTF-8 JSON with LF line endings and a final newline.");
+        using (var schemaDocument = JsonDocument.Parse(schemaBytes))
+        {
+            var schema = schemaDocument.RootElement;
+            AssertJsonPropertyOrder(schema, "schema_version,commands");
+            AssertEqual(2, schema.GetProperty("schema_version").GetInt32(),
+                "Adding FsWrite must preserve command schema version 2.");
+            var command = schema.GetProperty("commands").EnumerateArray().Single();
+            AssertJsonPropertyOrder(command, "name,help,handler,error_formatter,capabilities,arguments,options,flags");
+            AssertEqual("save", command.GetProperty("name").GetString(), "The command schema should retain its declared name.");
+            AssertJsonStringArray(command.GetProperty("capabilities"), ["fs.read", "fs.write"]);
+        }
+
+        using (var receipt = await AssertBuildReceiptAsync(
+                   Path.GetDirectoryName(artifact)!,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(Path.GetDirectoryName(artifact)!, artifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+                   packageRoot))
+        {
+            var root = receipt.RootElement;
+            AssertJsonStringArray(root.GetProperty("manifest_grants"), ["fs.read", "fs.write"]);
+            var writeClaim = root.GetProperty("trusted_components").EnumerateArray()
+                .Single(claim => claim.GetProperty("operation").GetString() == "FsWrite.write_text");
+            AssertFsWriteClaim(writeClaim, "handlers", "run");
+        }
+
+        var inspectEffects = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::handlers::run", "--json");
+        AssertEqual(0, inspectEffects.ExitCode, Describe(inspectEffects));
+        using (var reportDocument = JsonDocument.Parse(inspectEffects.StandardOutput))
+        {
+            var report = reportDocument.RootElement;
+            AssertJsonStringArray(report.GetProperty("declared_effects"), ["fs.read", "fs.write"]);
+            AssertJsonStringArray(report.GetProperty("inferred_effects"), ["fs.read", "fs.write"]);
+            AssertJsonStringArray(report.GetProperty("required_capabilities"), ["fs.read", "fs.write"]);
+            AssertJsonStringArray(report.GetProperty("manifest_grants"), ["fs.read", "fs.write"]);
+            var writePath = report.GetProperty("effect_paths").EnumerateArray()
+                .Single(path => path.GetProperty("effect").GetString() == "fs.write");
+            AssertEqual("handlers::run -> fs.write_text",
+                string.Join(" -> ", writePath.GetProperty("steps").EnumerateArray().Select(step => step.GetString())),
+                "The FsWrite effect report should retain the direct path to fs.write_text.");
+            var writeOperation = report.GetProperty("trusted_operations").EnumerateArray()
+                .Single(operation => operation.GetProperty("operation").GetString() == "FsWrite.write_text");
+            AssertEqual("trusted_adapter", writeOperation.GetProperty("trust").GetString(),
+                "inspect-effects should classify FsWrite.write_text as a trusted adapter.");
+            AssertJsonStringArray(writeOperation.GetProperty("effects"), ["fs.write"]);
+        }
+
+        var inspectApi = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, inspectApi.ExitCode, Describe(inspectApi));
+        using (var apiDocument = JsonDocument.Parse(inspectApi.StandardOutput))
+        {
+            var api = apiDocument.RootElement;
+            var command = api.GetProperty("commands").EnumerateArray().Single();
+            AssertJsonStringArray(command.GetProperty("required_capabilities"), ["fs.read", "fs.write"]);
+            var handler = api.GetProperty("functions").EnumerateArray()
+                .Single(function => function.GetProperty("id").GetString() == "self::handlers::run");
+            AssertJsonStringArray(handler.GetProperty("required_capabilities"), ["fs.read", "fs.write"]);
+        }
+
+        var audit = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, audit.ExitCode, Describe(audit));
+        using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
+        {
+            var report = auditDocument.RootElement;
+            AssertJsonStringArray(report.GetProperty("manifest_grants"), ["fs.read", "fs.write"]);
+            var writeClaim = report.GetProperty("trusted_claims").EnumerateArray()
+                .Single(claim => claim.GetProperty("operation").GetString() == "FsWrite.write_text");
+            AssertFsWriteClaim(writeClaim, "handlers", "run");
+            var handler = report.GetProperty("compiler").GetProperty("functions").EnumerateArray()
+                .Single(function => function.GetProperty("name").GetString() == "run");
+            AssertJsonStringArray(handler.GetProperty("required_capabilities"), ["fs.read", "fs.write"]);
+        }
+
+        async Task AssertCommandHandlerError(string caseName, string signature, bool replaceBody = false)
+        {
+            var handler = replaceBody
+                ? handlerSource.Replace(
+                    "args: self::app::main::SaveArgs, fs: FsRead, writer: FsWrite",
+                    signature,
+                    StringComparison.Ordinal)
+                    .Replace(
+                        "let written: Result<bool, FsError> = writer.write_text(args.output, \"roundtrip λ\");\n    return match fs.read_text(args.output) {\n        Ok(text) => Ok(text),\n        Err(error) => Err(self::handlers::SaveError.Failed)\n    };",
+                        "return Ok(\"unused\");",
+                        StringComparison.Ordinal)
+                : handlerSource.Replace(
+                    "args: self::app::main::SaveArgs, fs: FsRead, writer: FsWrite",
+                    signature,
+                    StringComparison.Ordinal);
+            var invalidPackage = await harness.WritePackageAsync(
+                caseName,
+                CliPackageManifest() + bothGrants,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = commandSource,
+                    ["src/handlers.lang"] = handler
+                });
+            var result = await harness.InvokePackageDirectoryAsync(caseName, invalidPackage, "check", "--json");
+            AssertTrue(result.ExitCode != 0, $"Invalid CLI capability signature unexpectedly checked. {Describe(result)}");
+            var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
+            AssertTrue(diagnostics.Any(diagnostic => diagnostic.Code == "E_COMMAND_HANDLER"),
+                $"Expected E_COMMAND_HANDLER for signature '{signature}'. {Describe(result)}");
+        }
+
+        await AssertCommandHandlerError(
+            "fs-write-cli-reversed-capabilities",
+            "args: self::app::main::SaveArgs, writer: FsWrite, fs: FsRead");
+        await AssertCommandHandlerError(
+            "fs-write-cli-duplicate-capability",
+            "args: self::app::main::SaveArgs, fs: FsRead, second: FsRead, writer: FsWrite");
+        await AssertCommandHandlerError(
+            "fs-write-cli-wrong-capability-type",
+            "args: self::app::main::SaveArgs, fs: FsRead, writer: Text, capability: FsWrite",
+            replaceBody: true);
+
+        var missingGrantPackage = await harness.WritePackageAsync(
+            "fs-write-cli-missing-grant",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\n",
+            commandSources);
+        var missingGrant = await harness.InvokePackageDirectoryAsync(
+            "fs-write-cli-missing-grant-check", missingGrantPackage, "check", "--json");
+        AssertTrue(missingGrant.ExitCode != 0, Describe(missingGrant));
+        var missingGrantDiagnostics = ParseDiagnosticSnapshots(missingGrant.StandardOutput);
+        AssertEqual(1, missingGrantDiagnostics.Length, Describe(missingGrant));
+        AssertEqual("E_CAPABILITY_MISSING", missingGrantDiagnostics[0].Code, Describe(missingGrant));
+        AssertEqual("Command handler requires the root package's fs.write capability grant",
+            missingGrantDiagnostics[0].Message, "The missing FsWrite grant should have the stable command capability diagnostic.");
+
+        const string webSource = """
+            module app::main;
+            pub union Reply { Written }
+            pub fn write(fs: FsWrite, reader: DbRead, writer: DbWrite) -> self::app::main::Reply effects { fs.write } {
+                let saved: Result<bool, FsError> = fs.write_text("route-output.txt", "written");
+                return self::app::main::Reply.Written;
+            }
+            route GET "/write" {
+                handler: self::app::main::write;
+                response Written: 204;
+            }
+            """;
+        const string webManifest = "name = \"fs-write-web\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+            + "sqlite_path = \"data/web.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+            + "\n[capabilities]\nnet.listen = \"allow\"\nfs.write = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n";
+        var webPackage = await harness.WritePackageAsync(
+            "fs-write-web-api",
+            webManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = webSource,
+                ["db/schema.sql"] = "CREATE TABLE web_rows (id INTEGER PRIMARY KEY);\n"
+            });
+        var webApiResult = await harness.InvokeCompilerCommandAsync("inspect", "api", webPackage, "--json");
+        AssertEqual(0, webApiResult.ExitCode, Describe(webApiResult));
+        using (var webApiDocument = JsonDocument.Parse(webApiResult.StandardOutput))
+        {
+            var route = webApiDocument.RootElement.GetProperty("routes").EnumerateArray().Single();
+            AssertJsonStringArray(route.GetProperty("required_capabilities"), ["db.read", "db.write", "fs.write"]);
+            var parameters = route.GetProperty("capability_parameters").EnumerateArray().ToArray();
+            AssertEqual("fs.write", parameters[0].GetProperty("capability").GetString(), "FsWrite must remain first in route parameter order.");
+            AssertEqual("db.read", parameters[1].GetProperty("capability").GetString(), "DbRead must remain second in route parameter order.");
+            AssertEqual("db.write", parameters[2].GetProperty("capability").GetString(), "DbWrite must remain third in route parameter order.");
+        }
+
+        var reversedWebPackage = await harness.WritePackageAsync(
+            "fs-write-web-reversed-capabilities",
+            webManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = webSource.Replace(
+                    "fs: FsWrite, reader: DbRead, writer: DbWrite",
+                    "reader: DbRead, fs: FsWrite, writer: DbWrite",
+                    StringComparison.Ordinal),
+                ["db/schema.sql"] = "CREATE TABLE web_rows (id INTEGER PRIMARY KEY);\n"
+            });
+        var reversedWeb = await harness.InvokePackageDirectoryAsync(
+            "fs-write-web-reversed-check", reversedWebPackage, "check", "--json");
+        AssertTrue(reversedWeb.ExitCode != 0, Describe(reversedWeb));
+        AssertTrue(ParseDiagnosticSnapshots(reversedWeb.StandardOutput).Any(diagnostic => diagnostic.Code == "E_ROUTE_HANDLER"),
+            $"A DbRead-before-FsWrite route signature should be rejected. {Describe(reversedWeb)}");
+
+        var webWithoutFsWriteGrant = await harness.WritePackageAsync(
+            "fs-write-web-missing-grant",
+            webManifest.Replace("fs.write = \"allow\"\n", string.Empty, StringComparison.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = webSource,
+                ["db/schema.sql"] = "CREATE TABLE web_rows (id INTEGER PRIMARY KEY);\n"
+            });
+        var missingWebGrant = await harness.InvokePackageDirectoryAsync(
+            "fs-write-web-missing-grant-check", webWithoutFsWriteGrant, "check", "--json");
+        AssertTrue(missingWebGrant.ExitCode != 0, Describe(missingWebGrant));
+        var webGrantDiagnostics = ParseDiagnosticSnapshots(missingWebGrant.StandardOutput);
+        AssertTrue(webGrantDiagnostics.Any(diagnostic => diagnostic.Code == "E_CAPABILITY_MISSING"
+            && diagnostic.Message == "Route handler requires the root package's fs.write capability grant"),
+            $"A route's missing FsWrite grant should have the stable capability diagnostic. {Describe(missingWebGrant)}");
+
+        static void AssertFsWriteClaim(JsonElement claim, string module, string function)
+        {
+            AssertEqual("trusted_adapter", claim.GetProperty("source").GetString(),
+                "FsWrite.write_text should remain a trusted adapter claim.");
+            AssertEqual("claim_only", claim.GetProperty("assurance").GetString(),
+                "FsWrite.write_text should remain claim-only in generated evidence.");
+            AssertJsonStringArray(claim.GetProperty("effects"), ["fs.write"]);
+            var reachable = claim.GetProperty("reachable_from").EnumerateArray().Single();
+            AssertEqual(module, reachable.GetProperty("module").GetString(),
+                "The FsWrite claim should be reachable from the checked handler module.");
+            AssertEqual(function, reachable.GetProperty("name").GetString(),
+                "The FsWrite claim should be reachable from the checked handler function.");
+        }
     }
 
     private static async Task TestCommandContextualIdentifiers(Harness harness)
@@ -6123,7 +6514,7 @@ internal static class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(47, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(48, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -6132,7 +6523,7 @@ internal static class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("47 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("48 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -6301,9 +6692,9 @@ internal static class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b47\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b48\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 47 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 48 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

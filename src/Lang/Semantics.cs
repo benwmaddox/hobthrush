@@ -15,6 +15,7 @@ internal enum LangTypeKind
     List,
     Result,
     FsRead,
+    FsWrite,
     FsError,
     DbRead,
     DbWrite,
@@ -53,6 +54,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsHtml => Kind == LangTypeKind.Html;
     public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
+    public bool IsFsWrite => Kind == LangTypeKind.FsWrite;
     public bool IsFsError => Kind == LangTypeKind.FsError;
     public bool IsDbRead => Kind == LangTypeKind.DbRead;
     public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
@@ -72,6 +74,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType Html { get; } = new(LangTypeKind.Html, "Html");
     internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
+    internal static LangType FsWrite { get; } = new(LangTypeKind.FsWrite, "FsWrite");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
     internal static LangType DbRead { get; } = new(LangTypeKind.DbRead, "DbRead");
     internal static LangType DbWrite { get; } = new(LangTypeKind.DbWrite, "DbWrite");
@@ -185,13 +188,13 @@ internal sealed record CheckedCommand(
     int ErrorFunctionId,
     string ErrorReference,
     LangType ErrorType,
-    bool RequiresFsRead,
+    IReadOnlyList<CheckedCapabilityParameter> Capabilities,
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
-internal enum CheckedRouteCapabilityKind { DbRead, DbWrite }
-internal sealed record CheckedRouteCapability(
-    CheckedRouteCapabilityKind Kind,
+internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite }
+internal sealed record CheckedCapabilityParameter(
+    CheckedCapabilityKind Kind,
     int HandlerParameterIndex,
     string ParameterName,
     Token At);
@@ -216,7 +219,7 @@ internal sealed class CheckedRoute
         string path,
         LangType? bodyType,
         IEnumerable<CheckedStructField> bodySchema,
-        IEnumerable<CheckedRouteCapability> capabilities,
+        IEnumerable<CheckedCapabilityParameter> capabilities,
         int handlerFunctionId,
         string handlerReference,
         Token handlerAt,
@@ -251,7 +254,7 @@ internal sealed class CheckedRoute
     public string Path { get; }
     public LangType? BodyType { get; }
     public IReadOnlyList<CheckedStructField> BodySchema { get; }
-    public IReadOnlyList<CheckedRouteCapability> Capabilities { get; }
+    public IReadOnlyList<CheckedCapabilityParameter> Capabilities { get; }
     public int HandlerFunctionId { get; }
     public string HandlerReference { get; }
     public Token HandlerAt { get; }
@@ -287,6 +290,7 @@ internal sealed record TypedCallExpr(
 internal enum BuiltinIntrinsic
 {
     FsReadText,
+    FsWriteText,
     HtmlText,
     HtmlHeading,
     HtmlParagraph,
@@ -1065,18 +1069,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
                 var hasGeneratedArgs = handler.Parameters.Count > 0 &&
                     handler.Parameters[0].Type == command.ArgsStruct.Type;
-                var requiresFsRead = handler.Parameters.Count > 1 && handler.Parameters[1].Type.IsFsRead;
-                command.RequiresFsRead = requiresFsRead;
+                var commandCapabilities = new List<CheckedCapabilityParameter>();
                 var validParameters = hasGeneratedArgs &&
-                    (handler.Parameters.Count == 1 ||
-                     handler.Parameters.Count == 2 && requiresFsRead);
+                    CheckCommandCapabilityParameters(
+                        handler,
+                        1,
+                        commandCapabilities,
+                        command.HandlerSyntax.Reference.At);
+                command.Capabilities = commandCapabilities;
                 if (handler.TypeParameters.Count != 0 || !validParameters || !validReturn)
                 {
-                    Add("E_COMMAND_HANDLER", "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type", command.HandlerSyntax.Reference.At);
+                    var hasFsWrite = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite);
+                    var expectation = hasFsWrite
+                        ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
+                        : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
+                    Add("E_COMMAND_HANDLER", expectation, command.HandlerSyntax.Reference.At);
                 }
-
-                if (requiresFsRead && !_rootCapabilities.Contains("fs.read"))
-                    Add("E_CAPABILITY_MISSING", "Command handler requires the root package's fs.read capability grant", command.HandlerSyntax.Reference.At);
             }
         }
 
@@ -1216,7 +1224,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         FunctionSymbol? handler = null;
         UnionSymbol? replyUnion = null;
-        var routeCapabilities = new List<CheckedRouteCapability>();
+        var routeCapabilities = new List<CheckedCapabilityParameter>();
         var handlerValid = handlers.Length == 1;
         if (handlers.Length == 1)
         {
@@ -1243,9 +1251,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
                 if (!validParameters || !validReturn || !validGenericity)
                 {
+                    var hasFsWrite = handler.Parameters.Any(parameter => parameter.Type.IsFsWrite);
+                    var capabilityOrder = hasFsWrite ? "FsWrite, DbRead, and DbWrite" : "DbRead and DbWrite";
                     var expectation = route.Method == "GET"
-                        ? "a non-generic function taking optional DbRead and DbWrite capabilities in that order, and returning a declared union"
-                        : "a non-generic function taking the route body type followed by optional DbRead and DbWrite capabilities in that order, and returning a declared union";
+                        ? $"a non-generic function taking optional {capabilityOrder} capabilities in that order, and returning a declared union"
+                        : $"a non-generic function taking the route body type followed by optional {capabilityOrder} capabilities in that order, and returning a declared union";
                     Add("E_ROUTE_HANDLER", $"Route handler must be {expectation}", handlers[0].Reference.At);
                     handlerValid = false;
                 }
@@ -1318,7 +1328,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool CheckRouteCapabilityParameters(
         FunctionSymbol handler,
         int firstCapabilityParameter,
-        List<CheckedRouteCapability> capabilities)
+        List<CheckedCapabilityParameter> capabilities)
     {
         var seen = new HashSet<LangType>();
         var lastOrder = -1;
@@ -1326,14 +1336,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         for (var index = firstCapabilityParameter; index < handler.Parameters.Count; index++)
         {
             var parameter = handler.Parameters[index];
-            var (kind, order, effect) = parameter.Type.Kind switch
+            var kind = CapabilityKind(parameter.Type);
+            var order = kind switch
             {
-                LangTypeKind.DbRead => (CheckedRouteCapabilityKind.DbRead, 0, "db.read"),
-                LangTypeKind.DbWrite => (CheckedRouteCapabilityKind.DbWrite, 1, "db.write"),
-                _ => ((CheckedRouteCapabilityKind?)null, -1, string.Empty)
+                CheckedCapabilityKind.FsWrite => 0,
+                CheckedCapabilityKind.DbRead => 1,
+                CheckedCapabilityKind.DbWrite => 2,
+                _ => -1
             };
 
-            if (kind is null)
+            if (kind is null || order < 0)
             {
                 Add(
                     "E_ROUTE_HANDLER",
@@ -1350,12 +1362,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
             if (order < lastOrder)
             {
-                Add("E_ROUTE_HANDLER", "Route handler capability parameters must appear in DbRead, DbWrite order", parameter.At);
+                var orderMessage = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsFsWrite)
+                    ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite order"
+                    : "Route handler capability parameters must appear in DbRead, DbWrite order";
+                Add("E_ROUTE_HANDLER", orderMessage, parameter.At);
                 valid = false;
             }
             lastOrder = Math.Max(lastOrder, order);
-            capabilities.Add(new CheckedRouteCapability(kind.Value, index, parameter.Name, parameter.At));
+            capabilities.Add(new CheckedCapabilityParameter(kind.Value, index, parameter.Name, parameter.At));
 
+            var effect = CapabilityEffect(kind.Value);
             if (!_rootCapabilities.Contains(effect))
             {
                 Add("E_CAPABILITY_MISSING", $"Route handler requires the root package's {effect} capability grant", parameter.At);
@@ -1364,6 +1380,66 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
         return valid;
     }
+
+    private bool CheckCommandCapabilityParameters(
+        FunctionSymbol handler,
+        int firstCapabilityParameter,
+        List<CheckedCapabilityParameter> capabilities,
+        Token missingGrantAt)
+    {
+        var seen = new HashSet<CheckedCapabilityKind>();
+        var lastOrder = -1;
+        var valid = true;
+        for (var index = firstCapabilityParameter; index < handler.Parameters.Count; index++)
+        {
+            var parameter = handler.Parameters[index];
+            var kind = CapabilityKind(parameter.Type);
+            var order = kind switch
+            {
+                CheckedCapabilityKind.FsRead => 0,
+                CheckedCapabilityKind.FsWrite => 1,
+                _ => -1
+            };
+            if (kind is null || order < 0)
+            {
+                valid = false;
+                continue;
+            }
+
+            if (!seen.Add(kind.Value) || order < lastOrder)
+                valid = false;
+            lastOrder = Math.Max(lastOrder, order);
+            capabilities.Add(new CheckedCapabilityParameter(kind.Value, index, parameter.Name, parameter.At));
+
+            var effect = CapabilityEffect(kind.Value);
+            if (!_rootCapabilities.Contains(effect))
+            {
+                Add(
+                    "E_CAPABILITY_MISSING",
+                    $"Command handler requires the root package's {effect} capability grant",
+                    missingGrantAt);
+            }
+        }
+        return valid;
+    }
+
+    private static CheckedCapabilityKind? CapabilityKind(LangType type) => type.Kind switch
+    {
+        LangTypeKind.FsRead => CheckedCapabilityKind.FsRead,
+        LangTypeKind.FsWrite => CheckedCapabilityKind.FsWrite,
+        LangTypeKind.DbRead => CheckedCapabilityKind.DbRead,
+        LangTypeKind.DbWrite => CheckedCapabilityKind.DbWrite,
+        _ => null
+    };
+
+    private static string CapabilityEffect(CheckedCapabilityKind kind) => kind switch
+    {
+        CheckedCapabilityKind.FsRead => "fs.read",
+        CheckedCapabilityKind.FsWrite => "fs.write",
+        CheckedCapabilityKind.DbRead => "db.read",
+        CheckedCapabilityKind.DbWrite => "db.write",
+        _ => throw new InvalidOperationException("Unknown checked capability")
+    };
 
     private CheckedRouteResponse CheckRouteResponse(RouteResponseSyntax response, CheckedVariant variant)
     {
@@ -1695,7 +1771,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
-            "FsRead" or "FsError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
+            "FsRead" or "FsWrite" or "FsError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
     private void ValidatePublicSignatures()
     {
@@ -2663,7 +2739,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             fsErrorName.Name == "FsError")
         {
             if (IsFsErrorVariant(expression.Field))
-                Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.At);
+                Add("E_TYPE_MISMATCH", "FsError variants can only be produced by filesystem operations", expression.At);
             else
                 Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on FsError", expression.At);
             return new TypedErrorExpr(expression.At);
@@ -2871,7 +2947,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
                 if (IsFsErrorVariant(expression.Member))
-                    Add("E_TYPE_MISMATCH", "FsError variants can only be produced by fs.read_text", expression.MemberAt);
+                    Add("E_TYPE_MISMATCH", "FsError variants can only be produced by filesystem operations", expression.MemberAt);
                 else
                     Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on FsError", expression.MemberAt);
                 return new TypedErrorExpr(expression.At);
@@ -2893,6 +2969,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
                 Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "fs" && expression.Member == "write_text")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.write_text' requires a local or parameter of type 'FsWrite'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
 
@@ -2988,6 +3072,51 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedIntrinsicCallExpr(
                 resultType,
                 BuiltinIntrinsic.FsReadText,
+                ReadOnly(arguments),
+                expression.At);
+        }
+
+        if (receiver.Type.IsFsWrite && expression.Member == "write_text")
+        {
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 2;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text' expects 2 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            var hasSupportedPathType = false;
+            if (expression.Arguments.Count > 0)
+            {
+                var path = CheckExpr(expression.Arguments[0], null, locals, depth);
+                hasSupportedPathType = path.Type.IsText || path.Type.IsFilePath;
+                if (!path.Type.IsError && !hasSupportedPathType)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text' expects a Text or FilePath path, found '{path.Type.DisplayName}'", expression.Arguments[0].At);
+                arguments.Add(path);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+
+            var hasTextValue = false;
+            if (expression.Arguments.Count > 1)
+            {
+                var value = CheckExpr(expression.Arguments[1], null, locals, depth);
+                hasTextValue = value.Type.IsText;
+                if (!value.Type.IsError && !hasTextValue)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text' expects a Text value, found '{value.Type.DisplayName}'", expression.Arguments[1].At);
+                arguments.Add(value);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+
+            for (var i = 2; i < expression.Arguments.Count; i++)
+                _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+            var resultType = LangType.Result(LangType.Bool, LangType.FsError);
+            if (hasCorrectArity && hasSupportedPathType && hasTextValue && diagnostics.Count == diagnosticsBeforeCall)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.write", "fs.write_text", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                resultType,
+                BuiltinIntrinsic.FsWriteText,
                 ReadOnly(arguments),
                 expression.At);
         }
@@ -3675,7 +3804,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsResourceHandle(LangType type) =>
-        type.Kind is LangTypeKind.FsRead or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.Transaction;
+        type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.Transaction;
 
     private bool TryGetDeclarationNode(LangType type, out int declaration)
     {
@@ -3782,6 +3911,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.FilePath);
             case "FsRead":
                 return NoTypeArguments(syntax, LangType.FsRead);
+            case "FsWrite":
+                return NoTypeArguments(syntax, LangType.FsWrite);
             case "FsError":
                 return NoTypeArguments(syntax, LangType.FsError);
             case "DbRead":
@@ -3944,7 +4075,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public FunctionSymbol? HandlerFunction { get; set; }
         public FunctionSymbol? ErrorFormatter { get; set; }
         public LangType ErrorType { get; set; } = LangType.Error;
-        public bool RequiresFsRead { get; set; }
+        public IReadOnlyList<CheckedCapabilityParameter> Capabilities { get; set; } = [];
 
         public CheckedCommand ToCheckedCommand() => new(
             Id,
@@ -3960,7 +4091,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             ErrorFormatter!.Id,
             SemanticChecker.FormatReference(ErrorSyntax!.Reference),
             ErrorType,
-            RequiresFsRead,
+            Array.AsReadOnly(Capabilities.ToArray()),
             Declaration.At);
     }
 

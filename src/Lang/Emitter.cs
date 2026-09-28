@@ -242,8 +242,8 @@ internal static class Emitter
                 writer.WriteString("handler", command.HandlerReference);
                 writer.WriteString("error_formatter", command.ErrorReference);
                 writer.WriteStartArray("capabilities");
-                if (command.RequiresFsRead)
-                    writer.WriteStringValue("fs.read");
+                foreach (var capability in command.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
+                    writer.WriteStringValue(CapabilityName(capability.Kind));
                 writer.WriteEndArray();
                 WriteCommandInputs(writer, command, CheckedCommandInputKind.Argument, includeDefault: false);
                 WriteCommandInputs(writer, command, CheckedCommandInputKind.Option, includeDefault: true);
@@ -257,6 +257,15 @@ internal static class Emitter
 
         return Encoding.UTF8.GetString(stream.ToArray()).Replace("\r\n", "\n", StringComparison.Ordinal) + "\n";
     }
+
+    private static string CapabilityName(CheckedCapabilityKind kind) => kind switch
+    {
+        CheckedCapabilityKind.FsRead => "fs.read",
+        CheckedCapabilityKind.FsWrite => "fs.write",
+        CheckedCapabilityKind.DbRead => "db.read",
+        CheckedCapabilityKind.DbWrite => "db.write",
+        _ => throw new InvalidOperationException("Unknown checked capability")
+    };
 
     private static void WriteCommandInputs(
         Utf8JsonWriter writer,
@@ -375,7 +384,7 @@ internal static class Emitter
             {
                 _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
-            if (UsesFsReadText)
+            if (UsesFsReadText || UsesFsWriteText)
             {
                 if (!webHost) _source.AppendLine("using System.IO;");
                 _source.AppendLine("using System.Security;");
@@ -393,6 +402,7 @@ internal static class Emitter
             if (NeedsFilePathType) EmitFilePathType();
             if (NeedsHtmlType || webHost) EmitHtmlType();
             if (NeedsFsReadType) EmitFsReadType();
+            if (NeedsFsWriteType) EmitFsWriteType();
             if (NeedsFsErrorType) EmitFsErrorType();
             if (NeedsDbReadType) EmitDbReadType();
             if (NeedsDbWriteType) EmitDbWriteType();
@@ -402,6 +412,7 @@ internal static class Emitter
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
+            if (UsesFsWriteText) EmitFsWriteTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesListGet) EmitListGetHelper();
             if (UsesTextSplit) EmitTextSplitHelper();
@@ -442,6 +453,15 @@ internal static class Emitter
             _source.AppendLine("    public sealed class FsRead");
             _source.AppendLine("    {");
             _source.AppendLine("        internal FsRead() { }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsWriteType()
+        {
+            _source.AppendLine("    public sealed class FsWrite");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal FsWrite() { }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -749,6 +769,10 @@ internal static class Emitter
                 EmitFsReadText(expression),
             BuiltinIntrinsic.FsReadText =>
                 throw new InvalidOperationException("FsRead.read_text requires a receiver and a path"),
+            BuiltinIntrinsic.FsWriteText when expression.Arguments.Count == 3 =>
+                EmitFsWriteText(expression),
+            BuiltinIntrinsic.FsWriteText =>
+                throw new InvalidOperationException("FsWrite.write_text requires a receiver, path, and value"),
             BuiltinIntrinsic.HtmlText when expression.Arguments.Count == 1 =>
                 "HtmlText(" + EmitExpr(expression.Arguments[0]) + ")",
             BuiltinIntrinsic.HtmlHeading when expression.Arguments.Count == 1 =>
@@ -772,6 +796,16 @@ internal static class Emitter
                 ? "(" + EmitExpr(path) + ").Value"
                 : EmitExpr(path);
             return "ReadText(" + receiver + ", " + emittedPath + ")";
+        }
+
+        private string EmitFsWriteText(TypedIntrinsicCallExpr expression)
+        {
+            var receiver = EmitExpr(expression.Arguments[0]);
+            var path = expression.Arguments[1];
+            var emittedPath = path.Type.IsFilePath
+                ? "(" + EmitExpr(path) + ").Value"
+                : EmitExpr(path);
+            return "WriteText(" + receiver + ", " + emittedPath + ", " + EmitExpr(expression.Arguments[2]) + ")";
         }
 
         private string EmitBinary(TypedBinaryExpr expression)
@@ -973,6 +1007,83 @@ internal static class Emitter
             _source.AppendLine("        catch (IOException)");
             _source.AppendLine("        {");
             _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.Io());");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsWriteTextHelper()
+        {
+            _source.AppendLine("    // Paths use the host OS filesystem resolution rules. FsWrite does not confine writes to a package root or provide a filesystem sandbox.");
+            _source.AppendLine("    // The temporary file is staged beside the destination and renamed over its directory entry where the host OS supports replacement.");
+            _source.AppendLine("    private static Result<bool, FsError> WriteText(FsWrite receiver, string path, string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(receiver);");
+            _source.AppendLine("        string? temporaryPath = null;");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (path.IndexOf('\\0') >= 0)");
+            _source.AppendLine("                return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("            var fullPath = Path.GetFullPath(path);");
+            _source.AppendLine("            var directory = Path.GetDirectoryName(fullPath) ?? throw new ArgumentException(\"Destination has no parent directory\", nameof(path));");
+            _source.AppendLine("            var fileName = Path.GetFileName(fullPath);");
+            _source.AppendLine("            var bytes = new UTF8Encoding(false, true).GetBytes(value);");
+            _source.AppendLine("            var temporaryName = \".\" + (fileName.Length == 0 ? \"lang\" : fileName) + \".\" + Guid.NewGuid().ToString(\"N\") + \".tmp\";");
+            _source.AppendLine("            temporaryPath = Path.Combine(directory, temporaryName);");
+            _source.AppendLine("            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))");
+            _source.AppendLine("            {");
+            _source.AppendLine("                stream.Write(bytes, 0, bytes.Length);");
+            _source.AppendLine("                stream.Flush(true);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            File.Move(temporaryPath, fullPath, overwrite: true);");
+            _source.AppendLine("            temporaryPath = null;");
+            _source.AppendLine("            return new Result<bool, FsError>.Ok(true);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (EncoderFallbackException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidText());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (FileNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DirectoryNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (SecurityException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (UnauthorizedAccessException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (ArgumentException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (NotSupportedException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (PathTooLongException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (IOException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.Io());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        finally");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (temporaryPath is not null)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                try { File.Delete(temporaryPath); }");
+            _source.AppendLine("                catch (IOException) { }");
+            _source.AppendLine("                catch (UnauthorizedAccessException) { }");
+            _source.AppendLine("                catch (SecurityException) { }");
+            _source.AppendLine("            }");
             _source.AppendLine("        }");
             _source.AppendLine("    }");
             _source.AppendLine();
@@ -1555,13 +1666,13 @@ internal static class Emitter
                 _source.Append("            var requestValue = DecodeJsonStruct_").Append(bodyType.StructId.ToString(CultureInfo.InvariantCulture))
                     .AppendLine("(requestJson.RootElement);");
                 var arguments = new List<string> { "requestValue" };
-                arguments.AddRange(EmitRouteDatabaseCapabilities(route));
+                arguments.AddRange(EmitRouteCapabilities(route));
                 _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
                     .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
             else
             {
-                var arguments = EmitRouteDatabaseCapabilities(route);
+                var arguments = EmitRouteCapabilities(route);
                 _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
                     .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
@@ -1637,18 +1748,20 @@ internal static class Emitter
             _source.AppendLine();
         }
 
-        private IEnumerable<string> EmitRouteDatabaseCapabilities(CheckedRoute route)
+        private IEnumerable<string> EmitRouteCapabilities(CheckedRoute route)
         {
             foreach (var capability in route.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
             {
-                if (_webDatabaseOptions is null)
+                if (capability.Kind is CheckedCapabilityKind.DbRead or CheckedCapabilityKind.DbWrite &&
+                    _webDatabaseOptions is null)
                     throw new InvalidOperationException("Checked route database capability reached emission without web database options");
 
                 yield return capability.Kind switch
                 {
-                    CheckedRouteCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
-                    CheckedRouteCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
-                    _ => throw new InvalidOperationException("Unknown checked route database capability")
+                    CheckedCapabilityKind.FsWrite => "new FsWrite()",
+                    CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
+                    CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
+                    _ => throw new InvalidOperationException("Unsupported checked route capability")
                 };
             }
         }
@@ -1924,8 +2037,15 @@ internal static class Emitter
             _source.Append("        var result = Function_").Append(command.HandlerFunctionId.ToString(CultureInfo.InvariantCulture))
                 .Append("(new Struct_").Append(command.ArgsStructId.ToString(CultureInfo.InvariantCulture))
                 .Append('(').Append(fields).Append(')');
-            if (command.RequiresFsRead)
-                _source.Append(", new FsRead()");
+            foreach (var capability in command.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
+            {
+                _source.Append(capability.Kind switch
+                {
+                    CheckedCapabilityKind.FsRead => ", new FsRead()",
+                    CheckedCapabilityKind.FsWrite => ", new FsWrite()",
+                    _ => throw new InvalidOperationException("Unsupported checked command capability")
+                });
+            }
             _source.AppendLine(");");
             _source.Append("        if (result is ").Append(resultType).AppendLine(".Ok success)");
             _source.AppendLine("        {");
@@ -2164,6 +2284,7 @@ internal static class Emitter
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
             LangTypeKind.TypeParameter => EmitTypeParameter(type),
             LangTypeKind.FsRead => "FsRead",
+            LangTypeKind.FsWrite => "FsWrite",
             LangTypeKind.FsError => "FsError",
             LangTypeKind.DbRead => "DbRead",
             LangTypeKind.DbWrite => "DbWrite",
@@ -2190,9 +2311,13 @@ internal static class Emitter
         private bool NeedsHtmlType => UsesTypeKind(LangTypeKind.Html);
 
         private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText ||
-            program.Commands.Any(command => command.RequiresFsRead);
+            program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsRead));
 
-        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
+        private bool NeedsFsWriteType => UsesTypeKind(LangTypeKind.FsWrite) || UsesFsWriteText ||
+            program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite)) ||
+            program.Routes.Any(route => route.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite));
+
+        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText || UsesFsWriteText;
 
         private bool NeedsDbReadType => UsesTypeKind(LangTypeKind.DbRead) || UsesDatabase;
 
@@ -2232,6 +2357,14 @@ internal static class Emitter
                 .SelectMany(EnumerateExpressions)
                 .OfType<TypedIntrinsicCallExpr>()
                 .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText));
+
+        private bool UsesFsWriteText => EmittedFunctions.Any(function =>
+            function.InferredEffects.Contains("fs.write", StringComparer.Ordinal) ||
+            EnumerateStatements(function.Body)
+                .SelectMany(StatementExpressions)
+                .SelectMany(EnumerateExpressions)
+                .OfType<TypedIntrinsicCallExpr>()
+                .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteText));
 
         private bool UsesTextLength => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))

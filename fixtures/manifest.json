@@ -238,5 +238,10 @@
     "file": "47-list-resource-escape.lang",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "48-transitive-fs-write-effect.lang",
+    "status": "active",
+    "expectedCodes": ["E_EFFECT_EXCEEDED"]
   }
 ]
