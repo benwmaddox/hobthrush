@@ -3,9 +3,13 @@ version = "0.1.0"
 kind = "web"
 source_root = "src"
 entry_module = "app::main"
+sqlite_path = "data/greeting.sqlite3"
+sqlite_schema = "db/schema.sql"
 
 [capabilities]
 net.listen = "allow"
+db.read = "allow"
+db.write = "allow"
 
 [dependencies]
 validation = "../text-validation"

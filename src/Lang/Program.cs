@@ -432,8 +432,7 @@ internal static class Driver
 
         var inferredEffects = function.InferredEffects;
         var requiredCapabilities = inferredEffects
-            .Where(effect => string.Equals(effect, "fs.read", StringComparison.Ordinal))
-            .Select(_ => "fs.read")
+            .Where(effect => effect is "fs.read" or "db.read" or "db.write")
             .Distinct(StringComparer.Ordinal)
             .OrderBy(effect => effect, StringComparer.Ordinal)
             .ToArray();
@@ -452,6 +451,16 @@ internal static class Driver
         if (inferredEffects.Contains("fs.read", StringComparer.Ordinal))
         {
             trustedOperations.Add(new TrustedOperation("FsRead.read_text", "trusted_adapter", ["fs.read"]));
+        }
+
+        if (inferredEffects.Contains("db.read", StringComparer.Ordinal))
+        {
+            trustedOperations.Add(new TrustedOperation("DbRead.query_one", "trusted_adapter", ["db.read"]));
+        }
+
+        if (inferredEffects.Contains("db.write", StringComparer.Ordinal))
+        {
+            trustedOperations.Add(new TrustedOperation("DbWrite.execute", "trusted_adapter", ["db.write"]));
         }
 
         var output = new
@@ -760,6 +769,7 @@ internal static class Driver
         }
 
         var executable = isWebPackage || entry is not null || entryCommand is not null;
+        var usesDatabaseAdapter = package?.WebDatabaseOptions is not null || UsesDatabaseAdapter(program);
         var assemblyName = package?.Manifest.Name ?? "Generated";
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -783,10 +793,15 @@ internal static class Driver
                 assemblyName + ".dll");
             File.WriteAllText(
                 projectFile,
-                ProjectFileContents(executable, aotRid, assemblyName, webPackage: isWebPackage));
+                ProjectFileContents(
+                    executable,
+                    aotRid,
+                    assemblyName,
+                    webPackage: isWebPackage,
+                    sqlitePackage: usesDatabaseAdapter));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
-                Emitter.Emit(program, executable));
+                Emitter.Emit(program, executable, package?.WebDatabaseOptions));
         }
         catch (Exception error) when (IsFileError(error))
         {
@@ -954,7 +969,8 @@ internal static class Driver
                     dotnet,
                     runArguments,
                     package?.Root ?? Directory.GetCurrentDirectory(),
-                    sourceFile) ?? 1;
+                    sourceFile,
+                    GetRunSqlitePathOverride(package)) ?? 1;
             }
 
             var run = await ExecAsync(
@@ -978,6 +994,21 @@ internal static class Driver
         if (arguments is not null)
             result.AddRange(arguments);
         return result;
+    }
+
+    private static bool UsesDatabaseAdapter(CheckedProgram program) =>
+        program.Functions.Any(function =>
+            function.InferredEffects.Any(effect => effect is "db.read" or "db.write"));
+
+    private static string? GetRunSqlitePathOverride(LoadedPackage? package)
+    {
+        if (package?.Manifest.Kind != "web" || package.WebDatabaseOptions is not { } databaseOptions ||
+            Environment.GetEnvironmentVariable("LANG_SQLITE_PATH") is not null)
+            return null;
+
+        return Path.GetFullPath(Path.Combine(
+            package.Root,
+            databaseOptions.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
     }
 
     private static bool IsRunnableEntryPoint(CheckedFunction function) =>
@@ -1015,12 +1046,47 @@ internal static class Driver
 
     private static void CopyBuildArtifacts(string stagedOutputDirectory, string destinationDirectory)
     {
-        Directory.CreateDirectory(destinationDirectory);
-        foreach (var artifact in Directory.GetFiles(stagedOutputDirectory))
+        var stagedRoot = Path.GetFullPath(stagedOutputDirectory);
+        var destinationRoot = Path.GetFullPath(destinationDirectory);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var destinationPrefix = Path.EndsInDirectorySeparator(destinationRoot)
+            ? destinationRoot
+            : destinationRoot + Path.DirectorySeparatorChar;
+        var artifacts = Directory.EnumerateFiles(
+                stagedRoot,
+                "*",
+                new EnumerationOptions
+                {
+                    AttributesToSkip = FileAttributes.ReparsePoint,
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = false,
+                    ReturnSpecialDirectories = false
+                })
+            .Select(path => new
+            {
+                FullPath = path,
+                RelativePath = Path.GetRelativePath(stagedRoot, path)
+                    .Replace(Path.DirectorySeparatorChar, '/')
+                    .Replace(Path.AltDirectorySeparatorChar, '/')
+            })
+            .OrderBy(artifact => artifact.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+
+        Directory.CreateDirectory(destinationRoot);
+        foreach (var artifact in artifacts)
         {
+            var outputPath = Path.GetFullPath(Path.Combine(
+                destinationRoot,
+                artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!outputPath.StartsWith(destinationPrefix, comparison))
+                throw new IOException("Generated runtime artifact resolves outside its output directory");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
             File.Copy(
-                artifact,
-                Path.Combine(destinationDirectory, Path.GetFileName(artifact)),
+                artifact.FullPath,
+                outputPath,
                 overwrite: false);
         }
     }
@@ -1063,7 +1129,8 @@ internal static class Driver
         bool executable,
         string? aotRid,
         string assemblyName = "Generated",
-        bool webPackage = false)
+        bool webPackage = false,
+        bool sqlitePackage = false)
     {
         var outputType = executable ? "Exe" : "Library";
         return
@@ -1081,6 +1148,11 @@ internal static class Driver
                   "    <PublishAot>true</PublishAot>\n" +
                   "    <SelfContained>true</SelfContained>\n") +
             "  </PropertyGroup>\n" +
+            (sqlitePackage
+                ? "  <ItemGroup>\n" +
+                  "    <PackageReference Include=\"Microsoft.Data.Sqlite\" Version=\"10.0.12\" />\n" +
+                  "  </ItemGroup>\n"
+                : string.Empty) +
             "</Project>\n";
     }
 
@@ -1190,7 +1262,8 @@ internal static class Driver
         string executable,
         IReadOnlyList<string> arguments,
         string workingDirectory,
-        string sourceFile)
+        string sourceFile,
+        string? sqlitePathOverride = null)
     {
         Process? process = null;
         ConsoleCancelEventHandler? cancelHandler = null;
@@ -1213,6 +1286,9 @@ internal static class Driver
             process.StartInfo.StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
             process.StartInfo.Environment["LANG_PARENT_PROCESS_ID"] =
                 Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (sqlitePathOverride is not null &&
+                !process.StartInfo.Environment.ContainsKey("LANG_SQLITE_PATH"))
+                process.StartInfo.Environment["LANG_SQLITE_PATH"] = sqlitePathOverride;
 
             cancelHandler = (_, eventArgs) =>
             {

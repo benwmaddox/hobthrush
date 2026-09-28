@@ -4,7 +4,10 @@ using System.Text.Json;
 
 internal static class Emitter
 {
-    public static string Emit(CheckedProgram program, bool executable = true)
+    public static string Emit(
+        CheckedProgram program,
+        bool executable = true,
+        WebDatabaseOptions? webDatabaseOptions = null)
     {
         var entry = program.EntryFunctionId is int entryId
             ? program.Functions.FirstOrDefault(function =>
@@ -19,7 +22,7 @@ internal static class Emitter
         if (executable && entry is null && entryCommand is null && !webHost)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
 
-        var emitter = new SourceEmitter(program);
+        var emitter = new SourceEmitter(program, webDatabaseOptions: webDatabaseOptions);
         return emitter.Emit(entry, executable, command: entryCommand, webHost: webHost);
     }
 
@@ -331,7 +334,8 @@ internal static class Emitter
 
     private sealed class SourceEmitter(
         CheckedProgram program,
-        IReadOnlySet<int>? includedTestFunctionIds = null)
+        IReadOnlySet<int>? includedTestFunctionIds = null,
+        WebDatabaseOptions? webDatabaseOptions = null)
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
@@ -339,6 +343,7 @@ internal static class Emitter
             .Select(test => test.FunctionId)
             .ToHashSet();
         private readonly IReadOnlySet<int> _includedTestFunctionIds = includedTestFunctionIds ?? new HashSet<int>();
+        private readonly WebDatabaseOptions? _webDatabaseOptions = webDatabaseOptions;
 
         private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
             !_testFunctionIds.Contains(function.Id) || _includedTestFunctionIds.Contains(function.Id));
@@ -363,6 +368,12 @@ internal static class Emitter
                 _source.AppendLine("using Microsoft.AspNetCore.Builder;");
                 _source.AppendLine("using Microsoft.AspNetCore.Http;");
                 _source.AppendLine("using Microsoft.Extensions.Logging;");
+                if (UsesDatabase)
+                    _source.AppendLine("using Microsoft.Data.Sqlite;");
+            }
+            else if (UsesDatabase)
+            {
+                _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
             if (UsesFsReadText)
             {
@@ -380,15 +391,19 @@ internal static class Emitter
 
             EmitBuiltinTypes();
             if (NeedsFilePathType) EmitFilePathType();
-            if (NeedsHtmlType) EmitHtmlType();
+            if (NeedsHtmlType || webHost) EmitHtmlType();
             if (NeedsFsReadType) EmitFsReadType();
             if (NeedsFsErrorType) EmitFsErrorType();
+            if (NeedsDbReadType) EmitDbReadType();
+            if (NeedsDbWriteType) EmitDbWriteType();
+            if (NeedsDbErrorType) EmitDbErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesHtmlBuilders) EmitHtmlHelpers();
+            if (UsesDatabase) EmitDatabaseHelpers();
             EmitArithmeticHelpers();
             if (tests is not null)
                 EmitTestEntryPoint(tests);
@@ -457,6 +472,38 @@ internal static class Emitter
             _source.AppendLine("        public sealed record InvalidPath() : FsError;");
             _source.AppendLine("        public sealed record InvalidText() : FsError;");
             _source.AppendLine("        public sealed record Io() : FsError;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitDbReadType()
+        {
+            _source.AppendLine("    public sealed class DbRead");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal DbRead(string connectionString, System.Threading.CancellationToken cancellationToken) { ConnectionString = connectionString; CancellationToken = cancellationToken; }");
+            _source.AppendLine("        internal string ConnectionString { get; }");
+            _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitDbWriteType()
+        {
+            _source.AppendLine("    public sealed class DbWrite");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal DbWrite(string connectionString, System.Threading.CancellationToken cancellationToken) { ConnectionString = connectionString; CancellationToken = cancellationToken; }");
+            _source.AppendLine("        internal string ConnectionString { get; }");
+            _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitDbErrorType()
+        {
+            _source.AppendLine("    public abstract record DbError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        public sealed record Statement() : DbError;");
+            _source.AppendLine("        public sealed record RowShape() : DbError;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -572,6 +619,7 @@ internal static class Emitter
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr call => EmitCall(call),
+            TypedDatabaseCallExpr databaseCall => EmitDatabaseCall(databaseCall),
             TypedTextLengthExpr length => "TextLength(" + EmitExpr(length.Target) + ")",
             TypedTextTrimExpr trim => "(" + EmitExpr(trim.Target) + ").Trim()",
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
@@ -583,6 +631,27 @@ internal static class Emitter
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
+
+        private string EmitDatabaseCall(TypedDatabaseCallExpr call)
+        {
+            var parameters = EmitExpr(call.Parameters);
+            var parameterStructId = call.Operation.ParameterStructId.ToString(CultureInfo.InvariantCulture);
+            var bindMethod = "BindDatabaseParameters_" + parameterStructId;
+            var sql = JsonSerializer.Serialize(call.Operation.Sql);
+            if (call.Operation.Kind == CheckedDatabaseOperationKind.QueryOne)
+            {
+                var rowStructId = call.Operation.RowStructId?.ToString(CultureInfo.InvariantCulture)
+                    ?? throw new InvalidOperationException("Checked database query has no row struct");
+                return "DatabaseQueryOne(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters +
+                    ", " + bindMethod + ", GetDatabaseColumnOrdinals_" + rowStructId +
+                    ", ReadDatabaseRow_" + rowStructId + ")";
+            }
+
+            if (call.Operation.Kind == CheckedDatabaseOperationKind.Execute)
+                return "DatabaseExecute(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters + ", " + bindMethod + ")";
+
+            throw new InvalidOperationException("Unknown checked database operation");
+        }
 
         private string EmitCall(TypedCallExpr call)
         {
@@ -661,11 +730,13 @@ internal static class Emitter
                 BuiltinVariant.None => "None",
                 BuiltinVariant.Ok => "Ok",
                 BuiltinVariant.Err => "Err",
-                BuiltinVariant.FsErrorNotFound or
-                BuiltinVariant.FsErrorPermissionDenied or
-                BuiltinVariant.FsErrorInvalidPath or
-                BuiltinVariant.FsErrorInvalidText or
-                BuiltinVariant.FsErrorIo => throw new InvalidOperationException("FsError variants cannot be constructed from source"),
+            BuiltinVariant.FsErrorNotFound or
+            BuiltinVariant.FsErrorPermissionDenied or
+            BuiltinVariant.FsErrorInvalidPath or
+            BuiltinVariant.FsErrorInvalidText or
+            BuiltinVariant.FsErrorIo or
+            BuiltinVariant.DbErrorStatement or
+            BuiltinVariant.DbErrorRowShape => throw new InvalidOperationException("Builtin error variants cannot be constructed from source"),
                 _ => throw new InvalidOperationException("Unknown builtin union variant")
             };
             return "new " + EmitType(expression.Type) + "." + variant + "(" +
@@ -714,6 +785,8 @@ internal static class Emitter
                     BuiltinVariant.FsErrorInvalidPath => "InvalidPath",
                     BuiltinVariant.FsErrorInvalidText => "InvalidText",
                     BuiltinVariant.FsErrorIo => "Io",
+                    BuiltinVariant.DbErrorStatement => "Statement",
+                    BuiltinVariant.DbErrorRowShape => "RowShape",
                     _ => throw new InvalidOperationException("Unknown builtin pattern")
                 };
                 variantType = EmitType(scrutineeType) + "." + variantName;
@@ -828,6 +901,213 @@ internal static class Emitter
             _source.AppendLine();
         }
 
+        private void EmitDatabaseHelpers()
+        {
+            if (_webDatabaseOptions is not null)
+            {
+                _source.AppendLine("    private static string DatabaseReadConnectionString = string.Empty;");
+                _source.AppendLine("    private static string DatabaseWriteConnectionString = string.Empty;");
+                EmitDatabaseInitialization(_webDatabaseOptions);
+            }
+
+            _source.AppendLine("    private sealed class DatabaseRowShapeException : Exception { }");
+
+            _source.AppendLine("    private static object DatabaseParameterValue(int value) => value;");
+            _source.AppendLine("    private static object DatabaseParameterValue(bool value) => value ? 1 : 0;");
+            _source.AppendLine("    private static object DatabaseParameterValue(string value) => value;");
+            _source.AppendLine("    private static object DatabaseParameterValue<T>(Option<T> value, Func<T, object> convert) => value switch");
+            _source.AppendLine("    {");
+            _source.AppendLine("        Option<T>.Some(var item) => convert(item),");
+            _source.AppendLine("        Option<T>.None => DBNull.Value,");
+            _source.AppendLine("        _ => throw new InvalidOperationException(\"Invalid Option value\")");
+            _source.AppendLine("    };");
+
+            foreach (var id in DatabaseParameterStructIds())
+                EmitDatabaseParameterBinder(program.Structs.Single(structure => structure.Id == id));
+
+            if (DatabaseCalls.Any(call => call.Operation.Kind == CheckedDatabaseOperationKind.QueryOne))
+            {
+                _source.AppendLine("    private static int ReadDatabaseInt32(SqliteDataReader reader, int ordinal)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var value = reader.GetValue(ordinal);");
+                _source.AppendLine("        if (value is not long integer || integer < int.MinValue || integer > int.MaxValue) throw new DatabaseRowShapeException();");
+                _source.AppendLine("        return (int)integer;");
+                _source.AppendLine("    }");
+                _source.AppendLine("    private static bool ReadDatabaseBool(SqliteDataReader reader, int ordinal)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var value = reader.GetValue(ordinal);");
+                _source.AppendLine("        if (value is not long integer) throw new DatabaseRowShapeException();");
+                _source.AppendLine("        return integer switch { 0 => false, 1 => true, _ => throw new DatabaseRowShapeException() };");
+                _source.AppendLine("    }");
+                _source.AppendLine("    private static string ReadDatabaseText(SqliteDataReader reader, int ordinal)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var value = reader.GetValue(ordinal);");
+                _source.AppendLine("        return value as string ?? throw new DatabaseRowShapeException();");
+                _source.AppendLine("    }");
+                _source.AppendLine("    private static Option<T> ReadDatabaseOptional<T>(SqliteDataReader reader, int ordinal, Func<SqliteDataReader, int, T> convert)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        if (reader.IsDBNull(ordinal)) return new Option<T>.None();");
+                _source.AppendLine("        return new Option<T>.Some(convert(reader, ordinal));");
+                _source.AppendLine("    }");
+
+                foreach (var id in DatabaseRowStructIds())
+                    EmitDatabaseRowReader(program.Structs.Single(structure => structure.Id == id));
+
+                _source.AppendLine("    private static Result<Option<TRow>, DbError> DatabaseQueryOne<TParameters, TRow>(DbRead database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters, Func<SqliteDataReader, int[]> getColumnOrdinals, Func<SqliteDataReader, int[], TRow> readRow)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            using var connection = new SqliteConnection(database.ConnectionString);");
+                _source.AppendLine("            connection.OpenAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            using (var queryOnlyCommand = connection.CreateCommand())");
+                _source.AppendLine("            {");
+                _source.AppendLine("                queryOnlyCommand.CommandText = \"PRAGMA query_only = ON\";");
+                _source.AppendLine("                queryOnlyCommand.ExecuteNonQueryAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            }");
+                _source.AppendLine("            using var command = connection.CreateCommand();");
+                _source.AppendLine("            command.CommandText = sql;");
+                _source.AppendLine("            bindParameters(command, parameters);");
+                _source.AppendLine("            using var reader = command.ExecuteReaderAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            var columnOrdinals = getColumnOrdinals(reader);");
+                _source.AppendLine("            if (!reader.ReadAsync(cancellationToken).GetAwaiter().GetResult())");
+                _source.AppendLine("                return new Result<Option<TRow>, DbError>.Ok(new Option<TRow>.None());");
+                _source.AppendLine("            var row = readRow(reader, columnOrdinals);");
+                _source.AppendLine("            // query_one has strict zero-or-one cardinality; a second row is a row-shape error.");
+                _source.AppendLine("            if (reader.ReadAsync(cancellationToken).GetAwaiter().GetResult()) throw new DatabaseRowShapeException();");
+                _source.AppendLine("            return new Result<Option<TRow>, DbError>.Ok(new Option<TRow>.Some(row));");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }");
+                _source.AppendLine("        catch (DatabaseRowShapeException) { return new Result<Option<TRow>, DbError>.Err(new DbError.RowShape()); }");
+                _source.AppendLine("        catch (SqliteException) { return new Result<Option<TRow>, DbError>.Err(new DbError.Statement()); }");
+                _source.AppendLine("    }");
+            }
+
+            if (DatabaseCalls.Any(call => call.Operation.Kind == CheckedDatabaseOperationKind.Execute))
+            {
+                _source.AppendLine("    private static Result<int, DbError> DatabaseExecute<TParameters>(DbWrite database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            using var connection = new SqliteConnection(database.ConnectionString);");
+                _source.AppendLine("            connection.OpenAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            using var command = connection.CreateCommand();");
+                _source.AppendLine("            command.CommandText = sql;");
+                _source.AppendLine("            bindParameters(command, parameters);");
+                _source.AppendLine("            var affectedRows = command.ExecuteNonQueryAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            return new Result<int, DbError>.Ok(affectedRows);");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }");
+                _source.AppendLine("        catch (SqliteException) { return new Result<int, DbError>.Err(new DbError.Statement()); }");
+                _source.AppendLine("    }");
+            }
+            _source.AppendLine();
+        }
+
+        private void EmitDatabaseInitialization(WebDatabaseOptions options)
+        {
+            _source.AppendLine("    private static async Task InitializeDatabaseAsync(CancellationToken cancellationToken)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var overridePath = Environment.GetEnvironmentVariable(\"LANG_SQLITE_PATH\");");
+            _source.Append("        var configuredPath = string.IsNullOrWhiteSpace(overridePath) ? ")
+                .Append(JsonSerializer.Serialize(options.RelativePath)).AppendLine(" : overridePath;");
+            _source.AppendLine("        var databasePath = Path.GetFullPath(configuredPath, AppContext.BaseDirectory);");
+            _source.AppendLine("        var databaseDirectory = Path.GetDirectoryName(databasePath);");
+            _source.AppendLine("        if (!string.IsNullOrEmpty(databaseDirectory)) Directory.CreateDirectory(databaseDirectory);");
+            _source.AppendLine("        var writeConnectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString();");
+            _source.AppendLine("        var readConnectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Mode = SqliteOpenMode.ReadOnly }.ToString();");
+            _source.AppendLine("        await using var connection = new SqliteConnection(writeConnectionString);");
+            _source.AppendLine("        await connection.OpenAsync(cancellationToken);");
+            _source.AppendLine("        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);");
+            _source.AppendLine("        await using var command = connection.CreateCommand();");
+            _source.AppendLine("        command.Transaction = transaction;");
+            _source.Append("        command.CommandText = ").Append(JsonSerializer.Serialize(options.SchemaText)).AppendLine(";");
+            _source.AppendLine("        await command.ExecuteNonQueryAsync(cancellationToken);");
+            _source.AppendLine("        await transaction.CommitAsync(cancellationToken);");
+            _source.AppendLine("        DatabaseReadConnectionString = readConnectionString;");
+            _source.AppendLine("        DatabaseWriteConnectionString = writeConnectionString;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private IEnumerable<int> DatabaseParameterStructIds() => DatabaseCalls
+            .Select(call => call.Operation.ParameterStructId)
+            .Distinct()
+            .OrderBy(id => id);
+
+        private IEnumerable<int> DatabaseRowStructIds() => DatabaseCalls
+            .Where(call => call.Operation.Kind == CheckedDatabaseOperationKind.QueryOne)
+            .Select(call => call.Operation.RowStructId ?? throw new InvalidOperationException("Checked database query has no row struct"))
+            .Distinct()
+            .OrderBy(id => id);
+
+        private void EmitDatabaseParameterBinder(CheckedStruct structure)
+        {
+            var id = structure.Id.ToString(CultureInfo.InvariantCulture);
+            _source.Append("    private static void BindDatabaseParameters_").Append(id)
+                .Append("(SqliteCommand command, Struct_").Append(id).AppendLine(" value)");
+            _source.AppendLine("    {");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                var emittedValue = field.Type.Kind == LangTypeKind.Option
+                    ? "DatabaseParameterValue(value.Field_" + field.Index.ToString(CultureInfo.InvariantCulture) + ", item => DatabaseParameterValue(item))"
+                    : "DatabaseParameterValue(value.Field_" + field.Index.ToString(CultureInfo.InvariantCulture) + ")";
+                _source.Append("        command.Parameters.AddWithValue(")
+                    .Append(JsonSerializer.Serialize("$" + field.Name)).Append(", ").Append(emittedValue).AppendLine(");");
+            }
+            _source.AppendLine("    }");
+        }
+
+        private void EmitDatabaseRowReader(CheckedStruct structure)
+        {
+            var id = structure.Id.ToString(CultureInfo.InvariantCulture);
+            _source.Append("    private static int[] GetDatabaseColumnOrdinals_").Append(id).AppendLine("(SqliteDataReader reader)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var columns = new Dictionary<string, int>(StringComparer.Ordinal);");
+            _source.AppendLine("        for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)");
+            _source.AppendLine("            if (!columns.TryAdd(reader.GetName(ordinal), ordinal)) throw new DatabaseRowShapeException();");
+            _source.Append("        if (columns.Count != ").Append(structure.Fields.Count.ToString(CultureInfo.InvariantCulture)).AppendLine(") throw new DatabaseRowShapeException();");
+            _source.Append("        var ordinals = new int[").Append(structure.Fields.Count.ToString(CultureInfo.InvariantCulture)).AppendLine("];");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                var index = field.Index.ToString(CultureInfo.InvariantCulture);
+                _source.Append("        if (!columns.TryGetValue(").Append(JsonSerializer.Serialize(field.Name))
+                    .Append(", out var column_").Append(index).AppendLine(")) throw new DatabaseRowShapeException();");
+                _source.Append("        ordinals[").Append(index).Append("] = column_").Append(index).AppendLine(";");
+            }
+            _source.AppendLine("        return ordinals;");
+            _source.AppendLine("    }");
+            _source.Append("    private static Struct_").Append(id).Append(" ReadDatabaseRow_").Append(id).AppendLine("(SqliteDataReader reader, int[] ordinals)");
+            _source.AppendLine("    {");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                var index = field.Index.ToString(CultureInfo.InvariantCulture);
+                _source.Append("        var field_").Append(index).Append(" = ")
+                    .Append(DatabaseReadValue(field.Type, "ordinals[" + index + "]")).AppendLine(";");
+            }
+            _source.Append("        return new Struct_").Append(id).Append('(')
+                .Append(string.Join(", ", structure.Fields.OrderBy(field => field.Index).Select(field =>
+                    "Field_" + field.Index.ToString(CultureInfo.InvariantCulture) + ": field_" +
+                    field.Index.ToString(CultureInfo.InvariantCulture))))
+                .AppendLine(");");
+            _source.AppendLine("    }");
+        }
+
+        private static string DatabaseReadValue(LangType type, string ordinal) => type.Kind switch
+        {
+            LangTypeKind.I32 => "ReadDatabaseInt32(reader, " + ordinal + ")",
+            LangTypeKind.Bool => "ReadDatabaseBool(reader, " + ordinal + ")",
+            LangTypeKind.Text => "ReadDatabaseText(reader, " + ordinal + ")",
+            LangTypeKind.Option when type.Arguments[0].Kind == LangTypeKind.I32 =>
+                "ReadDatabaseOptional(reader, " + ordinal + ", ReadDatabaseInt32)",
+            LangTypeKind.Option when type.Arguments[0].Kind == LangTypeKind.Bool =>
+                "ReadDatabaseOptional(reader, " + ordinal + ", ReadDatabaseBool)",
+            LangTypeKind.Option when type.Arguments[0].Kind == LangTypeKind.Text =>
+                "ReadDatabaseOptional(reader, " + ordinal + ", ReadDatabaseText)",
+            _ => throw new InvalidOperationException("Unsupported checked database row field")
+        };
+
         private void EmitWebHost()
         {
             _source.AppendLine("    private const int MaxRequestBodyBytes = 1048576;");
@@ -837,8 +1117,22 @@ internal static class Emitter
             _source.AppendLine("        var builder = WebApplication.CreateBuilder(args);");
             _source.AppendLine("        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = MaxTransportRequestBodyBytes);");
             _source.AppendLine("        var app = builder.Build();");
+            if (_webDatabaseOptions is not null)
+            {
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            await InitializeDatabaseAsync(app.Lifetime.ApplicationStopping);");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch");
+                _source.AppendLine("        {");
+                _source.AppendLine("            await app.DisposeAsync();");
+                _source.AppendLine("            throw;");
+                _source.AppendLine("        }");
+            }
+            _source.AppendLine("        var parentIdText = Environment.GetEnvironmentVariable(\"LANG_PARENT_PROCESS_ID\");");
+            _source.AppendLine("        var hasWrapperParent = int.TryParse(parentIdText, NumberStyles.None, CultureInfo.InvariantCulture, out var wrapperParentId) && wrapperParentId > 0;");
             _source.AppendLine("        using var standardInputMonitorCancellation = new CancellationTokenSource();");
-            _source.AppendLine("        StartStandardInputMonitor(app, standardInputMonitorCancellation.Token);");
+            _source.AppendLine("        if (hasWrapperParent) StartStandardInputMonitor(app, standardInputMonitorCancellation.Token);");
             foreach (var route in program.Routes.OrderBy(route => route.Id))
             {
                 _source.Append("        app.MapMethods(").Append(JsonSerializer.Serialize(route.Path))
@@ -847,7 +1141,9 @@ internal static class Emitter
                     .Append(route.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(context, app.Logger));");
             }
             _source.AppendLine("        using var parentMonitorCancellation = new CancellationTokenSource();");
-            _source.AppendLine("        var parentMonitor = MonitorParentProcessAsync(app, parentMonitorCancellation.Token);");
+            _source.AppendLine("        var parentMonitor = hasWrapperParent");
+            _source.AppendLine("            ? MonitorParentProcessAsync(app, parentMonitorCancellation.Token, wrapperParentId)");
+            _source.AppendLine("            : Task.CompletedTask;");
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            await app.RunAsync();");
@@ -860,6 +1156,8 @@ internal static class Emitter
             _source.AppendLine("            }");
             _source.AppendLine("            finally");
             _source.AppendLine("            {");
+            if (_webDatabaseOptions is not null)
+                _source.AppendLine("                SqliteConnection.ClearAllPools();");
             _source.AppendLine("                try");
             _source.AppendLine("                {");
             _source.AppendLine("                    standardInputMonitorCancellation.Cancel();");
@@ -890,10 +1188,8 @@ internal static class Emitter
 
         private void EmitParentProcessMonitor()
         {
-            _source.AppendLine("    private static async Task MonitorParentProcessAsync(WebApplication app, CancellationToken cancellationToken)");
+            _source.AppendLine("    private static async Task MonitorParentProcessAsync(WebApplication app, CancellationToken cancellationToken, int parentId)");
             _source.AppendLine("    {");
-            _source.AppendLine("        var parentIdText = Environment.GetEnvironmentVariable(\"LANG_PARENT_PROCESS_ID\");");
-            _source.AppendLine("        if (!int.TryParse(parentIdText, NumberStyles.None, CultureInfo.InvariantCulture, out var parentId) || parentId <= 0) return;");
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            using var parent = Process.GetProcessById(parentId);");
@@ -1082,11 +1378,16 @@ internal static class Emitter
                 _source.AppendLine("            using var requestJson = JsonDocument.Parse(requestBytes, new JsonDocumentOptions { MaxDepth = 64, CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false });");
                 _source.Append("            var requestValue = DecodeJsonStruct_").Append(bodyType.StructId.ToString(CultureInfo.InvariantCulture))
                     .AppendLine("(requestJson.RootElement);");
-                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(requestValue);");
+                var arguments = new List<string> { "requestValue" };
+                arguments.AddRange(EmitRouteDatabaseCapabilities(route));
+                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
             else
             {
-                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("();");
+                var arguments = EmitRouteDatabaseCapabilities(route);
+                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
 
             _source.AppendLine("            switch (reply)");
@@ -1158,6 +1459,22 @@ internal static class Emitter
             _source.AppendLine("        }");
             _source.AppendLine("    }");
             _source.AppendLine();
+        }
+
+        private IEnumerable<string> EmitRouteDatabaseCapabilities(CheckedRoute route)
+        {
+            foreach (var capability in route.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
+            {
+                if (_webDatabaseOptions is null)
+                    throw new InvalidOperationException("Checked route database capability reached emission without web database options");
+
+                yield return capability.Kind switch
+                {
+                    CheckedRouteCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
+                    CheckedRouteCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
+                    _ => throw new InvalidOperationException("Unknown checked route database capability")
+                };
+            }
         }
 
         private void EmitJsonResponseRuntime()
@@ -1671,6 +1988,9 @@ internal static class Emitter
             LangTypeKind.TypeParameter => EmitTypeParameter(type),
             LangTypeKind.FsRead => "FsRead",
             LangTypeKind.FsError => "FsError",
+            LangTypeKind.DbRead => "DbRead",
+            LangTypeKind.DbWrite => "DbWrite",
+            LangTypeKind.DbError => "DbError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
 
@@ -1695,6 +2015,21 @@ internal static class Emitter
             program.Commands.Any(command => command.RequiresFsRead);
 
         private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText;
+
+        private bool NeedsDbReadType => UsesTypeKind(LangTypeKind.DbRead) || UsesDatabase;
+
+        private bool NeedsDbWriteType => UsesTypeKind(LangTypeKind.DbWrite) || UsesDatabase;
+
+        private bool NeedsDbErrorType => UsesTypeKind(LangTypeKind.DbError) || UsesDatabase;
+
+        private bool UsesDatabase => _webDatabaseOptions is not null || DatabaseCalls.Count != 0;
+
+        private IReadOnlyList<TypedDatabaseCallExpr> DatabaseCalls => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedDatabaseCallExpr>()
+            .ToArray();
 
         private bool UsesFsReadText => EmittedFunctions.Any(function =>
             function.InferredEffects.Contains("fs.read", StringComparer.Ordinal) ||
@@ -1797,6 +2132,10 @@ internal static class Emitter
                 case TypedCallExpr call:
                     foreach (var argument in call.Arguments)
                     foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedDatabaseCallExpr databaseCall:
+                    foreach (var nested in EnumerateExpressions(databaseCall.Receiver)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(databaseCall.Parameters)) yield return nested;
                     break;
                 case TypedTextLengthExpr length:
                     foreach (var nested in EnumerateExpressions(length.Target)) yield return nested;

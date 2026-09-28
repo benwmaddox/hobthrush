@@ -7,6 +7,8 @@ internal sealed record PackageManifest(
     string Kind,
     string SourceRoot,
     string? EntryModule,
+    string? SqlitePath,
+    string? SqliteSchema,
     IReadOnlySet<string> Capabilities,
     IReadOnlyList<PackageDependency> Dependencies)
 {
@@ -23,7 +25,13 @@ internal sealed record LoadedPackage(
     string SourceDirectory,
     PackageManifest Manifest,
     string ManifestText,
-    IReadOnlyList<PackageSource> Sources);
+    IReadOnlyList<PackageSource> Sources,
+    WebDatabaseOptions? WebDatabaseOptions);
+
+internal sealed record WebDatabaseOptions(
+    string RelativePath,
+    string SchemaPath,
+    string SchemaText);
 
 internal sealed record PackageLoadResult(LoadedPackage? Package, List<Diagnostic> Diagnostics);
 
@@ -82,7 +90,9 @@ internal static class PackageLoader
         "version",
         "kind",
         "source_root",
-        "entry_module"
+        "entry_module",
+        "sqlite_path",
+        "sqlite_schema"
     };
 
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
@@ -148,6 +158,8 @@ internal static class PackageLoader
             parsedManifest.Values["kind"],
             parsedManifest.Values["source_root"],
             parsedManifest.Values.GetValueOrDefault("entry_module"),
+            parsedManifest.Values.GetValueOrDefault("sqlite_path"),
+            parsedManifest.Values.GetValueOrDefault("sqlite_schema"),
             parsedManifest.Capabilities,
             parsedManifest.Dependencies);
 
@@ -191,12 +203,43 @@ internal static class PackageLoader
             return new PackageLoadResult(null, diagnostics);
         }
 
+        var webDatabaseOptions = LoadWebDatabaseOptions(root, manifest, manifestFile, diagnostics);
+        if (diagnostics.Count != 0)
+            return new PackageLoadResult(null, diagnostics);
+
         var sources = DiscoverSources(root, sourceDirectory, manifestFile, diagnostics);
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
+        if (webDatabaseOptions is not null)
+        {
+            var databaseFile = ResolvePackageFilePath(root, webDatabaseOptions.RelativePath);
+            var schemaFile = ResolvePackageFilePath(root, webDatabaseOptions.SchemaPath);
+            var packageInputs = sources.Select(source => source.File)
+                .Append(manifestFile)
+                .Append(Path.Combine(root, "lang.lock"));
+            if (string.Equals(databaseFile, schemaFile, PathComparison) ||
+                packageInputs.Any(path => string.Equals(databaseFile, path, PathComparison)))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "sqlite_path cannot overwrite the manifest, lock, schema, or a language source file",
+                    manifestFile));
+                return new PackageLoadResult(null, diagnostics);
+            }
+
+            if (packageInputs.Any(path => string.Equals(schemaFile, path, PathComparison)))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "sqlite_schema must be separate from the manifest, lock, and language source files",
+                    manifestFile));
+                return new PackageLoadResult(null, diagnostics);
+            }
+        }
+
         return new PackageLoadResult(
-            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, manifestText, sources),
+            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, manifestText, sources, webDatabaseOptions),
             diagnostics);
     }
 
@@ -458,7 +501,7 @@ internal static class PackageLoader
             var rawValue = trimmed[(equals + 1)..].Trim();
             if (inCapabilities)
             {
-                if (key is not ("fs.read" or "net.listen"))
+                if (key is not ("fs.read" or "net.listen" or "db.read" or "db.write"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
@@ -584,6 +627,42 @@ internal static class PackageLoader
                 file));
         }
 
+        var hasSqlitePath = values.TryGetValue("sqlite_path", out var sqlitePath);
+        var hasSqliteSchema = values.TryGetValue("sqlite_schema", out var sqliteSchema);
+        if (hasSqlitePath != hasSqliteSchema)
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "sqlite_path and sqlite_schema must be declared together",
+                file));
+        }
+
+        if (hasSqlitePath && !IsNormalizedPackageRelativeFilePath(sqlitePath!))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "sqlite_path must be a normalized package-relative file path using forward slashes and cannot escape the package root",
+                file));
+        }
+
+        if (hasSqliteSchema && !IsNormalizedPackageRelativeFilePath(sqliteSchema!))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "sqlite_schema must be a normalized package-relative file path using forward slashes and cannot escape the package root",
+                file));
+        }
+
+        var hasDatabaseConfig = hasSqlitePath && hasSqliteSchema;
+        var hasDatabaseGrant = capabilities.Contains("db.read") || capabilities.Contains("db.write");
+        if (hasDatabaseGrant && !hasDatabaseConfig)
+        {
+            diagnostics.Add(AtStart(
+                "E_CAPABILITY_MISSING",
+                "The db.read and db.write capabilities require sqlite_path and sqlite_schema configuration",
+                file));
+        }
+
         var hasEntryModule = values.TryGetValue("entry_module", out var entryModule);
         if (values.TryGetValue("kind", out kind))
         {
@@ -598,16 +677,124 @@ internal static class PackageLoader
             if (kind == "cli" && capabilities.Contains("net.listen"))
                 diagnostics.Add(AtStart("E_MANIFEST", "The net.listen capability is only valid for web packages", file));
 
+            if (kind != "web" && (hasDatabaseConfig || hasDatabaseGrant))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "SQLite configuration and db.read/db.write capabilities are only valid for web packages",
+                    file));
+            }
+
             if (kind == "web" && !capabilities.Contains("net.listen"))
                 diagnostics.Add(AtStart(
                     "E_CAPABILITY_MISSING",
                     "Web packages require the root package's net.listen capability grant",
                     file));
+
+            if (kind == "web" && hasSqliteSchema && !capabilities.Contains("db.write"))
+            {
+                diagnostics.Add(AtStart(
+                    "E_CAPABILITY_MISSING",
+                    "Web packages that declare sqlite_schema require the root package's db.write capability grant",
+                    file));
+            }
         }
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))
             diagnostics.Add(AtStart("E_MANIFEST", "entry_module must be a valid module path using '::' separators", file));
     }
+
+    private static WebDatabaseOptions? LoadWebDatabaseOptions(
+        string root,
+        PackageManifest manifest,
+        string manifestFile,
+        List<Diagnostic> diagnostics)
+    {
+        if (manifest.SqlitePath is null || manifest.SqliteSchema is null)
+            return null;
+
+        string databaseFile;
+        string schemaFile;
+        try
+        {
+            databaseFile = ResolvePackageFilePath(root, manifest.SqlitePath);
+            schemaFile = ResolvePackageFilePath(root, manifest.SqliteSchema);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", $"Could not resolve SQLite package paths: {error.Message}", manifestFile));
+            return null;
+        }
+
+        if (!IsWithin(root, databaseFile) || string.Equals(root, databaseFile, PathComparison))
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", "sqlite_path must resolve to a file inside the package root", manifestFile));
+            return null;
+        }
+
+        if (!IsWithin(root, schemaFile) || string.Equals(root, schemaFile, PathComparison))
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", "sqlite_schema must resolve to a file inside the package root", manifestFile));
+            return null;
+        }
+
+        try
+        {
+            if (HasReparsePointOnPath(databaseFile))
+            {
+                diagnostics.Add(AtStart("E_MANIFEST", "sqlite_path cannot resolve through a symbolic link or reparse point", manifestFile));
+                return null;
+            }
+
+            if (Directory.Exists(databaseFile))
+            {
+                diagnostics.Add(AtStart("E_MANIFEST", "sqlite_path must name a file, not a directory", manifestFile));
+                return null;
+            }
+
+            if (HasReparsePointOnPath(schemaFile))
+            {
+                diagnostics.Add(AtStart("E_MANIFEST", "sqlite_schema cannot resolve through a symbolic link or reparse point", manifestFile));
+                return null;
+            }
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_IO", $"Could not inspect SQLite package paths: {error.Message}", manifestFile));
+            return null;
+        }
+
+        if (!File.Exists(schemaFile) || Directory.Exists(schemaFile))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                $"sqlite_schema file '{manifest.SqliteSchema}' does not exist",
+                manifestFile));
+            return null;
+        }
+
+        string schemaText;
+        try
+        {
+            schemaText = File.ReadAllText(schemaFile, StrictUtf8);
+        }
+        catch (DecoderFallbackException error)
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", $"SQLite schema is not valid UTF-8: {error.Message}", schemaFile));
+            return null;
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_IO", $"Could not read SQLite schema: {error.Message}", schemaFile));
+            return null;
+        }
+
+        schemaText = schemaText.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        return new WebDatabaseOptions(manifest.SqlitePath, manifest.SqliteSchema, schemaText);
+    }
+
+    private static string ResolvePackageFilePath(string root, string relativePath) =>
+        Path.GetFullPath(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
 
     private static IReadOnlyList<PackageSource> DiscoverSources(
         string root,
@@ -741,6 +928,15 @@ internal static class PackageLoader
             segment.Length != 0 && segment is not ("." or "..") &&
             !segment.EndsWith('.') && !segment.EndsWith(' ') &&
             !segment.Any(char.IsControl) && !segment.Contains(':'));
+    }
+
+    private static bool IsNormalizedPackageRelativeFilePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Contains('\\') || Path.IsPathRooted(path))
+            return false;
+
+        return path.Split('/').All(segment =>
+            segment != ".." && PortablePackagePath.IsValidRelativeSegment(segment));
     }
 
     private static bool IsDependencyRelativePath(string path)

@@ -72,6 +72,7 @@ internal static class IntegrationTests
             ("effect annotations are closed upper bounds and enforce FsRead capabilities", TestEffectAnnotationsAndCapabilities),
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
             ("inspect effects reports deterministic compiler-derived paths and trusted boundaries", TestInspectEffects),
+            ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
@@ -98,6 +99,9 @@ internal static class IntegrationTests
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("maintained web package serves typed routes with bounded request handling", TestMaintainedWebExample),
+            ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
+            ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
+            ("SQLite library operations build without web database configuration", TestSqliteLibraryBuild),
             ("maintained scan CLI receives FsRead and handles typed file and normalization results", TestScanCliExample),
             ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
@@ -1202,6 +1206,74 @@ internal static class IntegrationTests
             "Effect 'fs.read' is not declared by function 'harness::effect_recursive::bad'; shortest call path: harness::effect_recursive::bad -> harness::effect_recursive::second -> harness::effect_recursive::first -> fs.read_text",
             recursiveDiagnostics.Single().Message,
             "Effect inference should converge through recursive call cycles and retain the shortest path.");
+    }
+
+    private static async Task TestSqliteInspectEffects(Harness harness)
+    {
+        const string source = "module app::main;\n"
+            + "struct Parameters { id: i32 }\n"
+            + "struct Row { id: i32 }\n"
+            + "union Reply { Ready }\n"
+            + "fn load_record(db: DbRead) -> Result<Option<self::app::main::Row>, DbError> effects { db.read } {\n"
+            + "    let loaded: Result<Option<self::app::main::Row>, DbError> = db.query_one(\"SELECT id FROM sample WHERE id = $id\", self::app::main::Parameters { id: 1 });\n"
+            + "    return loaded;\n"
+            + "}\n"
+            + "struct WriteParameters { id: i32 }\n"
+            + "fn write_record(db: DbWrite) -> Result<i32, DbError> effects { db.write } {\n"
+            + "    let written: Result<i32, DbError> = db.execute(\"INSERT INTO sample (id) VALUES ($id)\", self::app::main::WriteParameters { id: 2 });\n"
+            + "    return written;\n"
+            + "}\n"
+            + "fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {\n"
+            + "    let loaded: Result<Option<self::app::main::Row>, DbError> = self::app::main::load_record(db);\n"
+            + "    return self::app::main::Reply.Ready;\n"
+            + "}\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "sqlite-inspect-effects",
+            "name = \"sqlite-inspect-effects\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/inspect.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source,
+                ["db/schema.sql"] = "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY);\n"
+            });
+
+        var read = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::app::main::load_record", "--json");
+        AssertEqual(0, read.ExitCode, Describe(read));
+        using (var readJson = JsonDocument.Parse(read.StandardOutput))
+        {
+            var report = readJson.RootElement;
+            AssertEqual("db.read", JsonStringArrayText(report.GetProperty("declared_effects")), "Declared DB read effects should be visible.");
+            AssertEqual("db.read", JsonStringArrayText(report.GetProperty("inferred_effects")), "Inferred DB read effects should be visible.");
+            AssertEqual("db.read", JsonStringArrayText(report.GetProperty("required_capabilities")), "DbRead should require the db.read grant.");
+            AssertEqual("db.read,db.write,net.listen", JsonStringArrayText(report.GetProperty("manifest_grants")), "Manifest grants should remain visible in sorted order.");
+            var operations = report.GetProperty("trusted_operations").EnumerateArray().ToArray();
+            AssertEqual(1, operations.Length, "A read-only SQLite function should report only the DbRead adapter.");
+            AssertEqual("DbRead.query_one", operations[0].GetProperty("operation").GetString(), "The read adapter operation should be named.");
+            AssertEqual("trusted_adapter", operations[0].GetProperty("trust").GetString(), "The read adapter should be identified as trusted runtime code.");
+            AssertEqual("db.read", JsonStringArrayText(operations[0].GetProperty("effects")), "The read adapter should carry db.read.");
+        }
+
+        var write = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::app::main::write_record", "--json");
+        AssertEqual(0, write.ExitCode, Describe(write));
+        using (var writeJson = JsonDocument.Parse(write.StandardOutput))
+        {
+            var report = writeJson.RootElement;
+            AssertEqual("db.write", JsonStringArrayText(report.GetProperty("declared_effects")), "Declared DB write effects should be visible.");
+            AssertEqual("db.write", JsonStringArrayText(report.GetProperty("inferred_effects")), "Inferred DB write effects should be visible.");
+            AssertEqual("db.write", JsonStringArrayText(report.GetProperty("required_capabilities")), "DbWrite should require the db.write grant.");
+            var operations = report.GetProperty("trusted_operations").EnumerateArray().ToArray();
+            AssertEqual(1, operations.Length, "A write-only SQLite function should report only the DbWrite adapter.");
+            AssertEqual("DbWrite.execute", operations[0].GetProperty("operation").GetString(), "The write adapter operation should be named.");
+            AssertEqual("trusted_adapter", operations[0].GetProperty("trust").GetString(), "The write adapter should be identified as trusted runtime code.");
+            AssertEqual("db.write", JsonStringArrayText(operations[0].GetProperty("effects")), "The write adapter should carry db.write.");
+        }
+
+        static string JsonStringArrayText(JsonElement element) =>
+            string.Join(",", element.EnumerateArray().Select(value => value.GetString()));
     }
 
     private static async Task TestInspectEffects(Harness harness)
@@ -3230,12 +3302,23 @@ internal static class IntegrationTests
             "The maintained web sample must declare kind=web.");
         AssertTrue(normalizedManifest.Contains("entry_module = \"app::main\"", StringComparison.Ordinal),
             "The maintained web sample must declare its route entry module.");
-        AssertTrue(normalizedManifest.Contains("[capabilities]\nnet.listen = \"allow\"", StringComparison.Ordinal),
-            "The maintained web sample must explicitly grant net.listen.");
+        AssertTrue(normalizedManifest.Contains("sqlite_path = \"data/greeting.sqlite3\"", StringComparison.Ordinal)
+            && normalizedManifest.Contains("sqlite_schema = \"db/schema.sql\"", StringComparison.Ordinal),
+            "The maintained web sample must declare package-relative SQLite paths.");
+        AssertTrue(normalizedManifest.Contains(
+                "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"",
+                StringComparison.Ordinal),
+            "The maintained web sample must explicitly grant listening and both database capabilities.");
         AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
             "The maintained web sample must consume the shared validation package.");
         AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
             "The maintained web sample must include its path dependency lockfile.");
+        var schemaPath = Path.Combine(packageRoot, "db", "schema.sql");
+        AssertTrue(File.Exists(schemaPath), "The maintained web sample must include its SQLite schema file.");
+        var schema = await File.ReadAllTextAsync(schemaPath);
+        AssertTrue(schema.Contains("CREATE TABLE IF NOT EXISTS greeting", StringComparison.Ordinal)
+            && schema.Contains("ON CONFLICT(id) DO NOTHING", StringComparison.Ordinal),
+            "The maintained SQLite schema and seed data must be safe to apply on every startup.");
 
         var sourcePath = Path.Combine(packageRoot, "src", "app", "main.lang");
         var source = await File.ReadAllTextAsync(sourcePath);
@@ -3246,6 +3329,12 @@ internal static class IntegrationTests
             "The maintained web page must use the safe Html builder API.");
         AssertTrue(source.Contains("validation::text::validation::normalize", StringComparison.Ordinal),
             "The POST handler must normalize its request through the shared validation library.");
+        AssertTrue(source.Contains("db.query_one", StringComparison.Ordinal)
+            && source.Contains("db.execute", StringComparison.Ordinal)
+            && source.Contains("DbError.Statement", StringComparison.Ordinal)
+            && source.Contains("DbError.RowShape", StringComparison.Ordinal)
+            && source.Contains("route GET \"/health\"", StringComparison.Ordinal),
+            "The maintained web sample must read/write SQLite, match typed database errors, and declare /health.");
 
         var check = await harness.InvokePackageDirectoryAsync("maintained-web-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -3253,6 +3342,8 @@ internal static class IntegrationTests
 
         var firstBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-first", packageRoot, "build");
         var firstArtifact = AssertBuiltWebApplication(firstBuild, packageRoot);
+        var firstDependencyManifest = await File.ReadAllTextAsync(Path.ChangeExtension(firstArtifact, ".deps.json"));
+        AssertBuiltSqliteRuntimeAssets(firstArtifact, firstDependencyManifest);
         var firstOpenApiPath = Path.Combine(Path.GetDirectoryName(firstArtifact)!, "openapi.json");
         AssertTrue(File.Exists(firstOpenApiPath), $"Expected the generated OpenAPI artifact at {firstOpenApiPath}.");
         var firstOpenApiBytes = await File.ReadAllBytesAsync(firstOpenApiPath);
@@ -3260,7 +3351,7 @@ internal static class IntegrationTests
         {
             var paths = document.RootElement.GetProperty("paths");
             AssertTrue(paths.TryGetProperty("/api/greeting", out var greetingPath),
-                "OpenAPI should describe the static greeting route.");
+                "OpenAPI should describe the SQLite-backed greeting route.");
             AssertTrue(greetingPath.TryGetProperty("get", out _) && greetingPath.TryGetProperty("post", out _),
                 "OpenAPI should describe both GET and POST mappings at the shared static path.");
             AssertTrue(paths.TryGetProperty("/reset", out var resetPath)
@@ -3268,10 +3359,14 @@ internal static class IntegrationTests
                 && resetOperation.GetProperty("responses").TryGetProperty("205", out var resetResponse)
                 && !resetResponse.TryGetProperty("content", out _),
                 "OpenAPI 205 responses should not advertise a response body.");
+            AssertTrue(paths.TryGetProperty("/health", out _),
+                "OpenAPI should include the ordinary declared health route.");
         }
 
         var secondBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-second", packageRoot, "build");
         var secondArtifact = AssertBuiltWebApplication(secondBuild, packageRoot);
+        var secondDependencyManifest = await File.ReadAllTextAsync(Path.ChangeExtension(secondArtifact, ".deps.json"));
+        AssertBuiltSqliteRuntimeAssets(secondArtifact, secondDependencyManifest);
         var secondOpenApiPath = Path.Combine(Path.GetDirectoryName(secondArtifact)!, "openapi.json");
         AssertTrue(File.Exists(secondOpenApiPath), $"Expected the generated OpenAPI artifact at {secondOpenApiPath}.");
         var secondOpenApiBytes = await File.ReadAllBytesAsync(secondOpenApiPath);
@@ -3328,11 +3423,16 @@ internal static class IntegrationTests
         AssertTrue(aot.StandardError.Contains("E_BUILD_TARGET", StringComparison.Ordinal),
             $"Web packages must be rejected before Native AOT publishing. {Describe(aot)}");
 
+        var databasePath = Path.Combine(harness.TemporaryRoot, "maintained-web.sqlite3");
+        var databaseEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_SQLITE_PATH"] = databasePath
+        };
         var port = GetUnusedLoopbackPort();
         var baseAddress = new Uri($"http://127.0.0.1:{port}");
         var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(4) };
-        using var process = harness.StartWebPackageProcess(
-            "maintained-web-run", packageRoot, "--urls", baseAddress.ToString().TrimEnd('/'));
+        using var process = harness.StartWebPackageProcessWithEnvironment(
+            "maintained-web-run", packageRoot, databaseEnvironment, "--urls", baseAddress.ToString().TrimEnd('/'));
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         var assertionsCompleted = false;
@@ -3346,10 +3446,17 @@ internal static class IntegrationTests
                 AssertEqual("text/html", page.Content.Headers.ContentType?.MediaType,
                     "The HTML route should set a text/html content type.");
                 var html = await page.Content.ReadAsStringAsync();
-                AssertTrue(html.Contains("&lt;script&gt;bad()&lt;/script&gt; &amp; escaped text", StringComparison.Ordinal),
-                    $"Html paragraph text should be escaped. Received: {html}");
+                AssertTrue(html.Contains("Hello from lang", StringComparison.Ordinal),
+                    $"The server-rendered page should read its initial greeting from SQLite. Received: {html}");
                 AssertTrue(!html.Contains("<script>", StringComparison.Ordinal),
                     "The HTML response must not render user text as markup.");
+            }
+
+            using (var health = await client.GetAsync("/health"))
+            {
+                AssertEqual(HttpStatusCode.OK, health.StatusCode, "The ordinary health route should return 200.");
+                AssertEqual(0, (await health.Content.ReadAsByteArrayAsync()).Length,
+                    "The health route should not return an undeclared body.");
             }
 
             using (var get = await client.GetAsync("/api/greeting"))
@@ -3383,6 +3490,39 @@ internal static class IntegrationTests
                     "The POST handler should normalize input through the validation library.");
                 AssertEqual("Paris", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
                     "The POST route should preserve its nested JSON request and response values.");
+            }
+
+            const string maliciousName = "' OR 1=1; DROP TABLE greeting; -- <script>alert('x')</script>";
+            var maliciousBody = JsonSerializer.Serialize(new
+            {
+                name = maliciousName,
+                profile = new { city = "Paris" }
+            });
+            using (var maliciousPost = await client.PostAsync("/api/greeting", JsonBody(maliciousBody)))
+            {
+                AssertEqual(HttpStatusCode.Created, maliciousPost.StatusCode,
+                    "A malicious-looking string should be accepted as a parameter value.");
+                using var response = JsonDocument.Parse(await maliciousPost.Content.ReadAsStringAsync());
+                AssertEqual(maliciousName, response.RootElement.GetProperty("message").GetString(),
+                    "The malicious-looking string should round-trip unchanged through a parameterized write.");
+            }
+
+            using (var maliciousGet = await client.GetAsync("/api/greeting"))
+            {
+                AssertEqual(HttpStatusCode.OK, maliciousGet.StatusCode,
+                    "A parameterized write must leave the SQLite table structure intact.");
+                using var response = JsonDocument.Parse(await maliciousGet.Content.ReadAsStringAsync());
+                AssertEqual(maliciousName, response.RootElement.GetProperty("message").GetString(),
+                    "A malicious-looking value should read back as data.");
+            }
+
+            using (var page = await client.GetAsync("/"))
+            {
+                var html = await page.Content.ReadAsStringAsync();
+                AssertTrue(html.Contains("&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;", StringComparison.Ordinal),
+                    $"Persisted untrusted text should render escaped in HTML. Received: {html}");
+                AssertTrue(!html.Contains("<script>", StringComparison.Ordinal),
+                    "Persisted user text must not render an executable script element.");
             }
 
             using (var invalid = await client.PostAsync("/api/greeting", JsonBody(
@@ -3476,6 +3616,11 @@ internal static class IntegrationTests
                     "The generic fault response must not leak exception details, stack traces, source paths, or values.");
             }
 
+            using (var persist = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"Persisted after restart\",\"profile\":{\"city\":\"Copenhagen\"}}")))
+                AssertEqual(HttpStatusCode.Created, persist.StatusCode,
+                    "A valid greeting should be written before the host restarts.");
+
             assertionsCompleted = true;
         }
         finally
@@ -3502,7 +3647,455 @@ internal static class IntegrationTests
             await AssertLoopbackPortReleasedAsync(port);
         }
 
+        var restartedPort = GetUnusedLoopbackPort();
+        var restartedAddress = new Uri($"http://127.0.0.1:{restartedPort}");
+        using var restartedClient = new HttpClient { BaseAddress = restartedAddress, Timeout = TimeSpan.FromSeconds(4) };
+        using var restartedProcess = harness.StartWebPackageProcessWithEnvironment(
+            "maintained-web-restart", packageRoot, databaseEnvironment, "--urls", restartedAddress.ToString().TrimEnd('/'));
+        var restartedStdoutTask = restartedProcess.StandardOutput.ReadToEndAsync();
+        var restartedStderrTask = restartedProcess.StandardError.ReadToEndAsync();
+        var restartAssertionsCompleted = false;
+        try
+        {
+            await WaitForWebServerAsync(restartedProcess, restartedClient, restartedStdoutTask, restartedStderrTask);
+            using (var persisted = await restartedClient.GetAsync("/api/greeting"))
+            {
+                AssertEqual(HttpStatusCode.OK, persisted.StatusCode,
+                    "A greeting must remain available after the web host restarts.");
+                using var response = JsonDocument.Parse(await persisted.Content.ReadAsStringAsync());
+                AssertEqual("Persisted after restart", response.RootElement.GetProperty("message").GetString(),
+                    "SQLite changes should persist across server restarts.");
+                AssertEqual("Copenhagen", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
+                    "The persisted nested value should survive a server restart.");
+            }
+
+            restartAssertionsCompleted = true;
+        }
+        finally
+        {
+            restartedClient.Dispose();
+            if (!restartedProcess.HasExited)
+            {
+                restartedProcess.Kill(entireProcessTree: !restartAssertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await restartedProcess.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The maintained web host did not terminate within 10 seconds after restart.");
+                }
+            }
+
+            await Task.WhenAll(restartedStdoutTask, restartedStderrTask);
+            await AssertLoopbackPortReleasedAsync(restartedPort);
+        }
+
+        var unrelatedWorkingDirectory = Path.Combine(harness.TemporaryRoot, "different-current-directory");
+        Directory.CreateDirectory(unrelatedWorkingDirectory);
+        var directPort = GetUnusedLoopbackPort();
+        var directAddress = new Uri($"http://127.0.0.1:{directPort}");
+        using var directClient = new HttpClient { BaseAddress = directAddress, Timeout = TimeSpan.FromSeconds(4) };
+        using var directProcess = harness.StartBuiltWebArtifactProcess(
+            "maintained-web-direct-artifact", secondArtifact, unrelatedWorkingDirectory,
+            "--urls", directAddress.ToString().TrimEnd('/'));
+        var directStdoutTask = directProcess.StandardOutput.ReadToEndAsync();
+        var directStderrTask = directProcess.StandardError.ReadToEndAsync();
+        var directAssertionsCompleted = false;
+        try
+        {
+            await WaitForWebServerAsync(directProcess, directClient, directStdoutTask, directStderrTask);
+            using var directRead = await directClient.GetAsync("/api/greeting");
+            AssertEqual(HttpStatusCode.OK, directRead.StatusCode,
+                "A directly launched artifact should initialize and read SQLite from its AppContext base directory.");
+            using var directResponse = JsonDocument.Parse(await directRead.Content.ReadAsStringAsync());
+            AssertEqual("Hello from lang", directResponse.RootElement.GetProperty("message").GetString(),
+                "The directly launched artifact should apply its embedded schema and seed data.");
+            var appBaseDatabase = Path.Combine(Path.GetDirectoryName(secondArtifact)!, "data", "greeting.sqlite3");
+            AssertTrue(File.Exists(appBaseDatabase),
+                $"The default database should be based at the built artifact's AppContext directory: {appBaseDatabase}");
+            AssertTrue(!File.Exists(Path.Combine(unrelatedWorkingDirectory, "data", "greeting.sqlite3")),
+                "The default database path must not follow an unrelated process working directory.");
+            directAssertionsCompleted = true;
+        }
+        finally
+        {
+            directClient.Dispose();
+            if (!directProcess.HasExited)
+            {
+                directProcess.Kill(entireProcessTree: !directAssertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await directProcess.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The directly launched web artifact did not terminate within 10 seconds.");
+                }
+            }
+
+            await Task.WhenAll(directStdoutTask, directStderrTask);
+            await AssertLoopbackPortReleasedAsync(directPort);
+        }
+
     }
+
+    private static async Task TestSqliteRowDecoding(Harness harness)
+    {
+        var queryCases = new[]
+        {
+            new SqliteRowCase("missing-column", "IdNameRow", "SELECT id FROM records WHERE id = 1", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("extra-column", "IdRow", "SELECT id, name FROM records WHERE id = 1", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("duplicate-column", "IdNameRow", "SELECT id AS id, id AS id FROM records WHERE id = 1", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("wrong-type", "IdRow", "SELECT 'not-an-integer' AS id FROM records WHERE id = 1", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("required-null", "IdNameRow", "SELECT id, NULL AS name FROM records WHERE id = 1", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("optional-null", "OptionalRow", "SELECT id, note FROM records WHERE id = 1", "self::app::main::display_optional(row.note)", HttpStatusCode.OK, "NULL"),
+            new SqliteRowCase("multiple-rows", "IdNameRow", "SELECT id, name FROM records", "\"unexpected row\"", HttpStatusCode.UnprocessableEntity),
+            new SqliteRowCase("statement-failure", "IdNameRow", "SELECT id, name FROM absent_records", "\"unexpected row\"", HttpStatusCode.ServiceUnavailable),
+            new SqliteRowCase("verify-read-unchanged", "IdNameRow", "SELECT id, name FROM records WHERE id = 3", "\"unexpected row\"", HttpStatusCode.NotFound),
+            new SqliteRowCase("no-row", "IdNameRow", "SELECT id, name FROM records WHERE id = 999", "\"unexpected row\"", HttpStatusCode.NotFound)
+        };
+
+        var handlers = string.Join("\n", queryCases.Select(SqliteQueryHandler));
+        var routes = string.Join("\n", queryCases.Select(SqliteQueryRoute));
+        var source = $$"""
+            module app::main;
+            struct NoParameters {}
+            struct IdRow { id: i32 }
+            struct IdNameRow { id: i32, name: Text }
+            struct OptionalRow { id: i32, note: Option<Text> }
+            union DbCheckReply { Found(Text), Missing, StatementFailure, RowShapeFailure }
+            union ReadyReply { Ready }
+
+            fn display_optional(value: Option<Text>) -> Text effects {} {
+                return match value { Some(text) => text, None => "NULL" };
+            }
+
+            fn ready() -> self::app::main::ReadyReply effects {} {
+                return self::app::main::ReadyReply.Ready;
+            }
+
+            {{handlers}}
+
+            route GET "/" {
+                handler: self::app::main::ready;
+                response Ready: 200;
+            }
+
+            {{routes}}
+            """;
+        var schema = "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT NULL);\n"
+            + "INSERT INTO records (id, name, note) VALUES (1, 'Ada', NULL) ON CONFLICT(id) DO NOTHING;\n"
+            + "INSERT INTO records (id, name, note) VALUES (2, 'Grace', 'memo') ON CONFLICT(id) DO NOTHING;\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "sqlite-row-decoding",
+            "name = \"sqlite-row-decoding\"\n"
+                + "version = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/rows.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source,
+                ["db/schema.sql"] = schema
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("sqlite-row-decoding-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var databasePath = Path.Combine(harness.TemporaryRoot, "sqlite-row-decoding.sqlite3");
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal) { ["LANG_SQLITE_PATH"] = databasePath };
+        var port = GetUnusedLoopbackPort();
+        var address = new Uri($"http://127.0.0.1:{port}");
+        using var client = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(4) };
+        using var process = harness.StartWebPackageProcessWithEnvironment(
+            "sqlite-row-decoding-run", packageRoot, environment, "--urls", address.ToString().TrimEnd('/'));
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var assertionsCompleted = false;
+        try
+        {
+            await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                "sqlite-read-mutation-rejected",
+                "name = \"sqlite-read-mutation-rejected\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                    + "sqlite_path = \"data/rows.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                    + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = SqliteReadQuerySource("INSERT INTO records (id, name, note) VALUES (3, 'Injected', NULL) RETURNING id"),
+                    ["db/schema.sql"] = schema
+                },
+                "E_DB_READ_STATEMENT",
+                "src/app/main.lang");
+
+            foreach (var testCase in queryCases)
+            {
+                using var response = await client.GetAsync("/" + testCase.Name);
+                AssertEqual(testCase.ExpectedStatus, response.StatusCode,
+                    $"SQLite row case '{testCase.Name}' returned an unexpected status.");
+                if (testCase.ExpectedBody is not null)
+                {
+                    using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                    AssertEqual(testCase.ExpectedBody, body.RootElement.GetString(),
+                        $"SQLite row case '{testCase.Name}' returned an unexpected decoded value.");
+                }
+            }
+
+            assertionsCompleted = true;
+        }
+        finally
+        {
+            client.Dispose();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: !assertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await process.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The SQLite row fixture host did not stop within 10 seconds.");
+                }
+            }
+
+            await Task.WhenAll(stdoutTask, stderrTask);
+            await AssertLoopbackPortReleasedAsync(port);
+        }
+    }
+
+    private static string SqliteQueryHandler(SqliteRowCase testCase) => $$"""
+        fn check_{{testCase.Name.Replace("-", "_", StringComparison.Ordinal)}}(db: DbRead) -> self::app::main::DbCheckReply effects { db.read } {
+            let loaded: Result<Option<self::app::main::{{testCase.RowType}}>, DbError> = db.query_one(
+                "{{testCase.Sql}}",
+                self::app::main::NoParameters {}
+            );
+            return match loaded {
+                Ok(value) => match value {
+                    Some(row) => self::app::main::DbCheckReply.Found({{testCase.FoundExpression}}),
+                    None => self::app::main::DbCheckReply.Missing
+                },
+                Err(error) => match error {
+                    DbError.Statement => self::app::main::DbCheckReply.StatementFailure,
+                    DbError.RowShape => self::app::main::DbCheckReply.RowShapeFailure
+                }
+            };
+        }
+        """;
+
+    private static string SqliteQueryRoute(SqliteRowCase testCase) => $$"""
+        route GET "/{{testCase.Name}}" {
+            handler: self::app::main::check_{{testCase.Name.Replace("-", "_", StringComparison.Ordinal)}};
+            response Found: 200 json Text;
+            response Missing: 404;
+            response StatementFailure: 503;
+            response RowShapeFailure: 422;
+        }
+        """;
+
+    private static string SqliteReadQuerySource(string sql) => $$"""
+        module app::main;
+        struct Parameters {}
+        struct Row { id: i32 }
+        union Reply { Ready }
+
+        fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {
+            let loaded: Result<Option<self::app::main::Row>, DbError> = db.query_one(
+                "{{sql}}",
+                self::app::main::Parameters {}
+            );
+            return self::app::main::Reply.Ready;
+        }
+
+        route GET "/" {
+            handler: self::app::main::ready;
+            response Ready: 200;
+        }
+        """;
+
+    private static async Task TestSqlitePackageContract(Harness harness)
+    {
+        const string sqliteHandler = "module app::main;\n"
+            + "union Reply { Ready }\n"
+            + "fn ready(db: DbRead) -> self::app::main::Reply effects {} { return self::app::main::Reply.Ready; }\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        var sqliteSourceFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = sqliteHandler,
+            ["db/schema.sql"] = "CREATE TABLE IF NOT EXISTS sample (id INTEGER PRIMARY KEY);\n"
+        };
+        var sqliteManifest = "name = \"sqlite-contract\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+            + "sqlite_path = \"data/sample.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+            + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n";
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-capability-without-paths",
+            "name = \"sqlite-capability-without-paths\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\n",
+            sqliteSourceFiles,
+            "E_CAPABILITY_MISSING",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-path-escape",
+            "name = \"sqlite-path-escape\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"../outside.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+            sqliteSourceFiles,
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-schema-missing",
+            "name = \"sqlite-schema-missing\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/sample.sqlite3\"\nsqlite_schema = \"db/missing.sql\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = sqliteHandler },
+            "E_MANIFEST",
+            "lang.toml");
+
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-read-grant-missing",
+            "name = \"sqlite-read-grant-missing\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/sample.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\ndb.write = \"allow\"\n",
+            sqliteSourceFiles,
+            "E_CAPABILITY_MISSING",
+            "src/app/main.lang");
+
+        const string dynamicSqlSource = "module app::main;\n"
+            + "struct Parameters {}\nstruct Row { id: i32 }\nunion Reply { Ready }\n"
+            + "fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {\n"
+            + "    let sql: Text = \"SELECT id FROM sample\";\n"
+            + "    let loaded: Result<Option<self::app::main::Row>, DbError> = db.query_one(sql, self::app::main::Parameters {});\n"
+            + "    return self::app::main::Reply.Ready;\n}\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-dynamic-sql-rejected",
+            sqliteManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = dynamicSqlSource,
+                ["db/schema.sql"] = sqliteSourceFiles["db/schema.sql"]
+            },
+            "E_DB_SQL_LITERAL",
+            "src/app/main.lang");
+
+        foreach (var (caseName, sql) in new[]
+        {
+            ("sqlite-multi-statement-read-rejected", "SELECT id FROM sample; DROP TABLE sample"),
+            ("sqlite-attach-read-rejected", "ATTACH DATABASE 'outside.sqlite3' AS outside")
+        })
+        {
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                caseName,
+                sqliteManifest,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = SqliteReadQuerySource(sql),
+                    ["db/schema.sql"] = sqliteSourceFiles["db/schema.sql"]
+                },
+                "E_DB_READ_STATEMENT",
+                "src/app/main.lang");
+        }
+
+        const string unsupportedCodecSource = "module app::main;\n"
+            + "struct Parameters {}\nstruct Row { path: FilePath }\nunion Reply { Ready }\n"
+            + "fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {\n"
+            + "    let loaded: Result<Option<self::app::main::Row>, DbError> = db.query_one(\"SELECT 'x' AS path\", self::app::main::Parameters {});\n"
+            + "    return self::app::main::Reply.Ready;\n}\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-unsupported-codec-rejected",
+            sqliteManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = unsupportedCodecSource,
+                ["db/schema.sql"] = sqliteSourceFiles["db/schema.sql"]
+            },
+            "E_DB_CODEC_UNSUPPORTED",
+            "src/app/main.lang");
+
+        const string nonDatabaseWebSource = "module app::main;\n"
+            + "union Reply { Ready }\n"
+            + "fn ready() -> self::app::main::Reply effects {} { return self::app::main::Reply.Ready; }\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        var nonDatabaseRoot = await harness.WritePackageAsync(
+            "web-without-sqlite-dependency",
+            "name = \"web-without-sqlite-dependency\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "[capabilities]\nnet.listen = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = nonDatabaseWebSource });
+        var noDatabaseBuild = await harness.InvokePackageDirectoryAsync(
+            "web-without-sqlite-dependency-build", nonDatabaseRoot, "build");
+        var noDatabaseArtifact = AssertBuiltWebApplication(noDatabaseBuild, nonDatabaseRoot);
+        var noDatabaseDeps = await File.ReadAllTextAsync(Path.ChangeExtension(noDatabaseArtifact, ".deps.json"));
+        AssertTrue(!noDatabaseDeps.Contains("Microsoft.Data.Sqlite", StringComparison.Ordinal),
+            "Web packages without SQLite configuration must not reference Microsoft.Data.Sqlite.");
+    }
+
+    private static async Task TestSqliteLibraryBuild(Harness harness)
+    {
+        const string source = "module app::repository;\n"
+            + "pub struct LookupParameters { id: i32 }\n"
+            + "pub struct Row { id: i32 }\n"
+            + "pub struct InsertParameters { id: i32, name: Text }\n"
+            + "pub fn find(db: DbRead, id: i32) -> Result<Option<self::app::repository::Row>, DbError> effects { db.read } {\n"
+            + "    let loaded: Result<Option<self::app::repository::Row>, DbError> = db.query_one(\n"
+            + "        \"SELECT id FROM record WHERE id = $id\",\n"
+            + "        self::app::repository::LookupParameters { id: id }\n"
+            + "    );\n"
+            + "    return loaded;\n"
+            + "}\n"
+            + "pub fn insert(db: DbWrite, id: i32, name: Text) -> Result<i32, DbError> effects { db.write } {\n"
+            + "    let written: Result<i32, DbError> = db.execute(\n"
+            + "        \"INSERT INTO record (id, name) VALUES ($id, $name)\",\n"
+            + "        self::app::repository::InsertParameters { id: id, name: name }\n"
+            + "    );\n"
+            + "    return written;\n"
+            + "}\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "sqlite-library-adapter",
+            "name = \"sqlite-library-adapter\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/repository.lang"] = source });
+
+        var check = await harness.InvokePackageDirectoryAsync("sqlite-library-adapter-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("sqlite-library-adapter-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        const string prefix = "Built library: ";
+        AssertTrue(build.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(build));
+        var artifact = build.StandardOutput[prefix.Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact) && File.Exists(artifact),
+            $"Expected a managed database library at {artifact}. {Describe(build)}");
+        var dependencyManifestPath = Path.ChangeExtension(artifact, ".deps.json");
+        AssertTrue(File.Exists(dependencyManifestPath),
+            "A built SQLite library should include its generated dependency manifest.");
+        var dependencyManifest = await File.ReadAllTextAsync(dependencyManifestPath);
+        AssertTrue(dependencyManifest.Contains("Microsoft.Data.Sqlite/10.0.12", StringComparison.Ordinal),
+            "A library that uses database operations must emit the pinned SQLite provider reference without web manifest configuration.");
+    }
+
+    private sealed record SqliteRowCase(
+        string Name,
+        string RowType,
+        string Sql,
+        string FoundExpression,
+        HttpStatusCode ExpectedStatus,
+        string? ExpectedBody = null);
 
     private static StringContent JsonBody(string json) => new(json, Encoding.UTF8, "application/json");
 
@@ -3598,6 +4191,58 @@ internal static class IntegrationTests
             "A managed web app should include its dependency manifest.");
         AssertEqual(string.Empty, result.StandardError, Describe(result));
         return artifactPath;
+    }
+
+    private static void AssertBuiltSqliteRuntimeAssets(string artifactPath, string dependencyManifest)
+    {
+        foreach (var dependency in new[]
+        {
+            "Microsoft.Data.Sqlite/10.0.12",
+            "SQLitePCLRaw.bundle_e_sqlite3/",
+            "SQLitePCLRaw.core/",
+            "SQLitePCLRaw.provider.e_sqlite3/"
+        })
+        {
+            AssertTrue(dependencyManifest.Contains(dependency, StringComparison.Ordinal),
+                $"A SQLite-enabled web artifact must include managed runtime dependency {dependency}.");
+        }
+
+        var (runtimeIdentifier, assetFileName) = CurrentSqliteRuntimeAsset();
+        var outputDirectory = Path.GetDirectoryName(artifactPath)!;
+        var runtimeAssetPath = Path.Combine(outputDirectory, "runtimes", runtimeIdentifier, "native", assetFileName);
+        var rootAssetPath = Path.Combine(outputDirectory, assetFileName);
+        AssertTrue(File.Exists(runtimeAssetPath) || File.Exists(rootAssetPath),
+            $"A SQLite-enabled web artifact must include the current platform native asset at either "
+                + $"{runtimeAssetPath} or {rootAssetPath}.");
+    }
+
+    private static (string RuntimeIdentifier, string AssetFileName) CurrentSqliteRuntimeAsset()
+    {
+        var runtimePrefix = OperatingSystem.IsWindows()
+            ? "win"
+            : OperatingSystem.IsLinux()
+                ? "linux"
+                : OperatingSystem.IsMacOS()
+                    ? "osx"
+                    : throw new InvalidOperationException("SQLite runtime asset assertions require Windows, Linux, or macOS.");
+        var architecture = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.X86 => "x86",
+            Architecture.Arm64 => "arm64",
+            Architecture.Arm => "arm",
+            _ => throw new InvalidOperationException(
+                $"SQLite runtime asset assertions do not support architecture {RuntimeInformation.ProcessArchitecture}.")
+        };
+        var assetFileName = runtimePrefix switch
+        {
+            "win" => "e_sqlite3.dll",
+            "linux" => "libe_sqlite3.so",
+            "osx" => "libe_sqlite3.dylib",
+            _ => throw new InvalidOperationException($"Unsupported SQLite runtime platform {runtimePrefix}.")
+        };
+
+        return ($"{runtimePrefix}-{architecture}", assetFileName);
     }
 
     private static async Task TestScanCliExample(Harness harness)
@@ -5335,6 +5980,15 @@ internal static class IntegrationTests
 
         public Process StartWebPackageProcess(string caseName, string packageRoot, params string[] applicationArguments)
         {
+            return StartWebPackageProcessWithEnvironment(caseName, packageRoot, null, applicationArguments);
+        }
+
+        public Process StartWebPackageProcessWithEnvironment(
+            string caseName,
+            string packageRoot,
+            IReadOnlyDictionary<string, string>? environment,
+            params string[] applicationArguments)
+        {
             var startInfo = new ProcessStartInfo
             {
                 FileName = dotnet,
@@ -5353,6 +6007,11 @@ internal static class IntegrationTests
             foreach (var argument in applicationArguments)
                 startInfo.ArgumentList.Add(argument);
             startInfo.Environment["LANG_DOTNET"] = dotnet;
+            if (environment is not null)
+            {
+                foreach (var (name, value) in environment)
+                    startInfo.Environment[name] = value;
+            }
 
             var process = new Process { StartInfo = startInfo };
             if (!process.Start())
@@ -5360,6 +6019,41 @@ internal static class IntegrationTests
                 process.Dispose();
                 throw new InvalidOperationException($"Could not start the managed web process for {caseName}.");
             }
+
+            return process;
+        }
+
+        public Process StartBuiltWebArtifactProcess(
+            string caseName,
+            string artifactPath,
+            string workingDirectory,
+            params string[] applicationArguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add(artifactPath);
+            foreach (var argument in applicationArguments)
+                startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["LANG_DOTNET"] = dotnet;
+            startInfo.Environment.Remove("LANG_SQLITE_PATH");
+
+            var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                process.Dispose();
+                throw new InvalidOperationException($"Could not start the built web artifact for {caseName}.");
+            }
+            process.StandardInput.Close();
 
             return process;
         }
