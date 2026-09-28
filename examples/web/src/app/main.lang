@@ -3,42 +3,96 @@ module app::main;
 struct Profile { city: Text }
 struct GreetingRequest { name: Text, profile: self::app::main::Profile }
 struct Greeting { message: Text, profile: self::app::main::Profile }
+struct GreetingRow { id: i32, name: Text, city: Text }
+struct GreetingLookupParameters { id: i32 }
+struct GreetingWriteParameters { id: i32, name: Text, city: Text }
 
 union HomeReply { Page(Html) }
-union LookupReply { Found(self::app::main::Greeting), Missing }
-union CreateReply { Created(self::app::main::Greeting), Invalid }
+union LookupReply { Found(self::app::main::Greeting), Missing, StorageFailure(Text) }
+union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text) }
+union HealthReply { Healthy }
 union FaultReply { Completed }
 union ResetReply { Reset }
 
-fn home() -> self::app::main::HomeReply effects {} {
-    let body: Html = html.concat(
-        html.heading("A safe web page"),
-        html.paragraph("<script>bad()</script> & escaped text")
+fn load_greeting(db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
+    let result: Result<Option<self::app::main::GreetingRow>, DbError> = db.query_one(
+        "SELECT id, name, city FROM greeting WHERE id = $id",
+        self::app::main::GreetingLookupParameters { id: 1 }
     );
-    let content: Html = html.concat(body, html.text("Plain text stays escaped too."));
-    return self::app::main::HomeReply.Page(html.document("Web example", content));
+    return result;
 }
 
-fn lookup() -> self::app::main::LookupReply effects {} {
-    return self::app::main::LookupReply.Found(self::app::main::Greeting {
-        message: "Hello from lang",
-        profile: self::app::main::Profile { city: "London" }
-    });
+fn home(db: DbRead) -> self::app::main::HomeReply effects { db.read } {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    let content: Html = match loaded {
+        Ok(value) => match value {
+            Some(row) => html.concat(
+                html.heading("A safe web page backed by SQLite"),
+                html.paragraph(row.name)
+            ),
+            None => html.concat(
+                html.heading("A safe web page backed by SQLite"),
+                html.paragraph("No greeting has been saved yet.")
+            )
+        },
+        Err(error) => html.concat(
+            html.heading("A safe web page backed by SQLite"),
+            html.paragraph("The greeting is temporarily unavailable.")
+        )
+    };
+    let page: Html = html.document("SQLite web example", content);
+    return self::app::main::HomeReply.Page(page);
 }
 
-fn create(request: self::app::main::GreetingRequest) -> self::app::main::CreateReply effects {} {
+fn lookup(db: DbRead) -> self::app::main::LookupReply effects { db.read } {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    return match loaded {
+        Ok(value) => match value {
+            Some(row) => self::app::main::LookupReply.Found(self::app::main::Greeting {
+                message: row.name,
+                profile: self::app::main::Profile { city: row.city }
+            }),
+            None => self::app::main::LookupReply.Missing
+        },
+        Err(error) => match error {
+            DbError.Statement => self::app::main::LookupReply.StorageFailure("database statement failed"),
+            DbError.RowShape => self::app::main::LookupReply.StorageFailure("database row shape is invalid")
+        }
+    };
+}
+
+fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects { db.write } {
     let normalized: Text = match validation::text::validation::normalize(request.name) {
         Ok(name) => name,
         Err(error) => ""
     };
     if normalized.length == 0 {
-        return self::app::main::CreateReply.Invalid;
+        return self::app::main::CreateReply.Invalid("name must contain non-whitespace text");
     }
 
-    return self::app::main::CreateReply.Created(self::app::main::Greeting {
-        message: normalized,
-        profile: request.profile
-    });
+    let city: Text = request.profile.city.trim();
+    if city.length == 0 {
+        return self::app::main::CreateReply.Invalid("city must contain non-whitespace text");
+    }
+
+    let written: Result<i32, DbError> = db.execute(
+        "INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city",
+        self::app::main::GreetingWriteParameters { id: 1, name: normalized, city: city }
+    );
+    return match written {
+        Ok(count) => self::app::main::CreateReply.Created(self::app::main::Greeting {
+            message: normalized,
+            profile: self::app::main::Profile { city: city }
+        }),
+        Err(error) => match error {
+            DbError.Statement => self::app::main::CreateReply.StorageFailure("database statement failed"),
+            DbError.RowShape => self::app::main::CreateReply.StorageFailure("database row shape is invalid")
+        }
+    };
+}
+
+fn health() -> self::app::main::HealthReply effects {} {
+    return self::app::main::HealthReply.Healthy;
 }
 
 fn fault() -> self::app::main::FaultReply effects {} {
@@ -59,13 +113,20 @@ route GET "/api/greeting" {
     handler: self::app::main::lookup;
     response Found: 200 json self::app::main::Greeting;
     response Missing: 404;
+    response StorageFailure: 500 json Text;
 }
 
 route POST "/api/greeting" {
     body: self::app::main::GreetingRequest;
     handler: self::app::main::create;
     response Created: 201 json self::app::main::Greeting;
-    response Invalid: 400;
+    response Invalid: 400 json Text;
+    response StorageFailure: 500 json Text;
+}
+
+route GET "/health" {
+    handler: self::app::main::health;
+    response Healthy: 200;
 }
 
 route GET "/fault" {

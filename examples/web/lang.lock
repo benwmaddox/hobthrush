@@ -3,7 +3,7 @@
   "root": {
     "name": "web-example",
     "version": "0.1.0",
-    "manifest_sha256": "e7429850e24dd3452fc872791f117f7510113065c3bce30212ff9c10fe9e6e3e",
+    "manifest_sha256": "19a337e8118917a4bebca3b17747226f59a55c2824c6e6e8a781312bbe41e9a5",
     "dependencies": {
       "validation": "../text-validation"
     }

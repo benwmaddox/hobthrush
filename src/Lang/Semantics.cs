@@ -14,7 +14,10 @@ internal enum LangTypeKind
     Option,
     Result,
     FsRead,
-    FsError
+    FsError,
+    DbRead,
+    DbWrite,
+    DbError
 }
 
 internal sealed class LangType : IEquatable<LangType>
@@ -49,6 +52,9 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
     public bool IsFsError => Kind == LangTypeKind.FsError;
+    public bool IsDbRead => Kind == LangTypeKind.DbRead;
+    public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
+    public bool IsDbError => Kind == LangTypeKind.DbError;
     internal int UnionId { get; }
     internal int StructId { get; }
     internal int TypeParameterOwnerId { get; }
@@ -63,6 +69,9 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
+    internal static LangType DbRead { get; } = new(LangTypeKind.DbRead, "DbRead");
+    internal static LangType DbWrite { get; } = new(LangTypeKind.DbWrite, "DbWrite");
+    internal static LangType DbError { get; } = new(LangTypeKind.DbError, "DbError");
 
     internal static LangType ForTypeParameter(int ownerId, int ordinal, string name) =>
         new(LangTypeKind.TypeParameter, name, typeParameterOwnerId: ownerId, typeParameterOrdinal: ordinal);
@@ -165,6 +174,12 @@ internal sealed record CheckedCommand(
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
+internal enum CheckedRouteCapabilityKind { DbRead, DbWrite }
+internal sealed record CheckedRouteCapability(
+    CheckedRouteCapabilityKind Kind,
+    int HandlerParameterIndex,
+    string ParameterName,
+    Token At);
 
 internal sealed record CheckedRouteResponse(
     int VariantId,
@@ -186,6 +201,7 @@ internal sealed class CheckedRoute
         string path,
         LangType? bodyType,
         IEnumerable<CheckedStructField> bodySchema,
+        IEnumerable<CheckedRouteCapability> capabilities,
         int handlerFunctionId,
         string handlerReference,
         Token handlerAt,
@@ -202,6 +218,7 @@ internal sealed class CheckedRoute
         Path = path;
         BodyType = bodyType;
         BodySchema = Array.AsReadOnly(bodySchema.ToArray());
+        Capabilities = Array.AsReadOnly(capabilities.ToArray());
         HandlerFunctionId = handlerFunctionId;
         HandlerReference = handlerReference;
         HandlerAt = handlerAt;
@@ -219,6 +236,7 @@ internal sealed class CheckedRoute
     public string Path { get; }
     public LangType? BodyType { get; }
     public IReadOnlyList<CheckedStructField> BodySchema { get; }
+    public IReadOnlyList<CheckedRouteCapability> Capabilities { get; }
     public int HandlerFunctionId { get; }
     public string HandlerReference { get; }
     public Token HandlerAt { get; }
@@ -263,6 +281,20 @@ internal sealed record TypedIntrinsicCallExpr(
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
 
+internal enum CheckedDatabaseOperationKind { QueryOne, Execute }
+internal sealed record CheckedDatabaseOperation(
+    CheckedDatabaseOperationKind Kind,
+    string Effect,
+    string Sql,
+    int ParameterStructId,
+    int? RowStructId);
+internal sealed record TypedDatabaseCallExpr(
+    LangType Type,
+    TypedExpr Receiver,
+    TypedExpr Parameters,
+    CheckedDatabaseOperation Operation,
+    Token At) : TypedExpr(Type, At);
+
 internal enum BuiltinVariant
 {
     Some,
@@ -273,7 +305,9 @@ internal enum BuiltinVariant
     FsErrorPermissionDenied,
     FsErrorInvalidPath,
     FsErrorInvalidText,
-    FsErrorIo
+    FsErrorIo,
+    DbErrorStatement,
+    DbErrorRowShape
 }
 
 internal sealed record TypedBuiltinConstructExpr(
@@ -1132,6 +1166,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         FunctionSymbol? handler = null;
         UnionSymbol? replyUnion = null;
+        var routeCapabilities = new List<CheckedRouteCapability>();
         var handlerValid = handlers.Length == 1;
         if (handlers.Length == 1)
         {
@@ -1144,9 +1179,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var validParameters = route.Method switch
                 {
-                    "GET" => handler.Parameters.Count == 0,
+                    "GET" => CheckRouteCapabilityParameters(handler, 0, routeCapabilities),
                     "POST" when bodyStructure is not null =>
-                        handler.Parameters.Count == 1 && handler.Parameters[0].Type == bodyStructure.Type,
+                        handler.Parameters.Count > 0 &&
+                        handler.Parameters[0].Type == bodyStructure.Type &&
+                        CheckRouteCapabilityParameters(handler, 1, routeCapabilities),
+                    // The missing or invalid POST body already has a route declaration diagnostic.
                     "POST" => true,
                     _ => false
                 };
@@ -1156,8 +1194,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 if (!validParameters || !validReturn || !validGenericity)
                 {
                     var expectation = route.Method == "GET"
-                        ? "a non-generic zero-argument function returning a declared union"
-                        : "a non-generic function taking the route body type and returning a declared union";
+                        ? "a non-generic function taking optional DbRead and DbWrite capabilities in that order, and returning a declared union"
+                        : "a non-generic function taking the route body type followed by optional DbRead and DbWrite capabilities in that order, and returning a declared union";
                     Add("E_ROUTE_HANDLER", $"Route handler must be {expectation}", handlers[0].Reference.At);
                     handlerValid = false;
                 }
@@ -1214,6 +1252,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             route.Path,
             bodyStructure?.Type,
             bodyStructure?.Fields ?? [],
+            routeCapabilities,
             handler.Id,
             FormatReference(handlers[0].Reference),
             handlers[0].At,
@@ -1224,6 +1263,56 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             route.PathAt,
             bodies.FirstOrDefault()?.At,
             bodies.FirstOrDefault()?.Type.At);
+    }
+
+    private bool CheckRouteCapabilityParameters(
+        FunctionSymbol handler,
+        int firstCapabilityParameter,
+        List<CheckedRouteCapability> capabilities)
+    {
+        var seen = new HashSet<LangType>();
+        var lastOrder = -1;
+        var valid = true;
+        for (var index = firstCapabilityParameter; index < handler.Parameters.Count; index++)
+        {
+            var parameter = handler.Parameters[index];
+            var (kind, order, effect) = parameter.Type.Kind switch
+            {
+                LangTypeKind.DbRead => (CheckedRouteCapabilityKind.DbRead, 0, "db.read"),
+                LangTypeKind.DbWrite => (CheckedRouteCapabilityKind.DbWrite, 1, "db.write"),
+                _ => ((CheckedRouteCapabilityKind?)null, -1, string.Empty)
+            };
+
+            if (kind is null)
+            {
+                Add(
+                    "E_ROUTE_HANDLER",
+                    "Route handlers may receive only DbRead followed by DbWrite capability parameters after the request body",
+                    parameter.At);
+                valid = false;
+                continue;
+            }
+
+            if (!seen.Add(parameter.Type))
+            {
+                Add("E_ROUTE_HANDLER", $"Route handler cannot receive '{parameter.Type.DisplayName}' more than once", parameter.At);
+                valid = false;
+            }
+            if (order < lastOrder)
+            {
+                Add("E_ROUTE_HANDLER", "Route handler capability parameters must appear in DbRead, DbWrite order", parameter.At);
+                valid = false;
+            }
+            lastOrder = Math.Max(lastOrder, order);
+            capabilities.Add(new CheckedRouteCapability(kind.Value, index, parameter.Name, parameter.At));
+
+            if (!_rootCapabilities.Contains(effect))
+            {
+                Add("E_CAPABILITY_MISSING", $"Route handler requires the root package's {effect} capability grant", parameter.At);
+                valid = false;
+            }
+        }
+        return valid;
     }
 
     private CheckedRouteResponse CheckRouteResponse(RouteResponseSyntax response, CheckedVariant variant)
@@ -1555,7 +1644,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsReservedTypeName(string name) =>
-        name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or "FsRead" or "FsError";
+        name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
+            "FsRead" or "FsError" or "DbRead" or "DbWrite" or "DbError";
 
     private void ValidatePublicSignatures()
     {
@@ -1825,7 +1915,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             DeclarationRefExpr reference => CheckDeclarationReference(reference),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1),
-            MemberCallExpr call => CheckMemberCall(call, locals, depth + 1),
+            MemberCallExpr call => CheckMemberCall(call, expected, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
@@ -2040,6 +2130,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (expression.Target is NameExpr dbErrorName &&
+            !locals.ContainsKey(dbErrorName.Name) &&
+            dbErrorName.Name == "DbError")
+        {
+            if (IsDbErrorVariant(expression.Field))
+                Add("E_TYPE_MISMATCH", "DbError variants can only be produced by SQLite operations", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on DbError", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         var target = CheckExpr(expression.Target, null, locals, depth);
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
@@ -2176,6 +2277,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private TypedExpr CheckMemberCall(
         MemberCallExpr expression,
+        LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
@@ -2214,11 +2316,31 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "DbError")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                if (IsDbErrorVariant(expression.Member))
+                    Add("E_TYPE_MISMATCH", "DbError variants can only be produced by SQLite operations", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on DbError", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "fs" && expression.Member == "read_text")
             {
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
                 Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "db" && IsDatabaseMember(expression.Member))
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                var requiredType = expression.Member == "query_one" ? "DbRead" : "DbWrite";
+                Add("E_CAPABILITY_MISSING", $"Intrinsic 'db.{expression.Member}' requires a local or parameter of type '{requiredType}'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
         }
@@ -2264,6 +2386,24 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 expression.At);
         }
 
+        if ((receiver.Type.IsDbRead && expression.Member == "query_one") ||
+            (receiver.Type.IsDbWrite && expression.Member == "execute"))
+        {
+            return CheckDatabaseCall(expression, expected, locals, depth, receiver);
+        }
+
+        if (IsDatabaseMember(expression.Member))
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            var capabilityTargetDescription = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
+                ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}'"
+                : $"Value of type '{receiver.Type.DisplayName}'";
+            var requiredType = expression.Member == "query_one" ? "DbRead" : "DbWrite";
+            Add("E_CAPABILITY_MISSING", $"{capabilityTargetDescription} cannot provide database capability member '{expression.Member}' (requires '{requiredType}')", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (expression.Member == "read_text")
         {
             foreach (var argument in expression.Arguments)
@@ -2299,6 +2439,175 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             : $"Member calls on values are not implemented for '{targetDescription}.{expression.Member}'";
         Add("E_UNSUPPORTED", unsupportedMessage, expression.MemberAt);
         return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckDatabaseCall(
+        MemberCallExpr expression,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth,
+        TypedExpr receiver)
+    {
+        var diagnosticsBeforeCall = diagnostics.Count;
+        var queryOne = expression.Member == "query_one";
+        var operationName = queryOne ? "DbRead.query_one" : "DbWrite.execute";
+        var effect = queryOne ? "db.read" : "db.write";
+        var hasCorrectArity = expression.Arguments.Count == 2;
+        if (!hasCorrectArity)
+            Add("E_TYPE_MISMATCH", $"Intrinsic '{operationName}' expects 2 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+
+        var sql = string.Empty;
+        var hasLiteralSql = false;
+        TypedExpr? typedParameters = null;
+        if (expression.Arguments.Count > 0)
+        {
+            _ = CheckExpr(expression.Arguments[0], null, locals, depth);
+            if (expression.Arguments[0] is TextExpr sqlLiteral)
+            {
+                sql = sqlLiteral.Value;
+                hasLiteralSql = true;
+            }
+            else
+            {
+                Add(
+                    "E_DB_SQL_LITERAL",
+                    $"Intrinsic '{operationName}' requires a SQL string literal; dynamic SQL is not supported",
+                    expression.Arguments[0].At);
+            }
+
+            if (queryOne && hasLiteralSql && !IsSingleSqliteReadSelect(sql))
+            {
+                Add(
+                    "E_DB_READ_STATEMENT",
+                    "DbRead.query_one requires a single SELECT statement beginning with a standalone SELECT token and containing no semicolon",
+                    expression.Arguments[0].At);
+            }
+        }
+
+        StructSymbol? parameterStruct = null;
+        if (expression.Arguments.Count > 1)
+        {
+            typedParameters = CheckExpr(expression.Arguments[1], null, locals, depth);
+            parameterStruct = CheckDatabaseStruct(typedParameters.Type, "parameter", expression.Arguments[1].At);
+        }
+        else
+        {
+            Add("E_DB_PARAMETERS", $"Intrinsic '{operationName}' requires a parameter struct", expression.MemberAt);
+        }
+
+        for (var i = 2; i < expression.Arguments.Count; i++)
+            _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+        var rowStruct = (StructSymbol?)null;
+        LangType resultType;
+        var validExpectedResult = true;
+        if (queryOne)
+        {
+            validExpectedResult = false;
+            if (expected is null)
+            {
+                Add(
+                    "E_DB_RESULT_TYPE",
+                    "DbRead.query_one requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
+                    expression.At);
+            }
+            else if (!expected.IsError)
+            {
+                if (expected.Kind == LangTypeKind.Result &&
+                    expected.Arguments[0].Kind == LangTypeKind.Option &&
+                    expected.Arguments[1].IsDbError)
+                {
+                    var rowType = expected.Arguments[0].Arguments[0];
+                    rowStruct = CheckDatabaseStruct(rowType, "row", expression.At);
+                    validExpectedResult = rowStruct is not null;
+                }
+                else
+                {
+                    Add(
+                        "E_DB_RESULT_TYPE",
+                        "DbRead.query_one requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
+                        expression.At);
+                }
+            }
+
+            resultType = validExpectedResult ? expected! : LangType.Error;
+        }
+        else
+        {
+            resultType = LangType.Result(LangType.I32, LangType.DbError);
+        }
+
+        if (hasCorrectArity && hasLiteralSql && parameterStruct is not null &&
+            validExpectedResult && diagnostics.Count == diagnosticsBeforeCall)
+        {
+            _currentFunction?.DirectEffects.Add(new DirectEffectCall(effect, operationName, expression.MemberAt));
+        }
+
+        var operation = new CheckedDatabaseOperation(
+            queryOne ? CheckedDatabaseOperationKind.QueryOne : CheckedDatabaseOperationKind.Execute,
+            effect,
+            sql,
+            parameterStruct?.Id ?? -1,
+            rowStruct?.Id);
+        return new TypedDatabaseCallExpr(
+            resultType,
+            receiver,
+            typedParameters ?? new TypedErrorExpr(expression.MemberAt),
+            operation,
+            expression.At);
+    }
+
+    private StructSymbol? CheckDatabaseStruct(LangType type, string role, Token at)
+    {
+        if (type.IsError) return null;
+        if (type.Kind != LangTypeKind.Struct)
+        {
+            Add(
+                "E_DB_CODEC_UNSUPPORTED",
+                $"SQLite {role} value must be a concrete declared struct with only i32, bool, Text, or Option scalar fields; found '{type.DisplayName}'",
+                at);
+            return null;
+        }
+
+        var structure = _structs[type.StructId];
+        if (!IsSourceDeclaredStruct(structure))
+        {
+            Add("E_DB_CODEC_UNSUPPORTED", $"SQLite {role} value must use a source-declared struct; '{structure.Declaration.Name}' is generated", at);
+            return null;
+        }
+
+        var valid = true;
+        foreach (var field in structure.Fields)
+        {
+            if (field.Type.IsError)
+            {
+                valid = false;
+                continue;
+            }
+            if (IsDatabaseScalarType(field.Type)) continue;
+            Add(
+                "E_DB_CODEC_UNSUPPORTED",
+                $"SQLite {role} struct '{structure.Declaration.Name}' field '{field.Name}' has unsupported type '{field.Type.DisplayName}'; use i32, bool, Text, or Option of one of those scalar types",
+                field.At);
+            valid = false;
+        }
+        return valid ? structure : null;
+    }
+
+    private static bool IsDatabaseScalarType(LangType type) =>
+        type.IsI32 || type.IsBool || type.IsText ||
+        type.Kind == LangTypeKind.Option &&
+        (type.Arguments[0].IsI32 || type.Arguments[0].IsBool || type.Arguments[0].IsText);
+
+    private static bool IsDatabaseMember(string member) => member is "query_one" or "execute";
+
+    private static bool IsSingleSqliteReadSelect(string sql)
+    {
+        const int SelectLength = 6;
+        var statement = sql.TrimStart();
+        return !sql.Contains(';') &&
+            statement.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) &&
+            (statement.Length == SelectLength || char.IsWhiteSpace(statement[SelectLength]));
     }
 
     private static bool IsHtmlBuilderMember(string member) =>
@@ -2559,6 +2868,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("FsError.Io", "fserror:Io", null, 4, BuiltinVariant.FsErrorIo, [])
             ]);
         }
+        if (type.IsDbError)
+        {
+            return ReadOnly<VariantShape>([
+                new("DbError.Statement", "dberror:Statement", null, 0, BuiltinVariant.DbErrorStatement, []),
+                new("DbError.RowShape", "dberror:RowShape", null, 1, BuiltinVariant.DbErrorRowShape, [])
+            ]);
+        }
         return null;
     }
 
@@ -2585,11 +2901,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
-        else if (scrutineeType.IsFsError)
+        else if (scrutineeType.IsFsError || scrutineeType.IsDbError)
         {
-            if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != "FsError")
+            var builtinErrorName = scrutineeType.IsFsError ? "FsError" : "DbError";
+            if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != builtinErrorName)
             {
-                Add("E_TYPE_MISMATCH", $"Expected pattern from 'FsError.<variant>', found '{pattern.VariantName}'", pattern.At);
+                Add("E_TYPE_MISMATCH", $"Expected pattern from '{builtinErrorName}.<variant>', found '{pattern.VariantName}'", pattern.At);
                 return null;
             }
         }
@@ -2599,7 +2916,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return null;
         }
 
-        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError
+        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError
             ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
         var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
@@ -2702,6 +3019,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.FsRead);
             case "FsError":
                 return NoTypeArguments(syntax, LangType.FsError);
+            case "DbRead":
+                return NoTypeArguments(syntax, LangType.DbRead);
+            case "DbWrite":
+                return NoTypeArguments(syntax, LangType.DbWrite);
+            case "DbError":
+                return NoTypeArguments(syntax, LangType.DbError);
             case "Option":
                 if (syntax.Args.Count != 1)
                 {
@@ -2764,6 +3087,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsFsErrorVariant(string name) =>
         name is "NotFound" or "PermissionDenied" or "InvalidPath" or "InvalidText" or "Io";
+
+    private static bool IsDbErrorVariant(string name) =>
+        name is "Statement" or "RowShape";
 
 
     private void AddMismatch(LangType expected, LangType actual, Token at) =>
