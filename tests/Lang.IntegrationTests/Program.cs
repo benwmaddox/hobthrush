@@ -48,6 +48,8 @@ internal static class IntegrationTests
             ("comparison precedence and all comparison operators execute", TestComparisonAndControlFlow),
             ("if conditions, operand types, returns, and scopes are checked", TestInvalidControlFlow),
             ("Text length counts Unicode scalars and trim removes Unicode whitespace", TestUnicodeTextOperations),
+            ("lists infer generic items, append immutably, split exactly, and preserve iteration order", TestListRuntime),
+            ("list loops, immutable assignment, effects, and resource escapes have exact diagnostics", TestListDiagnostics),
             ("union payload matching executes", TestUnionMatchOutput),
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
             ("struct constructors support nested and chained field reads", TestStructValues),
@@ -390,6 +392,245 @@ internal static class IntegrationTests
             """;
         AssertRunOutput("hello 😀" + Environment.NewLine,
             await harness.InvokeAsync("unicode-whitespace-trim", "run", trimSource));
+    }
+
+    private static async Task TestListRuntime(Harness harness)
+    {
+        const string source = """
+            module harness::collections_runtime;
+            fn first<T>(items: List<T>) -> Option<T> effects {} {
+                for item in items {
+                    return Some(item);
+                }
+                return None;
+            }
+            fn intAt(items: List<i32>, index: i32, expected: i32) -> bool effects {} {
+                return match items.get(index) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn textAt(items: List<Text>, index: i32, expected: Text) -> bool effects {} {
+                return match items.get(index) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn noInteger(value: Option<i32>) -> bool effects {} {
+                return match value {
+                    Some(_) => false,
+                    None => true,
+                };
+            }
+            fn firstIntegerIs(items: List<i32>, expected: i32) -> bool effects {} {
+                return match self::harness::collections_runtime::first(items) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn firstTextIs(items: List<Text>, expected: Text) -> bool effects {} {
+                return match self::harness::collections_runtime::first(items) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn firstIntegerIsNone(items: List<i32>) -> bool effects {} {
+                return match self::harness::collections_runtime::first(items) {
+                    Some(_) => false,
+                    None => true,
+                };
+            }
+            fn splitPreservesFields() -> bool effects {} {
+                let fields: List<Text> = ",a,,b,".split(",");
+                if fields.length != 5 { return false; }
+                if self::harness::collections_runtime::textAt(fields, 0, "") { } else { return false; }
+                if self::harness::collections_runtime::textAt(fields, 1, "a") { } else { return false; }
+                if self::harness::collections_runtime::textAt(fields, 2, "") { } else { return false; }
+                if self::harness::collections_runtime::textAt(fields, 3, "b") { } else { return false; }
+                if self::harness::collections_runtime::textAt(fields, 4, "") { } else { return false; }
+                return true;
+            }
+            fn emptySeparatorIsSingleton() -> bool effects {} {
+                let fields: List<Text> = "abc".split("");
+                if fields.length == 1 {
+                    return self::harness::collections_runtime::textAt(fields, 0, "abc");
+                } else {
+                    return false;
+                }
+            }
+            fn foldInIterationOrder(items: List<i32>) -> i32 effects {} {
+                var encoded: i32 = 0;
+                for item in items {
+                    encoded = encoded * 10 + item;
+                }
+                return encoded;
+            }
+            pub fn main() -> i32 effects {} {
+                let emptyNumbers: List<i32> = [];
+                let numbers: List<i32> = [3, 1, 4];
+                let words: List<Text> = ["left", "right"];
+
+                if emptyNumbers.length == 0 { } else { return 1; }
+                if numbers.length == 3 { } else { return 2; }
+                if self::harness::collections_runtime::intAt(numbers, 0, 3) { } else { return 3; }
+                if self::harness::collections_runtime::intAt(numbers, 1, 1) { } else { return 4; }
+                if self::harness::collections_runtime::intAt(numbers, 2, 4) { } else { return 5; }
+                if self::harness::collections_runtime::noInteger(numbers.get(-1)) { } else { return 6; }
+                if self::harness::collections_runtime::noInteger(numbers.get(9)) { } else { return 7; }
+
+                var expanded: List<i32> = numbers.append(2);
+                expanded = expanded.append(5);
+                if expanded.length == 5 { } else { return 8; }
+                if self::harness::collections_runtime::intAt(expanded, 3, 2) { } else { return 9; }
+                if self::harness::collections_runtime::intAt(expanded, 4, 5) { } else { return 10; }
+                if numbers.length == 3 { } else { return 11; }
+                if self::harness::collections_runtime::intAt(numbers, 2, 4) { } else { return 12; }
+
+                if self::harness::collections_runtime::firstIntegerIs(numbers, 3) { } else { return 13; }
+                if self::harness::collections_runtime::firstTextIs(words, "left") { } else { return 14; }
+                if self::harness::collections_runtime::firstIntegerIsNone(emptyNumbers) { } else { return 15; }
+                if self::harness::collections_runtime::textAt(words, 1, "right") { } else { return 16; }
+                if self::harness::collections_runtime::splitPreservesFields() { } else { return 17; }
+                if self::harness::collections_runtime::emptySeparatorIsSingleton() { } else { return 18; }
+                if self::harness::collections_runtime::foldInIterationOrder([1, 2, 3]) == 123 { } else { return 19; }
+                return 42;
+            }
+            """;
+
+        var result = await harness.InvokeAsync("collections-runtime", "run", source);
+        AssertRunOutput("42" + Environment.NewLine, result);
+    }
+
+    private static async Task TestListDiagnostics(Harness harness)
+    {
+        const string immutableSource = """
+            module harness::collections_immutable;
+            fn immutableLocal() -> i32 effects {} {
+                let local_only: i32 = 1;
+                local_only = 2;
+                return local_only;
+            }
+            fn immutableParameter(parameter_only: i32) -> i32 effects {} {
+                parameter_only = 2;
+                return parameter_only;
+            }
+            fn immutableLoopItem() -> i32 effects {} {
+                let values: List<i32> = [1];
+                for loop_only in values {
+                    loop_only = 2;
+                }
+                return 0;
+            }
+            """;
+        var immutableDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-immutable-assignment", immutableSource, "E_ASSIGN_IMMUTABLE");
+        var immutableAssignments = immutableDiagnostics
+            .Where(diagnostic => diagnostic.Code == "E_ASSIGN_IMMUTABLE").ToArray();
+        AssertEqual(3, immutableAssignments.Length,
+            "let locals, parameters, and loop bindings must all remain immutable.");
+        AssertRangeAtToken(immutableSource,
+            immutableAssignments.Single(diagnostic => diagnostic.Message.Contains("local_only", StringComparison.Ordinal)),
+            "local_only", 2);
+        AssertRangeAtToken(immutableSource,
+            immutableAssignments.Single(diagnostic => diagnostic.Message.Contains("parameter_only", StringComparison.Ordinal)),
+            "parameter_only", 2);
+        AssertRangeAtToken(immutableSource,
+            immutableAssignments.Single(diagnostic => diagnostic.Message.Contains("loop_only", StringComparison.Ordinal)),
+            "loop_only", 2);
+
+        const string loopEffectSource = """
+            module harness::collections_loop_effect;
+            pub fn effectFromLoop(fs: FsRead, values: List<i32>) -> i32 effects {} {
+                for item in values {
+                    let loaded: Result<Text, FsError> = fs.read_text("unused");
+                }
+                return 0;
+            }
+            """;
+        var effectDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-loop-effect", loopEffectSource, "E_EFFECT_EXCEEDED");
+        var loopEffect = effectDiagnostics.Single(diagnostic => diagnostic.Code == "E_EFFECT_EXCEEDED");
+        AssertRangeAtToken(loopEffectSource, loopEffect, "effectFromLoop", 1);
+        AssertTrue(loopEffect.Message.Contains("fs.read_text", StringComparison.Ordinal),
+            "The effect path should include the filesystem call inside the loop.");
+
+        const string loopMissingReturnSource = """
+            module harness::collections_loop_return;
+            pub fn loopMaySkip(values: List<i32>) -> i32 effects {} {
+                for item in values {
+                    return item;
+                }
+            }
+            """;
+        var missingReturnDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-loop-missing-return", loopMissingReturnSource, "E_TYPE_MISMATCH");
+        var missingReturn = missingReturnDiagnostics.Single(diagnostic =>
+            diagnostic.Code == "E_TYPE_MISMATCH" && diagnostic.Message.Contains("must end with a return", StringComparison.Ordinal));
+        AssertRangeAtToken(loopMissingReturnSource, missingReturn, "loopMaySkip", 1);
+
+        const string loopScopeSource = """
+            module harness::collections_loop_scope;
+            pub fn loopBindingDoesNotEscape() -> i32 effects {} {
+                let values: List<i32> = [7];
+                for scoped_item in values { }
+                return scoped_item;
+            }
+            """;
+        var scopeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-loop-scope", loopScopeSource, "E_NAME_UNRESOLVED");
+        AssertRangeAtToken(loopScopeSource,
+            scopeDiagnostics.Single(diagnostic => diagnostic.Code == "E_NAME_UNRESOLVED"),
+            "scoped_item", 2);
+
+        const string genericListEscapeSource = """
+            module harness::collections_resource;
+            fn singleton<T>(value: T) -> List<T> effects {} {
+                return [value];
+            }
+            pub fn resourceList(fs: FsRead) -> i32 effects {} {
+                return self::harness::collections_resource::singleton(fs).length;
+            }
+            """;
+        var listEscapeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-generic-list-resource-escape", genericListEscapeSource, "E_RESOURCE_ESCAPE");
+        AssertRangeAtToken(genericListEscapeSource,
+            listEscapeDiagnostics.Single(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE"),
+            "self", 1);
+
+        const string unionResourceListSource = """
+            module harness::collections_union_resource;
+            union Capability { Reader(FsRead) }
+            union Envelope { Nested(self::harness::collections_union_resource::Capability) }
+            union ResourceLists { Items(List<self::harness::collections_union_resource::Envelope>) }
+            """;
+        var unionListEscapeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-union-list-resource-escape", unionResourceListSource, "E_RESOURCE_ESCAPE");
+        var unionListEscape = unionListEscapeDiagnostics.Single(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE");
+        AssertRangeAtToken(unionResourceListSource, unionListEscape, "List", 1);
+
+        const string forwardStructResourceListSource = """
+            module harness::collections_forward_resource;
+            union ResourceLists { Items(List<self::harness::collections_forward_resource::LateCapability>) }
+            struct LateCapability { database: Option<DbRead> }
+            """;
+        var forwardStructEscapeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-forward-struct-list-resource-escape", forwardStructResourceListSource,
+            "E_RESOURCE_ESCAPE");
+        var forwardStructEscape = forwardStructEscapeDiagnostics.Single(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE");
+        AssertRangeAtToken(forwardStructResourceListSource, forwardStructEscape, "List", 1);
+
+        const string mutableResourceEscapeSource = """
+            module harness::collections_mutable_resource;
+            pub fn resourceVar(fs: FsRead) -> i32 effects {} {
+                var mutable_fs: FsRead = fs;
+                return 0;
+            }
+            """;
+        var mutableEscapeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "collections-mutable-resource-escape", mutableResourceEscapeSource, "E_RESOURCE_ESCAPE");
+        AssertRangeAtToken(mutableResourceEscapeSource,
+            mutableEscapeDiagnostics.Single(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE"),
+            "mutable_fs", 1);
     }
 
     private static async Task TestUnionMatchOutput(Harness harness)
@@ -1341,6 +1582,37 @@ internal static class IntegrationTests
         AssertEqual(0, repeatedScan.ExitCode, Describe(repeatedScan));
         AssertEqual(scan.StandardOutput, repeatedScan.StandardOutput,
             "Repeated inspect-effects calls must produce byte-identical JSON.");
+
+        const string loopSource = """
+            module app::effects;
+            pub fn loop_read(fs: FsRead, paths: List<Text>) -> i32 effects { fs.read } {
+                for path in paths {
+                    let loaded: Result<Text, FsError> = fs.read_text(path);
+                }
+                return 0;
+            }
+            """;
+        var loopPackage = await harness.WritePackageAsync(
+            "inspect-effects-list-loop",
+            LibraryPackageManifest("inspect-effects-list-loop"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/effects.lang"] = loopSource
+            });
+        var loopRead = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", loopPackage, "self::app::effects::loop_read", "--json");
+        AssertEqual(0, loopRead.ExitCode, Describe(loopRead));
+        AssertEqual(string.Empty, loopRead.StandardError, Describe(loopRead));
+        using (var loopJson = JsonDocument.Parse(loopRead.StandardOutput))
+        {
+            var loopReport = loopJson.RootElement;
+            AssertJsonStringArray(loopReport.GetProperty("inferred_effects"), ["fs.read"]);
+            AssertEffectPath(loopReport, "fs.read", "app::effects::loop_read -> fs.read_text");
+            var operations = loopReport.GetProperty("trusted_operations").EnumerateArray().ToArray();
+            AssertEqual(1, operations.Length,
+                "A loop-only filesystem read should report exactly one trusted adapter operation.");
+            AssertTrustedOperation(operations[0], "FsRead.read_text", "trusted_adapter", ["fs.read"]);
+        }
 
         var pure = await harness.InvokeCompilerCommandAsync(
             "inspect", "effects", scanPackage, "self::app::scan::describe_error", "--json");
@@ -5049,7 +5321,7 @@ internal static class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(42, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(47, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -5058,7 +5330,7 @@ internal static class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("42 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("47 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -5217,9 +5489,9 @@ internal static class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b42\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b47\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 42 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 47 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

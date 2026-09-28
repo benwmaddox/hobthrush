@@ -1,0 +1,20 @@
+module fixture::collections;
+
+struct List { value: i32 }
+
+pub fn main() -> i32 effects {} {
+    var total: i32 = 0;
+    let values: List<i32> = [1, 2, 3];
+    let empty: List<i32> = [];
+    let grown: List<i32> = empty.append(4);
+    let first: Option<i32> = values.get(0);
+    let negative: Option<i32> = values.get(-1);
+    let high: Option<i32> = values.get(20);
+    for value in values {
+        total = total + value;
+    }
+    let fields: List<Text> = "a,,b,".split(",");
+    let whole: List<Text> = "whole".split("");
+    let named: self::fixture::collections::List = self::fixture::collections::List { value: 3 };
+    return total + values.length + grown.length + fields.length + whole.length + named.value;
+}

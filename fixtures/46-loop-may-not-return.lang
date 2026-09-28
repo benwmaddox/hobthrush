@@ -1,0 +1,7 @@
+module fixture::loop_may_not_return;
+
+pub fn first(values: List<i32>) -> i32 effects {} {
+    for value in values {
+        return value;
+    }
+}

@@ -15,6 +15,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
 | E_MODULE_DUPLICATE | A package includes more than one source for the same package/module identity | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, condition, comparison, or return type mismatch; also a function body that may fall through | Implemented for the pure type and control-flow slices |
+| E_ASSIGN_IMMUTABLE | Assignment targets a `let` local or immutable loop binding | Implemented |
 | E_TYPE_VISIBILITY | A public type signature exposes a private union or struct | Implemented |
 | E_FIELD_UNKNOWN | A struct initializer or field read names an unknown field | Implemented |
 | E_FIELD_MISSING | A struct construction omits a declared field | Implemented |
@@ -44,10 +45,10 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_ROUTE_RESPONSE_DUPLICATE | A response variant is mapped more than once | Implemented |
 | E_ROUTE_RESPONSE_MISSING | A declared response variant has no mapping | Implemented |
 | E_ROUTE_CODEC_UNSUPPORTED | Unsupported response payload, content format, or JSON shape | Implemented |
-| E_RESOURCE_ESCAPE | A SQLite transaction handle escapes its `with db.begin() as tx` scope or is used other than as the direct receiver of `execute` or `commit` | Implemented for SQLite transaction handles |
+| E_RESOURCE_ESCAPE | A SQLite transaction handle escapes its `with db.begin() as tx` scope or is used other than as the direct receiver of `execute` or `commit`; a resource handle is stored in a list or rebindable `var` local | Implemented for transaction handles, list elements, and rebindable locals |
 
 Typed CLI runtime parsing reports stable stderr codes and exits 2: `CLI_UNKNOWN_COMMAND`, `CLI_UNKNOWN_OPTION`, `CLI_MISSING_ARGUMENT`, `CLI_MISSING_VALUE`, `CLI_DUPLICATE_OPTION`, or `CLI_INVALID_VALUE`. Empty or NUL `FilePath` arguments and invalid `i32` values report `CLI_INVALID_VALUE`. Control characters in diagnostic subjects are escaped so each parse error stays on one physical stderr line. These are runtime results, not compiler diagnostics. `Ok(Text)` writes stdout and exits 0; formatted `Err(E)` writes stderr and exits 3; unexpected runtime faults exit 70. Top-level and command help exit 0.
 
 `lang inspect effects PACKAGE SYMBOL --json` reports malformed command usage through the normal usage message. An unknown, malformed, or non-`self` symbol reports structured `E_NAME_UNRESOLVED`. Compiler errors and missing/stale package locks stop inspection before an effects report is emitted.
 
-An unsupported feature is a compilation failure. It never passes as an unchecked construct. All 42 current fixture manifest entries are active, and bare `lang test` compares each fixture's complete ordered diagnostic-code list. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.
+An unsupported feature is a compilation failure. It never passes as an unchecked construct. All 47 current fixture manifest entries are active, and bare `lang test` compares each fixture's complete ordered diagnostic-code list. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.

@@ -1,0 +1,7 @@
+module fixture::immutable_assignment;
+
+pub fn main() -> i32 effects {} {
+    let value: i32 = 1;
+    value = 2;
+    return value;
+}

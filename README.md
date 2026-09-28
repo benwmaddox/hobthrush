@@ -4,6 +4,8 @@
 
 The implemented language slice supports `i32`, `bool`, `Text`, immutable non-generic nominal structs, declared tagged unions, generic functions with argument-based type inference, `Option<T>`, `Result<T, E>`, exhaustive `match`, scoped `if`/`else`, comparisons, and checked arithmetic. `Text.length` counts Unicode scalar values and `Text.trim()` removes leading and trailing Unicode whitespace. Every function declares an upper bound with `effects { ... }`; the compiler checks inferred direct and transitive effects against it. Implemented effectful operations are `FsRead.read_text` (`fs.read`) and the bounded SQLite operations (`DbRead.query_one` for `db.read`; `DbWrite.execute`, `DbWrite.begin`, `Transaction.execute`, and `Transaction.commit` for `db.write`). They require opaque capability values and checked web-package grants where applicable. These checks describe compiler and trusted-host metadata; they are not a security sandbox or a proof of adapter behavior. See [docs/grammar.md](docs/grammar.md) for the syntax and limits.
 
+The bounded collections slice adds contextual built-in `List<T>` with immutable homogeneous literals, `length`, `get(i32) -> Option<T>`, and copy-on-write `append`; an empty `[]` needs an expected `List<T>` type. `Text.split(separator)` uses the exact delimiter and preserves empty fields; an empty separator returns a singleton containing the original text. `for item in list` visits items in order with a scoped immutable binding, and calls in the loop body contribute to the function's inferred effects. A typed `var` local can be rebound to the same type; `let` locals and loop bindings cannot. Resource handles cannot be list elements or stored in `var` locals. Qualified user types named `List` remain valid. `Map<K, V>`, index syntax, list mutation, `break`, and `continue` are not implemented.
+
 ## Bootstrap
 
 Install the .NET 10.0.401 SDK, then from this directory:
@@ -34,7 +36,7 @@ dotnet run --project src/Lang --configuration Release -- test
 dotnet run --project tests/Lang.IntegrationTests --configuration Release
 ```
 
-`lang check FILE` checks the source and returns 1 for invalid programs. `lang check FILE --json` prints stable diagnostic codes, source ranges, and severity, including an empty diagnostics array on success. `lang test FILE_OR_PACKAGE` typechecks and runs the source's managed language tests. Bare `lang test` keeps the compiler fixture mode and compares all 42 currently active fixtures against their exact expected ordered diagnostic-code lists.
+`lang check FILE` checks the source and returns 1 for invalid programs. `lang check FILE --json` prints stable diagnostic codes, source ranges, and severity, including an empty diagnostics array on success. `lang test FILE_OR_PACKAGE` typechecks and runs the source's managed language tests. Bare `lang test` keeps the compiler fixture mode and compares all 47 currently active fixtures against their exact expected ordered diagnostic-code lists.
 
 Foreign interop is not implemented in normal `lang` commands. A planned, not-started roadmap gate covers a narrow C ABI proof and shared boundary contract; see [docs/foreign-interop.md](docs/foreign-interop.md).
 
