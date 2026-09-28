@@ -380,11 +380,17 @@ internal static class Emitter
                 if (UsesDatabase)
                     _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
-            else if (UsesDatabase)
+            else
             {
-                _source.AppendLine("using Microsoft.Data.Sqlite;");
+                if (UsesAsyncFunctions)
+                {
+                    _source.AppendLine("using System.Threading;");
+                    _source.AppendLine("using System.Threading.Tasks;");
+                }
+                if (UsesDatabase)
+                    _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
-            if (UsesFsReadText || UsesFsWriteText)
+            if (UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText)
             {
                 if (!webHost) _source.AppendLine("using System.IO;");
                 _source.AppendLine("using System.Security;");
@@ -412,6 +418,7 @@ internal static class Emitter
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
+            if (UsesFsReadTextAsync) EmitFsReadTextAsyncHelper();
             if (UsesFsWriteText) EmitFsWriteTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesListGet) EmitListGetHelper();
@@ -452,7 +459,9 @@ internal static class Emitter
         {
             _source.AppendLine("    public sealed class FsRead");
             _source.AppendLine("    {");
-            _source.AppendLine("        internal FsRead() { }");
+            _source.AppendLine("        internal FsRead() : this(System.Threading.CancellationToken.None) { }");
+            _source.AppendLine("        internal FsRead(System.Threading.CancellationToken cancellationToken) => CancellationToken = cancellationToken;");
+            _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken { get; }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -604,7 +613,8 @@ internal static class Emitter
         {
             _emittingFunction = function;
             _source.Append("    ").Append(function.Public ? "public" : "private").Append(" static ")
-                .Append(EmitType(function.ReturnType)).Append(" Function_").Append(function.Id);
+                .Append(function.IsAsync ? "async Task<" + EmitType(function.ReturnType) + ">" : EmitType(function.ReturnType))
+                .Append(" Function_").Append(function.Id);
             if (function.TypeParameters.Count != 0)
             {
                 var typeParameterNames = function.TypeParameters.Select((_, index) => TypeParameterName(index));
@@ -617,8 +627,15 @@ internal static class Emitter
                 var parameter = function.Parameters[i];
                 _source.Append(EmitType(parameter.Type)).Append(" Local_").Append(parameter.LocalId);
             }
+            if (function.IsAsync)
+            {
+                if (function.Parameters.Count != 0) _source.Append(", ");
+                _source.Append("CancellationToken cancellationToken");
+            }
             _source.AppendLine(")");
             _source.AppendLine("    {");
+            if (function.IsAsync)
+                _source.AppendLine("        await Task.CompletedTask;");
             EmitStatements(function.Body, 2);
             _source.AppendLine("    }");
             _source.AppendLine();
@@ -702,6 +719,7 @@ internal static class Emitter
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
+            TypedCallExpr { IsAsync: true } => throw new InvalidOperationException("Async calls must be emitted beneath a checked await expression"),
             TypedCallExpr call => EmitCall(call),
             TypedDatabaseCallExpr databaseCall => EmitDatabaseCall(databaseCall),
             TypedTransactionCommitExpr commit =>
@@ -711,7 +729,9 @@ internal static class Emitter
             TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
             TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
             TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
+            TypedAwaitExpr awaited => EmitAwait(awaited),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
             TypedStructConstructExpr structure => EmitStructConstruct(structure),
@@ -760,8 +780,23 @@ internal static class Emitter
             var functionName = "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture);
             if (call.TypeArguments.Count != 0)
                 functionName += "<" + string.Join(", ", call.TypeArguments.Select(EmitType)) + ">";
-            return functionName + "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")";
+            var arguments = call.Arguments.Select(EmitExpr).ToList();
+            if (call.IsAsync)
+            {
+                if (_emittingFunction?.IsAsync != true)
+                    throw new InvalidOperationException("An async call has no enclosing async function token");
+                arguments.Add("cancellationToken");
+            }
+            return functionName + "(" + string.Join(", ", arguments) + ")";
         }
+
+        private string EmitAwait(TypedAwaitExpr expression) => expression.Value switch
+        {
+            TypedCallExpr { IsAsync: true } call => "await " + EmitCall(call),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync } intrinsic =>
+                "await " + EmitIntrinsicCall(intrinsic),
+            _ => throw new InvalidOperationException("Await expression has no checked async target")
+        };
 
         private string EmitIntrinsicCall(TypedIntrinsicCallExpr expression) => expression.Intrinsic switch
         {
@@ -769,6 +804,10 @@ internal static class Emitter
                 EmitFsReadText(expression),
             BuiltinIntrinsic.FsReadText =>
                 throw new InvalidOperationException("FsRead.read_text requires a receiver and a path"),
+            BuiltinIntrinsic.FsReadTextAsync when expression.Arguments.Count == 2 =>
+                EmitFsReadTextAsync(expression),
+            BuiltinIntrinsic.FsReadTextAsync =>
+                throw new InvalidOperationException("FsRead.read_text_async requires a receiver and a path"),
             BuiltinIntrinsic.FsWriteText when expression.Arguments.Count == 3 =>
                 EmitFsWriteText(expression),
             BuiltinIntrinsic.FsWriteText =>
@@ -796,6 +835,16 @@ internal static class Emitter
                 ? "(" + EmitExpr(path) + ").Value"
                 : EmitExpr(path);
             return "ReadText(" + receiver + ", " + emittedPath + ")";
+        }
+
+        private string EmitFsReadTextAsync(TypedIntrinsicCallExpr expression)
+        {
+            var receiver = EmitExpr(expression.Arguments[0]);
+            var path = expression.Arguments[1];
+            var emittedPath = path.Type.IsFilePath
+                ? "(" + EmitExpr(path) + ").Value"
+                : EmitExpr(path);
+            return "ReadTextAsync(" + receiver + ", " + emittedPath + ")";
         }
 
         private string EmitFsWriteText(TypedIntrinsicCallExpr expression)
@@ -970,6 +1019,56 @@ internal static class Emitter
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            var bytes = File.ReadAllBytes(path);");
+            _source.AppendLine("            return new Result<string, FsError>.Ok(new UTF8Encoding(false, true).GetString(bytes));");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (FileNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DirectoryNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (SecurityException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (UnauthorizedAccessException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DecoderFallbackException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidText());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (ArgumentException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (NotSupportedException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (PathTooLongException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (IOException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<string, FsError>.Err(new FsError.Io());");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsReadTextAsyncHelper()
+        {
+            _source.AppendLine("    private static async Task<Result<string, FsError>> ReadTextAsync(FsRead receiver, string path)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(receiver);");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var bytes = await File.ReadAllBytesAsync(path, receiver.CancellationToken);");
             _source.AppendLine("            return new Result<string, FsError>.Ok(new UTF8Encoding(false, true).GetString(bytes));");
             _source.AppendLine("        }");
             _source.AppendLine("        catch (FileNotFoundException)");
@@ -1667,13 +1766,19 @@ internal static class Emitter
                     .AppendLine("(requestJson.RootElement);");
                 var arguments = new List<string> { "requestValue" };
                 arguments.AddRange(EmitRouteCapabilities(route));
-                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
+                if (route.HandlerIsAsync) arguments.Add("context.RequestAborted");
+                _source.Append("            var reply = ");
+                if (route.HandlerIsAsync) _source.Append("await ");
+                _source.Append("Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
                     .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
             else
             {
                 var arguments = EmitRouteCapabilities(route);
-                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
+                if (route.HandlerIsAsync) arguments = arguments.Append("context.RequestAborted");
+                _source.Append("            var reply = ");
+                if (route.HandlerIsAsync) _source.Append("await ");
+                _source.Append("Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
                     .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
 
@@ -1849,6 +1954,46 @@ internal static class Emitter
 
         private void EmitEntryPoint(CheckedFunction entry)
         {
+            if (entry.IsAsync)
+            {
+                _source.AppendLine("    public static async Task<int> Main()");
+                _source.AppendLine("    {");
+                _source.AppendLine("        using var cancellation = new CancellationTokenSource();");
+                _source.AppendLine("        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) => { eventArgs.Cancel = true; cancellation.Cancel(); };");
+                _source.AppendLine("        Console.CancelKeyPress += cancelHandler;");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            try");
+                _source.AppendLine("            {");
+                _source.AppendLine("                Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+
+                var asyncCall = "(await Function_" + entry.Id.ToString(CultureInfo.InvariantCulture) + "(cancellation.Token))";
+                if (entry.ReturnType.IsI32)
+                    _source.Append("                Console.WriteLine(").Append(asyncCall).AppendLine(".ToString(CultureInfo.InvariantCulture));");
+                else if (entry.ReturnType.IsBool)
+                    _source.Append("                Console.WriteLine(").Append(asyncCall).AppendLine(" ? \"true\" : \"false\");");
+                else
+                    _source.Append("                Console.WriteLine(").Append(asyncCall).AppendLine(");");
+                _source.AppendLine("                return 0;");
+                _source.AppendLine("            }");
+                _source.AppendLine("            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)");
+                _source.AppendLine("            {");
+                _source.AppendLine("                return 130;");
+                _source.AppendLine("            }");
+                _source.AppendLine("            catch (Exception)");
+                _source.AppendLine("            {");
+                _source.AppendLine("                Console.Error.WriteLine(\"Runtime fault\");");
+                _source.AppendLine("                return 70;");
+                _source.AppendLine("            }");
+                _source.AppendLine("        }");
+                _source.AppendLine("        finally");
+                _source.AppendLine("        {");
+                _source.AppendLine("            Console.CancelKeyPress -= cancelHandler;");
+                _source.AppendLine("        }");
+                _source.AppendLine("    }");
+                return;
+            }
+
             _source.AppendLine("    public static int Main()");
             _source.AppendLine("    {");
             _source.AppendLine("        try");
@@ -1874,8 +2019,17 @@ internal static class Emitter
 
         private void EmitCommandEntryPoint(CheckedCommand entryCommand)
         {
-            _source.AppendLine("    public static int Main(string[] args)");
+            var hasAsyncHandlers = program.Commands.Any(command => command.HandlerIsAsync);
+            _source.AppendLine(hasAsyncHandlers
+                ? "    public static async Task<int> Main(string[] args)"
+                : "    public static int Main(string[] args)");
             _source.AppendLine("    {");
+            if (hasAsyncHandlers)
+            {
+                _source.AppendLine("        using var cancellation = new CancellationTokenSource();");
+                _source.AppendLine("        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) => { eventArgs.Cancel = true; cancellation.Cancel(); };");
+                _source.AppendLine("        Console.CancelKeyPress += cancelHandler;");
+            }
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
@@ -1898,18 +2052,36 @@ internal static class Emitter
                 _source.Append("                        Console.WriteLine(").Append(JsonSerializer.Serialize(CommandHelp(command))).AppendLine(");");
                 _source.AppendLine("                        return 0;");
                 _source.AppendLine("                    }");
-                _source.Append("                    return RunCommand_").Append(command.Id.ToString(CultureInfo.InvariantCulture))
-                    .AppendLine("(args[1..]);");
+                _source.Append("                    return ");
+                if (command.HandlerIsAsync) _source.Append("await ");
+                _source.Append("RunCommand_").Append(command.Id.ToString(CultureInfo.InvariantCulture))
+                    .AppendLine(command.HandlerIsAsync
+                        ? "(args[1..], cancellation.Token);"
+                        : "(args[1..]);");
             }
             _source.AppendLine("                default:");
             _source.AppendLine("                    return CliUsageError(\"CLI_UNKNOWN_COMMAND\", args[0]);");
             _source.AppendLine("            }");
             _source.AppendLine("        }");
+            if (hasAsyncHandlers)
+            {
+                _source.AppendLine("        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)");
+                _source.AppendLine("        {");
+                _source.AppendLine("            return 130;");
+                _source.AppendLine("        }");
+            }
             _source.AppendLine("        catch (Exception)");
             _source.AppendLine("        {");
             _source.AppendLine("            Console.Error.WriteLine(\"Runtime fault\");");
             _source.AppendLine("            return 70;");
             _source.AppendLine("        }");
+            if (hasAsyncHandlers)
+            {
+                _source.AppendLine("        finally");
+                _source.AppendLine("        {");
+                _source.AppendLine("            Console.CancelKeyPress -= cancelHandler;");
+                _source.AppendLine("        }");
+            }
             _source.AppendLine("    }");
             _source.AppendLine();
 
@@ -1921,8 +2093,14 @@ internal static class Emitter
         private void EmitCommandParser(CheckedCommand command)
         {
             var inputs = command.Inputs.OrderBy(input => input.FieldIndex).ToArray();
-            _source.Append("    private static int RunCommand_")
-                .Append(command.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(string[] args)");
+            var hasOptionInputs = inputs.Any(input => input.Kind is CheckedCommandInputKind.Option or CheckedCommandInputKind.Flag);
+            _source.Append(command.HandlerIsAsync
+                    ? "    private static async Task<int> RunCommand_"
+                    : "    private static int RunCommand_")
+                .Append(command.Id.ToString(CultureInfo.InvariantCulture))
+                .AppendLine(command.HandlerIsAsync
+                    ? "(string[] args, CancellationToken cancellationToken)"
+                    : "(string[] args)");
             _source.AppendLine("    {");
             foreach (var input in inputs)
             {
@@ -1988,7 +2166,8 @@ internal static class Emitter
             _source.AppendLine("                    default:");
             _source.AppendLine("                        return CliUsageError(\"CLI_UNKNOWN_OPTION\", optionName);");
             _source.AppendLine("                }");
-            _source.AppendLine("                continue;");
+            if (hasOptionInputs)
+                _source.AppendLine("                continue;");
             _source.AppendLine("            }");
             _source.AppendLine("            switch (positionalIndex++)");
             _source.AppendLine("            {");
@@ -2034,18 +2213,22 @@ internal static class Emitter
                 "Field_" + input.FieldIndex.ToString(CultureInfo.InvariantCulture) + ": input_" +
                 input.FieldIndex.ToString(CultureInfo.InvariantCulture)));
             var resultType = "Result<string, " + EmitType(command.ErrorType) + ">";
-            _source.Append("        var result = Function_").Append(command.HandlerFunctionId.ToString(CultureInfo.InvariantCulture))
+            _source.Append(command.HandlerIsAsync ? "        var result = await Function_" : "        var result = Function_")
+                .Append(command.HandlerFunctionId.ToString(CultureInfo.InvariantCulture))
                 .Append("(new Struct_").Append(command.ArgsStructId.ToString(CultureInfo.InvariantCulture))
                 .Append('(').Append(fields).Append(')');
             foreach (var capability in command.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
             {
                 _source.Append(capability.Kind switch
                 {
-                    CheckedCapabilityKind.FsRead => ", new FsRead()",
+                    CheckedCapabilityKind.FsRead => command.HandlerIsAsync
+                        ? ", new FsRead(cancellationToken)"
+                        : ", new FsRead(System.Threading.CancellationToken.None)",
                     CheckedCapabilityKind.FsWrite => ", new FsWrite()",
                     _ => throw new InvalidOperationException("Unsupported checked command capability")
                 });
             }
+            if (command.HandlerIsAsync) _source.Append(", cancellationToken");
             _source.AppendLine(");");
             _source.Append("        if (result is ").Append(resultType).AppendLine(".Ok success)");
             _source.AppendLine("        {");
@@ -2317,7 +2500,7 @@ internal static class Emitter
             program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite)) ||
             program.Routes.Any(route => route.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite));
 
-        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText || UsesFsWriteText;
+        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText;
 
         private bool NeedsDbReadType => UsesTypeKind(LangTypeKind.DbRead) || UsesDatabase;
 
@@ -2350,13 +2533,21 @@ internal static class Emitter
             .OfType<TypedTransactionCommitExpr>()
             .ToArray();
 
-        private bool UsesFsReadText => EmittedFunctions.Any(function =>
-            function.InferredEffects.Contains("fs.read", StringComparer.Ordinal) ||
-            EnumerateStatements(function.Body)
-                .SelectMany(StatementExpressions)
-                .SelectMany(EnumerateExpressions)
-                .OfType<TypedIntrinsicCallExpr>()
-                .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText));
+        private bool UsesAsyncFunctions => EmittedFunctions.Any(function => function.IsAsync);
+
+        private bool UsesFsReadText => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText);
+
+        private bool UsesFsReadTextAsync => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadTextAsync);
 
         private bool UsesFsWriteText => EmittedFunctions.Any(function =>
             function.InferredEffects.Contains("fs.write", StringComparer.Ordinal) ||
@@ -2499,6 +2690,9 @@ internal static class Emitter
                 case TypedCallExpr call:
                     foreach (var argument in call.Arguments)
                     foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedAwaitExpr awaited:
+                    foreach (var nested in EnumerateExpressions(awaited.Value)) yield return nested;
                     break;
                 case TypedDatabaseCallExpr databaseCall:
                     foreach (var nested in EnumerateExpressions(databaseCall.Receiver)) yield return nested;

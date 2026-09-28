@@ -43,7 +43,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -364,6 +364,7 @@ internal static class AuditReport
                     module = item.Identity.Module,
                     name = item.Identity.Name,
                     visibility = function.Public ? "public" : "private",
+                    is_async = function.IsAsync,
                     declared_effects = function.DeclaredEffects.OrderBy(effect => effect, StringComparer.Ordinal).ToArray(),
                     inferred_effects = function.InferredEffects.OrderBy(effect => effect, StringComparer.Ordinal).ToArray(),
                     effect_paths = effectPaths,

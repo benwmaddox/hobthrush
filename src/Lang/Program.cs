@@ -612,6 +612,7 @@ internal static class Driver
                 id = ApiDeclarationId(function.PackageId, function.Module, function.Name, packageReferences),
                 source_ids = ApiDeclarationIds(function.PackageId, function.Module, function.Name, sourceAliasesByPackageId),
                 package = packageReferences[function.PackageId],
+                is_async = function.IsAsync,
                 type_parameters = function.TypeParameters
                     .Select(typeParameter => new
                     {
@@ -702,6 +703,7 @@ internal static class Driver
                 })
                 .ToArray(),
                 handler = ApiFunctionId(command.HandlerFunctionId, functionsById, packageReferences),
+                handler_is_async = command.HandlerIsAsync,
                 handler_source_ids = ApiFunctionSourceIds(command.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
                 error_formatter = ApiFunctionId(command.ErrorFunctionId, functionsById, packageReferences),
                 error_formatter_source_ids = ApiFunctionSourceIds(command.ErrorFunctionId, functionsById, sourceAliasesByPackageId),
@@ -729,6 +731,7 @@ internal static class Driver
                     ? null
                     : ApiType(route.BodyType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
                 handler = ApiFunctionId(route.HandlerFunctionId, functionsById, packageReferences),
+                handler_is_async = route.HandlerIsAsync,
                 response_type = ApiNominalType(
                     "union",
                     unionsById[route.ReplyUnionId].PackageId,
@@ -780,7 +783,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 1,
+            schema_version = 2,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
