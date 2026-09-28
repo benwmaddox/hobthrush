@@ -1583,6 +1583,37 @@ internal static class IntegrationTests
         AssertEqual(scan.StandardOutput, repeatedScan.StandardOutput,
             "Repeated inspect-effects calls must produce byte-identical JSON.");
 
+        const string loopSource = """
+            module app::effects;
+            pub fn loop_read(fs: FsRead, paths: List<Text>) -> i32 effects { fs.read } {
+                for path in paths {
+                    let loaded: Result<Text, FsError> = fs.read_text(path);
+                }
+                return 0;
+            }
+            """;
+        var loopPackage = await harness.WritePackageAsync(
+            "inspect-effects-list-loop",
+            LibraryPackageManifest("inspect-effects-list-loop"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/effects.lang"] = loopSource
+            });
+        var loopRead = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", loopPackage, "self::app::effects::loop_read", "--json");
+        AssertEqual(0, loopRead.ExitCode, Describe(loopRead));
+        AssertEqual(string.Empty, loopRead.StandardError, Describe(loopRead));
+        using (var loopJson = JsonDocument.Parse(loopRead.StandardOutput))
+        {
+            var loopReport = loopJson.RootElement;
+            AssertJsonStringArray(loopReport.GetProperty("inferred_effects"), ["fs.read"]);
+            AssertEffectPath(loopReport, "fs.read", "app::effects::loop_read -> fs.read_text");
+            var operations = loopReport.GetProperty("trusted_operations").EnumerateArray().ToArray();
+            AssertEqual(1, operations.Length,
+                "A loop-only filesystem read should report exactly one trusted adapter operation.");
+            AssertTrustedOperation(operations[0], "FsRead.read_text", "trusted_adapter", ["fs.read"]);
+        }
+
         var pure = await harness.InvokeCompilerCommandAsync(
             "inspect", "effects", scanPackage, "self::app::scan::describe_error", "--json");
         AssertEqual(0, pure.ExitCode, Describe(pure));

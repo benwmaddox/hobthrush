@@ -502,6 +502,9 @@ internal static class Driver
                 case TypedLetStmt let:
                     VisitExpression(let.Value);
                     break;
+                case TypedAssignStmt assigned:
+                    VisitExpression(assigned.Value);
+                    break;
                 case TypedReturnStmt returned:
                     VisitExpression(returned.Value);
                     break;
@@ -514,6 +517,11 @@ internal static class Driver
                         foreach (var nested in conditional.ElseBody)
                             VisitStatement(nested);
                     }
+                    break;
+                case TypedForStmt loop:
+                    VisitExpression(loop.Collection);
+                    foreach (var nested in loop.Body)
+                        VisitStatement(nested);
                     break;
                 case TypedWithTransactionStmt transaction:
                     operationNames.Add("DbWrite.begin");
@@ -528,6 +536,10 @@ internal static class Driver
         {
             switch (expression)
             {
+                case TypedListExpr list:
+                    foreach (var item in list.Items)
+                        VisitExpression(item);
+                    break;
                 case TypedBinaryExpr binary:
                     VisitExpression(binary.Left);
                     VisitExpression(binary.Right);
@@ -541,6 +553,17 @@ internal static class Driver
                     break;
                 case TypedTextTrimExpr trim:
                     VisitExpression(trim.Target);
+                    break;
+                case TypedListLengthExpr length:
+                    VisitExpression(length.Target);
+                    break;
+                case TypedListGetExpr get:
+                    VisitExpression(get.Target);
+                    VisitExpression(get.Index);
+                    break;
+                case TypedListAppendExpr append:
+                    VisitExpression(append.Target);
+                    VisitExpression(append.Value);
                     break;
                 case TypedCallExpr call:
                     foreach (var argument in call.Arguments)
