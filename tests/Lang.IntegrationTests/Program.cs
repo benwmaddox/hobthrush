@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Net.Sockets;
 
 return await IntegrationTests.RunAsync();
@@ -108,7 +109,7 @@ internal static class IntegrationTests
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
             ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
             ("language tests validate assertions, dependency selection, and locks", TestManagedLanguageTestPackageRules),
-            ("zero-argument lang test still runs compiler fixtures", TestFixtureTestMode),
+            ("agent-facing docs track active fixtures, emitted diagnostics, grammar, and commands", TestSpecificationDriftOracle),
             ("generic inference limits and generic main entry selection are diagnosed", TestGenericFunctionRestrictions),
             ("NativeAOT command validation returns build-target diagnostics", TestAotCommandValidation),
             ("NativeAOT rejects library sources before publishing", TestAotLibraryRejected),
@@ -5041,15 +5042,246 @@ internal static class IntegrationTests
         AssertEqual(string.Empty, dependencyTypecheck.StandardOutput, Describe(dependencyTypecheck));
     }
 
-    private static async Task TestFixtureTestMode(Harness harness)
+    private static async Task TestSpecificationDriftOracle(Harness harness)
     {
-        var result = await harness.InvokeCompilerCommandAsync("test");
-        AssertEqual(0, result.ExitCode, Describe(result));
-        AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
-            Describe(result));
-        AssertTrue(result.StandardOutput.EndsWith("42 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
-            Describe(result));
-        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        var manifestPath = Path.Combine(harness.RepositoryRoot, "fixtures", "manifest.json");
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+        var fixtures = manifest.RootElement.EnumerateArray().ToArray();
+        var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
+        var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
+        AssertEqual(42, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
+        AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
+            $"Fixture manifest contains an unknown status: {manifestPath}.");
+
+        var fixtureRun = await harness.InvokeCompilerCommandAsync("test");
+        AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
+        AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
+            Describe(fixtureRun));
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("42 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+            Describe(fixtureRun));
+        AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
+
+        var emittedCodes = new HashSet<string>(StringComparer.Ordinal);
+        var resourceEscape = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "fixtures", "16-resource-escape.lang"));
+        foreach (var diagnostic in await ExpectDiagnosticsAsync(
+                     harness, "spec-drift-resource-escape", resourceEscape, "E_RESOURCE_ESCAPE"))
+            emittedCodes.Add(diagnostic.Code);
+
+        string MakeReadSource(string sql, string resultType = "Result<Option<self::app::spec::Row>, DbError>", string rowFields = "id: i32") => $$"""
+            module app::spec;
+            struct Parameters { id: i32 }
+            struct Row { {{rowFields}} }
+            fn probe(db: DbRead, sql: Text) -> bool effects { db.read } {
+                let loaded: {{resultType}} = db.query_one({{sql}}, self::app::spec::Parameters { id: 1 });
+                return true;
+            }
+            """;
+
+        var dbDiagnosticPrograms = new (string Code, string Source)[]
+        {
+            ("E_DB_SQL_LITERAL", MakeReadSource("sql")),
+            ("E_DB_READ_STATEMENT", MakeReadSource(JsonSerializer.Serialize("UPDATE records SET id = 1"))),
+            ("E_DB_RESULT_TYPE", MakeReadSource(JsonSerializer.Serialize("SELECT id FROM records"), "i32")),
+            ("E_DB_CODEC_UNSUPPORTED", MakeReadSource(
+                JsonSerializer.Serialize("SELECT path FROM records"),
+                rowFields: "path: FilePath")),
+            ("E_DB_PARAMETERS", """
+                module app::spec;
+                fn probe(db: DbWrite) -> bool effects { db.write } {
+                    let written: Result<i32, DbError> = db.execute("INSERT INTO records (id) VALUES (1)");
+                    return true;
+                }
+                """),
+            ("E_DB_TRANSACTION_STATEMENT", """
+                module app::spec;
+                struct Parameters { id: i32 }
+                fn probe(db: DbWrite) -> bool effects { db.write } {
+                    with db.begin() as tx {
+                        let written: Result<i32, DbError> = tx.execute("COMMIT", self::app::spec::Parameters { id: 1 });
+                        return true;
+                    }
+                }
+                """)
+        };
+        foreach (var (code, source) in dbDiagnosticPrograms)
+        {
+            foreach (var diagnostic in await ExpectDiagnosticsAsync(harness, $"spec-drift-{code}", source, code))
+                emittedCodes.Add(diagnostic.Code);
+        }
+
+        var diagnosticDocumentation = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "diagnostics.md"));
+        var documentedDiagnosticStatuses = ParseDiagnosticTableStatuses(diagnosticDocumentation);
+        var sourceDiagnosticCodes = new HashSet<string>(StringComparer.Ordinal);
+        var sourceDirectory = Path.Combine(harness.RepositoryRoot, "src", "Lang");
+        foreach (var sourcePath in Directory.EnumerateFiles(sourceDirectory, "*.cs", SearchOption.TopDirectoryOnly)
+                     .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            var source = await File.ReadAllTextAsync(sourcePath);
+            foreach (Match match in Regex.Matches(source, "\"(?<code>E_[A-Z0-9_]+)\""))
+                sourceDiagnosticCodes.Add(match.Groups["code"].Value);
+        }
+        AssertTrue(sourceDiagnosticCodes.IsSupersetOf(emittedCodes),
+            "A diagnostic emitted by a compiler witness has no quoted implementation literal.");
+
+        var implementedDocumentationCodes = documentedDiagnosticStatuses
+            .Where(entry => entry.Value.StartsWith("Implemented", StringComparison.OrdinalIgnoreCase))
+            .Select(entry => entry.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        var undocumentedCodes = sourceDiagnosticCodes.Except(implementedDocumentationCodes, StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal).ToArray();
+        var unsupportedImplementedRows = implementedDocumentationCodes.Except(sourceDiagnosticCodes, StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal).ToArray();
+        AssertTrue(undocumentedCodes.Length == 0 && unsupportedImplementedRows.Length == 0,
+            "docs/diagnostics.md must mark exactly the quoted compiler E_* literals as Implemented. "
+            + $"Missing implemented rows: [{string.Join(", ", undocumentedCodes)}]; "
+            + $"implemented rows without a source literal: [{string.Join(", ", unsupportedImplementedRows)}].");
+
+        var grammar = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "grammar.md"));
+        var formalGrammar = ExtractFencedBlock(grammar, "ebnf");
+        var declarationProduction = ExtractEbnfProduction(formalGrammar, "declaration");
+        AssertTrue(Regex.IsMatch(declarationProduction, @"\bcommand_decl\b"),
+            "docs/grammar.md root EBNF declaration production must include command_decl.");
+        var statementProduction = ExtractEbnfProduction(formalGrammar, "statement");
+        AssertTrue(Regex.IsMatch(statementProduction, @"\bwith_transaction_statement\b"),
+            "docs/grammar.md root EBNF statement production must include with_transaction_statement.");
+
+        var cliGrammar = ExtractMarkdownSection(grammar, "## Typed CLI command declarations (PR1)");
+        foreach (var production in new[] { "command_declaration ::=", "command_item ::=", "command_type ::= " })
+            AssertTrue(cliGrammar.Contains(production, StringComparison.Ordinal),
+                $"docs/grammar.md must document the typed command production '{production}'.");
+
+        var routeSection = ExtractMarkdownSection(grammar, "## Checked route declarations");
+        var hasTransactionParagraph = routeSection.Split(["\r\n\r\n", "\n\n"], StringSplitOptions.RemoveEmptyEntries)
+            .Any(paragraph => paragraph.Contains("with db.begin() as tx", StringComparison.Ordinal)
+                && paragraph.Contains("E_RESOURCE_ESCAPE", StringComparison.Ordinal)
+                && paragraph.Contains("E_DB_TRANSACTION_STATEMENT", StringComparison.Ordinal));
+        AssertTrue(hasTransactionParagraph,
+            "docs/grammar.md must describe the scoped `with db.begin() as tx` form and its current rejection codes.");
+
+        var usage = await harness.InvokeCompilerCommandAsync();
+        AssertEqual(2, usage.ExitCode, Describe(usage));
+        var usageLine = usage.StandardError.TrimEnd('\r', '\n');
+        const string usagePrefix = "Usage: lang ";
+        AssertTrue(usageLine.StartsWith(usagePrefix, StringComparison.Ordinal)
+            && !usageLine.Contains('\n') && !usageLine.Contains('\r'), Describe(usage));
+        var currentForms = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "check FILE_OR_PACKAGE [--json]",
+            "build FILE_OR_PACKAGE [--aot --rid RID]",
+            "run FILE_OR_PACKAGE [-- APP_ARGS]",
+            "lock PACKAGE_DIRECTORY",
+            "inspect effects PACKAGE_DIRECTORY SYMBOL --json",
+            "test [FILE_OR_PACKAGE]"
+        };
+        var reportedForms = usageLine[usagePrefix.Length..].Split(" | lang ", StringSplitOptions.None);
+        AssertTrue(reportedForms.Length == currentForms.Count && currentForms.SetEquals(reportedForms),
+            "The compiler usage command forms drifted from the expected surface. "
+            + $"Expected [{string.Join(" | ", currentForms.Order(StringComparer.Ordinal))}], "
+            + $"received [{string.Join(" | ", reportedForms)}].");
+
+        static string CommandName(string form) => form.StartsWith("inspect effects ", StringComparison.Ordinal)
+            ? "inspect effects"
+            : form.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+
+        var currentCommandNames = currentForms.Select(CommandName).ToHashSet(StringComparer.Ordinal);
+
+        var readme = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "README.md"));
+        foreach (var command in currentCommandNames)
+            AssertTrue(readme.Contains("lang " + command, StringComparison.Ordinal),
+                $"README.md must document the current '{command}' command form.");
+        foreach (var command in currentCommandNames)
+            AssertTrue(grammar.Contains("lang " + command, StringComparison.Ordinal),
+                $"docs/grammar.md must document the current '{command}' command form.");
+
+        var packageCommandBlock = ExtractFencedBlockAfter(grammar,
+            "Package commands use a package directory rather than a source-file path:", "text");
+        var packageCommands = packageCommandBlock.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("lang ", StringComparison.Ordinal))
+            .Select(line => CommandName(line["lang ".Length..]))
+            .ToHashSet(StringComparer.Ordinal);
+        AssertTrue(currentCommandNames.SetEquals(packageCommands),
+            "docs/grammar.md package command list must cover exactly the compiler's current commands. "
+            + $"Expected [{string.Join(", ", currentCommandNames.Order(StringComparer.Ordinal))}], "
+            + $"received [{string.Join(", ", packageCommands.Order(StringComparer.Ordinal))}].");
+        AssertTrue(packageCommandBlock.Contains("lang inspect effects PACKAGE_DIRECTORY SYMBOL --json", StringComparison.Ordinal),
+            "docs/grammar.md package command list must show the inspect effects form.");
+
+        foreach (var unsupportedCommand in new[] { "fmt", "new", "add", "audit" })
+        {
+            var unsupported = await harness.InvokeCompilerCommandAsync(unsupportedCommand);
+            AssertEqual(2, unsupported.ExitCode, Describe(unsupported));
+            AssertEqual(usage.StandardError, unsupported.StandardError, Describe(unsupported));
+            AssertEqual(string.Empty, unsupported.StandardOutput, Describe(unsupported));
+        }
+
+        var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
+        AssertTrue(Regex.IsMatch(roadmap, @"\b42\s+active\b", RegexOptions.IgnoreCase)
+            && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
+            "docs/roadmap.md must state that all 42 fixtures are active and none are pending.");
+    }
+
+    private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)
+    {
+        var lines = markdown.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var headerIndex = Array.FindIndex(lines, line => line.TrimStart().StartsWith("| Code |", StringComparison.Ordinal));
+        AssertTrue(headerIndex >= 0, "docs/diagnostics.md is missing its code/status table.");
+
+        var statuses = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var index = headerIndex + 1; index < lines.Length && lines[index].TrimStart().StartsWith('|'); index++)
+        {
+            var cells = lines[index].Split('|').Select(cell => cell.Trim()).ToArray();
+            if (cells.Length < 4 || !cells[1].StartsWith("E_", StringComparison.Ordinal))
+                continue;
+            AssertTrue(statuses.TryAdd(cells[1], cells[^2]),
+                $"docs/diagnostics.md contains duplicate table rows for {cells[1]}.");
+        }
+        return statuses;
+    }
+
+    private static string ExtractFencedBlock(string markdown, string language)
+    {
+        var match = Regex.Match(markdown,
+            $@"(?ms)^```{Regex.Escape(language)}\r?\n(?<body>.*?)^```\s*$");
+        AssertTrue(match.Success, $"Markdown fenced block not found: {language}");
+        return match.Groups["body"].Value;
+    }
+
+    private static string ExtractFencedBlockAfter(string markdown, string anchor, string language)
+    {
+        var anchorIndex = markdown.IndexOf(anchor, StringComparison.Ordinal);
+        AssertTrue(anchorIndex >= 0, $"Markdown anchor not found: {anchor}");
+        var opening = markdown.IndexOf("```" + language, anchorIndex, StringComparison.Ordinal);
+        AssertTrue(opening >= 0, $"Markdown {language} fenced block not found after: {anchor}");
+        var contentStart = markdown.IndexOf('\n', opening + 3 + language.Length);
+        AssertTrue(contentStart >= 0, $"Markdown fenced block has no body after: {anchor}");
+        var closing = markdown.IndexOf("```", contentStart + 1, StringComparison.Ordinal);
+        AssertTrue(closing >= 0, $"Markdown fenced block is not closed after: {anchor}");
+        return markdown[(contentStart + 1)..closing].TrimEnd('\r');
+    }
+
+    private static string ExtractEbnfProduction(string ebnf, string name)
+    {
+        var lines = ebnf.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var start = Array.FindIndex(lines, line => Regex.IsMatch(line,
+            $@"^\s*{Regex.Escape(name)}\s*="));
+        AssertTrue(start >= 0, $"Root EBNF production not found: {name}");
+        var end = start + 1;
+        for (; end < lines.Length; end++)
+        {
+            if (Regex.IsMatch(lines[end], @"^\s*[A-Za-z_][A-Za-z0-9_]*\s*="))
+                break;
+        }
+        return string.Join(Environment.NewLine, lines[start..end]);
+    }
+
+    private static string ExtractMarkdownSection(string markdown, string heading)
+    {
+        var start = markdown.IndexOf(heading, StringComparison.Ordinal);
+        AssertTrue(start >= 0, $"Markdown section not found: {heading}");
+        var nextHeading = markdown.IndexOf("\n## ", start + heading.Length, StringComparison.Ordinal);
+        return nextHeading < 0 ? markdown[start..] : markdown[start..nextHeading];
     }
 
     private static async Task TestStaticRouteDeclarations(Harness harness)
