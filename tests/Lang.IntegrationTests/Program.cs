@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -78,9 +79,11 @@ internal static class IntegrationTests
             ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
             ("inspect api exports a deterministic source-facing package graph", TestInspectApi),
             ("inspect api projects checked web routes and database capabilities", TestInspectApiWebRoutes),
+            ("audit reports a portable package graph and structured failures", TestAuditPackage),
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
+            ("managed build receipts bind checked inputs and artifact bytes", TestStandaloneBuildReceipt),
             ("CLI capability grants are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
@@ -2213,6 +2216,296 @@ internal static class IntegrationTests
         AssertApiPortable(result.StandardOutput, api, harness.TemporaryRoot);
     }
 
+    private static async Task TestAuditPackage(Harness harness)
+    {
+        const string rootSource = """
+            module app::main;
+            struct Parameters { id: i32 }
+            struct Row { id: i32 }
+            pub union Reply { Ready }
+
+            pub fn root_public() -> i32 effects {} { return direct::service::through(); }
+            fn root_private() -> i32 effects {} { return self::app::main::root_public(); }
+
+            fn load(db: DbRead) -> Result<Option<self::app::main::Row>, DbError> effects { db.read } {
+                let loaded: Result<Option<self::app::main::Row>, DbError> = db.query_one(
+                    "SELECT id FROM sample WHERE id = $id",
+                    self::app::main::Parameters { id: 1 }
+                );
+                return loaded;
+            }
+
+            fn handler(db: DbRead) -> self::app::main::Reply effects { db.read } {
+                let loaded: Result<Option<self::app::main::Row>, DbError> = self::app::main::load(db);
+                return self::app::main::Reply.Ready;
+            }
+
+            route GET "/" { handler: self::app::main::handler; response Ready: 200; }
+            """;
+        const string directSource = """
+            module service;
+            pub fn through() -> i32 effects {} { return foundation::service::value(); }
+            fn direct_private() -> i32 effects {} { return 2; }
+            """;
+        const string foundationSource = """
+            module service;
+            pub fn value() -> i32 effects {} { return 42; }
+            fn foundation_private() -> i32 effects {} { return 1; }
+            """;
+        const string schema = "CREATE TABLE sample (id INTEGER PRIMARY KEY);\n";
+
+        Dictionary<string, PackageFixture> MakeGraph(string lineEnding, string schemaText)
+        {
+            static string WithLineEnding(string text, string ending) =>
+                text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", ending, StringComparison.Ordinal);
+
+            var rootManifest = "name = \"audit-root\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/audit.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n"
+                + "\n[dependencies]\nzeta = \"../direct\"\ndirect = \"../direct\"\n";
+            var directManifest = LibraryPackageManifest("audit-direct") + "\n[dependencies]\nfoundation = \"../foundation\"\n";
+            return new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(WithLineEnding(rootManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = WithLineEnding(rootSource, lineEnding),
+                    ["db/schema.sql"] = WithLineEnding(schemaText, lineEnding)
+                }),
+                ["direct"] = new PackageFixture(WithLineEnding(directManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/service.lang"] = WithLineEnding(directSource, lineEnding)
+                }),
+                ["foundation"] = new PackageFixture(WithLineEnding(LibraryPackageManifest("audit-foundation"), lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/service.lang"] = WithLineEnding(foundationSource, lineEnding)
+                })
+            };
+        }
+
+        var packageRoot = await harness.WritePackageGraphAsync("audit-package-lf", MakeGraph("\n", schema));
+        var badArguments = await harness.InvokeCompilerCommandAsync("audit", packageRoot);
+        AssertEqual(2, badArguments.ExitCode, Describe(badArguments));
+        AssertEqual(string.Empty, badArguments.StandardOutput, Describe(badArguments));
+        AssertTrue(badArguments.StandardError.Contains("audit PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
+            $"Malformed audit arguments should print the audit command form. {Describe(badArguments)}");
+
+        var missingLock = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertAuditDiagnostic(missingLock, "E_LOCK", "A missing dependency lock should be returned as JSON diagnostics.");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("audit-package-lock", packageRoot, "lock"));
+
+        var first = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, first.ExitCode, Describe(first));
+        AssertEqual(string.Empty, first.StandardError, Describe(first));
+        using var document = JsonDocument.Parse(first.StandardOutput);
+        var report = document.RootElement;
+        AssertAuditPropertyOrder(report);
+        AssertEqual(1, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 1.");
+        var packages = report.GetProperty("packages").EnumerateArray().ToArray();
+        AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
+        AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
+        AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "direct"), "audit-direct", "../direct");
+        AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "transitive"), "audit-foundation", "../foundation");
+
+        var rootPackage = packages.Single(package => package.GetProperty("role").GetString() == "root");
+        var aliases = rootPackage.GetProperty("dependencies").EnumerateArray().ToArray();
+        AssertEqual("direct,zeta", string.Join(",", aliases.Select(item => item.GetProperty("alias").GetString())),
+            "Aliases for a shared direct dependency must be retained and sorted deterministically.");
+        AssertTrue(aliases.All(item => item.GetProperty("package").GetProperty("path").GetString() == "../direct"),
+            "Duplicate aliases should resolve to the same package identity.");
+        var schemaInput = rootPackage.GetProperty("inputs").EnumerateArray()
+            .Single(input => input.GetProperty("kind").GetString() == "sqlite_schema");
+        AssertEqual("db/schema.sql", schemaInput.GetProperty("path").GetString(),
+            "Configured SQLite schema should be included as a checked package input.");
+
+        AssertJsonStringArray(report.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
+        var functions = report.GetProperty("compiler").GetProperty("functions").EnumerateArray().ToArray();
+        var functionFacts = functions.Select(function =>
+                $"{function.GetProperty("package").GetProperty("name").GetString()}::{function.GetProperty("name").GetString()}:{function.GetProperty("visibility").GetString()}")
+            .ToArray();
+        var expectedFunctionFacts = new[]
+        {
+            "audit-root::handler:private", "audit-root::load:private", "audit-root::root_private:private", "audit-root::root_public:public",
+            "audit-direct::direct_private:private", "audit-direct::through:public",
+            "audit-foundation::foundation_private:private", "audit-foundation::value:public"
+        };
+        AssertTrue(expectedFunctionFacts.SequenceEqual(functionFacts, StringComparer.Ordinal),
+            $"Compiler facts should include public and private functions from all packages in deterministic order. Got [{string.Join(", ", functionFacts)}].");
+        var rootPublic = functions.Single(function => function.GetProperty("name").GetString() == "root_public");
+        AssertEqual("through", rootPublic.GetProperty("direct_calls")[0].GetProperty("name").GetString(),
+            "Compiler facts should retain direct cross-package calls.");
+        var rootHandler = functions.Single(function => function.GetProperty("name").GetString() == "handler");
+        AssertJsonStringArray(rootHandler.GetProperty("required_capabilities"), ["db.read"]);
+
+        var claims = report.GetProperty("trusted_claims").EnumerateArray().ToArray();
+        var queryClaim = claims.Single(claim => claim.GetProperty("operation").GetString() == "DbRead.query_one");
+        AssertEqual("trusted_adapter", queryClaim.GetProperty("source").GetString(), "Adapter claims should remain distinct from compiler facts.");
+        AssertEqual("claim_only", queryClaim.GetProperty("assurance").GetString(), "Adapter claims should preserve their assurance label.");
+        AssertJsonStringArray(queryClaim.GetProperty("effects"), ["db.read"]);
+        AssertEqual("handler", queryClaim.GetProperty("reachable_from")[0].GetProperty("name").GetString(),
+            "The route handler should be recorded as reaching its database adapter.");
+        var hostClaim = claims.Single(claim => claim.GetProperty("operation").GetString() == "web.schema_init");
+        AssertEqual("trusted_host", hostClaim.GetProperty("source").GetString(), "Host claims should remain distinct from adapter claims.");
+        AssertJsonStringArray(hostClaim.GetProperty("effects"), ["db.write"]);
+        AssertEqual(0, hostClaim.GetProperty("reachable_from").GetArrayLength(),
+            "Host claims without a checked caller should have an empty reachable_from list.");
+
+        var foreign = report.GetProperty("foreign_dependencies").EnumerateArray().Single();
+        AssertEqual("Microsoft.Data.Sqlite", foreign.GetProperty("name").GetString(),
+            "Configured SQLite should appear as a generated foreign build dependency.");
+        AssertEqual("generated_build", foreign.GetProperty("reason").GetString(),
+            "SQLite dependency provenance should be explicit.");
+        AssertAuditPortable(first.StandardOutput, packageRoot, harness.TemporaryRoot);
+
+        var repeated = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(first.StandardOutput, repeated.StandardOutput, "Repeated audit calls must produce byte-identical JSON.");
+
+        var relocatedRoot = await harness.WritePackageGraphAsync("audit-package-crlf", MakeGraph("\r\n", schema));
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("audit-package-relocated-lock", relocatedRoot, "lock"));
+        var relocated = await harness.InvokeCompilerCommandAsync("audit", relocatedRoot, "--json");
+        AssertEqual(0, relocated.ExitCode, Describe(relocated));
+        AssertEqual(first.StandardOutput, relocated.StandardOutput,
+            "Equivalent relocated CRLF and LF package graphs, including SQLite schema, must emit identical audit JSON.");
+
+        var runtimeDatabase = Path.Combine(packageRoot, "data", "audit.sqlite3");
+        Directory.CreateDirectory(Path.GetDirectoryName(runtimeDatabase)!);
+        await File.WriteAllBytesAsync(runtimeDatabase, [0, 1, 2, 3, 4]);
+        var withRuntimeDatabase = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(first.StandardOutput, withRuntimeDatabase.StandardOutput,
+            "Runtime SQLite database bytes must not change checked package inputs or the audit report.");
+
+        var schemaPath = Path.Combine(packageRoot, "db", "schema.sql");
+        await File.WriteAllTextAsync(schemaPath, "CREATE TABLE sample (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n");
+        var changedSchema = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, changedSchema.ExitCode, Describe(changedSchema));
+        using (var changedDocument = JsonDocument.Parse(changedSchema.StandardOutput))
+        {
+            var changedRoot = changedDocument.RootElement.GetProperty("packages").EnumerateArray()
+                .Single(package => package.GetProperty("role").GetString() == "root");
+            var changedInput = changedRoot.GetProperty("inputs").EnumerateArray()
+                .Single(input => input.GetProperty("kind").GetString() == "sqlite_schema");
+            AssertTrue(schemaInput.GetProperty("sha256").GetString() != changedInput.GetProperty("sha256").GetString(),
+                "A semantic SQLite schema edit must change its checked input hash.");
+            AssertTrue(rootPackage.GetProperty("content_sha256").GetString() != changedRoot.GetProperty("content_sha256").GetString(),
+                "A semantic SQLite schema edit must change the package content hash.");
+        }
+
+        var dependencySourcePath = Path.Combine(packageRoot, "..", "direct", "src", "service.lang");
+        var dependencySource = await File.ReadAllTextAsync(dependencySourcePath);
+        await File.WriteAllTextAsync(dependencySourcePath, dependencySource.Replace("return 2;", "return 3;", StringComparison.Ordinal));
+        var staleLock = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertAuditDiagnostic(staleLock, "E_LOCK", "A stale dependency lock should fail audit without a partial report.");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("audit-package-refresh-lock", packageRoot, "lock"));
+
+        var rootSourcePath = Path.Combine(packageRoot, "src", "app", "main.lang");
+        var invalidSource = (await File.ReadAllTextAsync(rootSourcePath))
+            .Replace("return direct::service::through();", "return true;", StringComparison.Ordinal);
+        AssertTrue(invalidSource != await File.ReadAllTextAsync(rootSourcePath), "The test must introduce a compiler error.");
+        await File.WriteAllTextAsync(rootSourcePath, invalidSource);
+        var compilerError = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertAuditDiagnostic(compilerError, "E_TYPE_MISMATCH", "Compiler errors should return JSON diagnostics without an audit report.");
+
+        static void AssertPackage(JsonElement package, string name, string path)
+        {
+            AssertEqual(name, package.GetProperty("identity").GetProperty("name").GetString(), "Unexpected audit package identity.");
+            AssertEqual(path, package.GetProperty("identity").GetProperty("path").GetString(), "Package paths should remain relative to the audit root.");
+            AssertTrue(package.GetProperty("content_sha256").GetString() is { Length: 64 }, "Package content hashes should be lowercase SHA-256 values.");
+        }
+    }
+
+    private static void AssertAuditDiagnostic(ProcessResult result, string code, string message)
+    {
+        AssertEqual(1, result.ExitCode, message + " " + Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        using var diagnostics = JsonDocument.Parse(result.StandardOutput);
+        AssertEqual(1, diagnostics.RootElement.GetProperty("schemaVersion").GetInt32(), "Audit failures should use diagnostics JSON schema version 1.");
+        AssertTrue(ParseDiagnosticSnapshots(result.StandardOutput).Any(diagnostic => diagnostic.Code == code),
+            $"Expected {code} in audit diagnostics. {result.StandardOutput}");
+        AssertTrue(!diagnostics.RootElement.TryGetProperty("schema_version", out _)
+            && !diagnostics.RootElement.TryGetProperty("compiler", out _)
+            && !diagnostics.RootElement.TryGetProperty("packages", out _),
+            "Audit failures must not emit a partial provenance report.");
+    }
+
+    private static void AssertAuditPropertyOrder(JsonElement root)
+    {
+        static void Order(JsonElement element, string expected) =>
+            AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
+                "Audit JSON property order is part of the deterministic report contract.");
+
+        Order(root, "schema_version,packages,compiler,manifest_grants,trusted_claims,foreign_dependencies");
+        foreach (var package in root.GetProperty("packages").EnumerateArray())
+        {
+            Order(package, "identity,role,content_sha256,dependencies,inputs");
+            Order(package.GetProperty("identity"), "name,version,path");
+            foreach (var dependency in package.GetProperty("dependencies").EnumerateArray())
+            {
+                Order(dependency, "alias,package");
+                Order(dependency.GetProperty("package"), "name,version,path");
+            }
+            foreach (var input in package.GetProperty("inputs").EnumerateArray())
+                Order(input, "kind,path,sha256");
+        }
+        Order(root.GetProperty("compiler"), "functions");
+        foreach (var function in root.GetProperty("compiler").GetProperty("functions").EnumerateArray())
+        {
+            Order(function, "package,module,name,visibility,declared_effects,inferred_effects,effect_paths,direct_calls,required_capabilities");
+            Order(function.GetProperty("package"), "name,version,path");
+            foreach (var path in function.GetProperty("effect_paths").EnumerateArray())
+            {
+                Order(path, "effect,steps");
+                foreach (var step in path.GetProperty("steps").EnumerateArray())
+                    Order(step, step.TryGetProperty("package", out _) ? "kind,package,module,name" : "kind,name");
+            }
+            foreach (var call in function.GetProperty("direct_calls").EnumerateArray())
+                Order(call, "package,module,name");
+        }
+        foreach (var claim in root.GetProperty("trusted_claims").EnumerateArray())
+        {
+            Order(claim, "operation,source,effects,assurance,reachable_from");
+            foreach (var reachable in claim.GetProperty("reachable_from").EnumerateArray())
+            {
+                Order(reachable, "package,module,name");
+                Order(reachable.GetProperty("package"), "name,version,path");
+            }
+        }
+        foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
+            Order(dependency, "name,version,ecosystem,reason");
+    }
+
+    private static void AssertAuditPortable(string json, string packageRoot, string temporaryRoot)
+    {
+        AssertTrue(!json.Contains(packageRoot, StringComparison.OrdinalIgnoreCase)
+            && !json.Contains(temporaryRoot, StringComparison.OrdinalIgnoreCase),
+            "Audit JSON must not leak absolute workspace paths.");
+        using var document = JsonDocument.Parse(json);
+        Visit(document.RootElement, "$");
+
+        static void Visit(JsonElement element, string path)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in element.EnumerateObject())
+                {
+                    AssertTrue(property.Name is not "id" and not "function_id" and not "package_id",
+                        $"Audit JSON should use stable symbolic identities instead of numeric identifiers at {path}.{property.Name}.");
+                    Visit(property.Value, $"{path}.{property.Name}");
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                var index = 0;
+                foreach (var item in element.EnumerateArray())
+                    Visit(item, $"{path}[{index++}]");
+            }
+            else if (element.ValueKind == JsonValueKind.String && path.EndsWith(".path", StringComparison.Ordinal))
+            {
+                var value = element.GetString() ?? string.Empty;
+                AssertTrue(!Path.IsPathFullyQualified(value) && !value.Contains('\\'),
+                    $"Audit paths must be portable relative paths; got <{value}>.");
+            }
+        }
+    }
+
     private static void AssertInspectApiDiagnostic(ProcessResult result, string code, string message)
     {
         AssertEqual(1, result.ExitCode, message + " " + Describe(result));
@@ -2658,6 +2951,61 @@ internal static class IntegrationTests
             $"run should reject the non-primitive parameterized main. {Describe(run)}");
     }
 
+    private static async Task TestStandaloneBuildReceipt(Harness harness)
+    {
+        const string source = "module harness::build_receipt; pub fn main() -> i32 effects {} { return 42; }\n";
+        var run = await harness.InvokeAsync("build-receipt-standalone-run", "run", source);
+        AssertRunOutput("42" + Environment.NewLine, run);
+        var sourcePath = harness.LastSourcePath;
+        var sourceDirectory = Path.GetDirectoryName(sourcePath)!;
+        AssertTrue(!Directory.Exists(Path.Combine(sourceDirectory, "out")),
+            "A standalone run must not create a durable output directory or receipt.");
+
+        var firstBuild = await harness.InvokeFileAsync("build-receipt-standalone-build", sourcePath, "build");
+        AssertEqual(0, firstBuild.ExitCode, Describe(firstBuild));
+        var firstArtifact = ParseBuiltArtifact(firstBuild, "Built executable: ");
+        var firstOutputDirectory = Path.GetDirectoryName(firstArtifact)!;
+        using var firstReceipt = await AssertBuildReceiptAsync(
+            firstOutputDirectory,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(firstOutputDirectory, firstArtifact).Replace(Path.DirectorySeparatorChar, '/')],
+            sourceDirectory);
+        AssertEqual(0, firstReceipt.RootElement.GetProperty("package_graph").GetArrayLength(),
+            "Standalone build receipts should identify an empty package graph.");
+        AssertEqual(1, firstReceipt.RootElement.GetProperty("inputs").GetArrayLength(),
+            "A standalone receipt should contain exactly one checked source input.");
+        AssertEqual("source", firstReceipt.RootElement.GetProperty("inputs")[0].GetProperty("path").GetString(),
+            "The standalone source should use the stable logical input name.");
+        AssertEqual(JsonValueKind.Null, firstReceipt.RootElement.GetProperty("inputs")[0].GetProperty("package").ValueKind,
+            "Standalone inputs should not invent a package identity.");
+        var firstInputHash = firstReceipt.RootElement.GetProperty("inputs")[0].GetProperty("sha256").GetString();
+        var firstAuditHash = firstReceipt.RootElement.GetProperty("audit_snapshot_sha256").GetString();
+
+        var receiptsBeforeRun = Directory.EnumerateFiles(Path.Combine(sourceDirectory, "out"), "build-receipt.json", SearchOption.AllDirectories).Count();
+        var runAfterBuild = await harness.InvokeFileAsync("build-receipt-standalone-run-after-build", sourcePath, "run");
+        AssertRunOutput("42" + Environment.NewLine, runAfterBuild);
+        var receiptsAfterRun = Directory.EnumerateFiles(Path.Combine(sourceDirectory, "out"), "build-receipt.json", SearchOption.AllDirectories).Count();
+        AssertEqual(receiptsBeforeRun, receiptsAfterRun, "A standalone run must not create a build receipt.");
+
+        await File.WriteAllTextAsync(sourcePath, source.Replace("return 42;", "return 43;", StringComparison.Ordinal));
+        var changedBuild = await harness.InvokeFileAsync("build-receipt-standalone-changed-build", sourcePath, "build");
+        AssertEqual(0, changedBuild.ExitCode, Describe(changedBuild));
+        var changedArtifact = ParseBuiltArtifact(changedBuild, "Built executable: ");
+        var changedOutputDirectory = Path.GetDirectoryName(changedArtifact)!;
+        using var changedReceipt = await AssertBuildReceiptAsync(
+            changedOutputDirectory,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(changedOutputDirectory, changedArtifact).Replace(Path.DirectorySeparatorChar, '/')],
+            sourceDirectory);
+        var changedRoot = changedReceipt.RootElement;
+        AssertTrue(firstInputHash != changedRoot.GetProperty("inputs")[0].GetProperty("sha256").GetString(),
+            "Changing standalone source content must change the checked input hash.");
+        AssertTrue(firstAuditHash != changedRoot.GetProperty("audit_snapshot_sha256").GetString(),
+            "Changing standalone source content must change the audit snapshot hash.");
+    }
+
     private static async Task TestPackageCliRoundTrip(Harness harness)
     {
         var packageRoot = await harness.WritePackageAsync(
@@ -2761,6 +3109,24 @@ internal static class IntegrationTests
             $"Expected the managed command executable at {artifact}. {Describe(firstBuild)}");
         var schemaPath = Path.Combine(Path.GetDirectoryName(artifact)!, "command-schema.json");
         AssertTrue(File.Exists(schemaPath), $"Expected command schema beside the executable: {schemaPath}");
+        using var firstReceipt = await AssertBuildReceiptAsync(
+            Path.GetDirectoryName(artifact)!,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(Path.GetDirectoryName(artifact)!, artifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+            packageRoot);
+        AssertEqual(1, firstReceipt.RootElement.GetProperty("package_graph").GetArrayLength(),
+            "A root-only package receipt should contain one root package identity.");
+        var cliClaims = firstReceipt.RootElement.GetProperty("trusted_components").EnumerateArray()
+            .Where(claim => claim.GetProperty("source").GetString() == "trusted_host")
+            .ToArray();
+        AssertTrue(new[] { "cli.argument_decode", "cli.output" }.All(operation => cliClaims.Any(claim =>
+                claim.GetProperty("operation").GetString() == operation
+                && claim.GetProperty("assurance").GetString() == "claim_only"
+                && claim.GetProperty("effects").GetArrayLength() == 0
+                && claim.GetProperty("reachable_from").GetArrayLength() == 1
+                && claim.GetProperty("reachable_from")[0].GetProperty("name").GetString() == "run")),
+            "Typed CLI receipts should distinguish argument decoding and output as claim-only host components reachable from the command handler.");
         var firstSchemaBytes = await File.ReadAllBytesAsync(schemaPath);
         AssertTrue(firstSchemaBytes.Length > 0 && firstSchemaBytes[^1] == (byte)'\n'
             && !firstSchemaBytes.Contains((byte)'\r'), "Command schema must be UTF-8 JSON with LF line endings and a final newline.");
@@ -2864,6 +3230,8 @@ internal static class IntegrationTests
         AssertEqual(string.Empty, escapedSubject.StandardOutput, Describe(escapedSubject));
         AssertEqual("CLI_UNKNOWN_COMMAND: \"unknown\\n\\tforged\"" + Environment.NewLine, escapedSubject.StandardError,
             "Control characters in CLI diagnostic subjects must be escaped on one physical stderr line.");
+        AssertEqual(2, Directory.EnumerateFiles(Path.Combine(packageRoot, "out"), "build-receipt.json", SearchOption.AllDirectories).Count(),
+            "Typed CLI run commands should not add build receipts after the two explicit builds.");
     }
 
     private static async Task TestCommandContextualIdentifiers(Harness harness)
@@ -5877,6 +6245,7 @@ internal static class IntegrationTests
             "build FILE_OR_PACKAGE [--aot --rid RID]",
             "run FILE_OR_PACKAGE [-- APP_ARGS]",
             "lock PACKAGE_DIRECTORY",
+            "audit PACKAGE_DIRECTORY --json",
             "inspect effects PACKAGE_DIRECTORY SYMBOL --json",
             "inspect api PACKAGE_DIRECTORY --json",
             "test [FILE_OR_PACKAGE]"
@@ -5891,6 +6260,8 @@ internal static class IntegrationTests
             ? "inspect effects"
             : form.StartsWith("inspect api ", StringComparison.Ordinal)
                 ? "inspect api"
+                : form.StartsWith("audit ", StringComparison.Ordinal)
+                    ? "audit"
             : form.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
 
         var currentCommandNames = currentForms.Select(CommandName).ToHashSet(StringComparer.Ordinal);
@@ -5918,8 +6289,10 @@ internal static class IntegrationTests
             "docs/grammar.md package command list must show the inspect effects form.");
         AssertTrue(packageCommandBlock.Contains("lang inspect api PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the inspect api form.");
+        AssertTrue(packageCommandBlock.Contains("lang audit PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
+            "docs/grammar.md package command list must show the audit form.");
 
-        foreach (var unsupportedCommand in new[] { "fmt", "new", "add", "audit" })
+        foreach (var unsupportedCommand in new[] { "fmt", "new", "add" })
         {
             var unsupported = await harness.InvokeCompilerCommandAsync(unsupportedCommand);
             AssertEqual(2, unsupported.ExitCode, Describe(unsupported));
@@ -6851,6 +7224,14 @@ internal static class IntegrationTests
 
         var schemaPath = Path.Combine(Path.GetDirectoryName(executablePath)!, "command-schema.json");
         AssertTrue(File.Exists(schemaPath), $"Expected command schema beside the NativeAOT executable: {schemaPath}");
+        using var receipt = await AssertBuildReceiptAsync(
+            Path.GetDirectoryName(executablePath)!,
+            "native_aot",
+            CurrentHostAotRid(),
+            [Path.GetRelativePath(Path.GetDirectoryName(executablePath)!, executablePath).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+            packageRoot);
+        AssertEqual(1, receipt.RootElement.GetProperty("package_graph").GetArrayLength(),
+            "A typed-command NativeAOT receipt should identify its root package.");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
             AssertEqual(2, schema.RootElement.GetProperty("schema_version").GetInt32(),
@@ -7126,6 +7507,199 @@ internal static class IntegrationTests
         var actual = element.EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray();
         AssertTrue(expected.SequenceEqual(actual, StringComparer.Ordinal),
             $"Expected JSON string array [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
+    }
+
+    private static string ParseBuiltArtifact(ProcessResult result, string prefix)
+    {
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(result));
+        var artifact = result.StandardOutput[prefix.Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact) && File.Exists(artifact),
+            $"Expected a fully qualified built artifact path. {Describe(result)}");
+        return artifact;
+    }
+
+    private static async Task<JsonDocument> AssertBuildReceiptAsync(
+        string outputDirectory,
+        string expectedMode,
+        string? expectedRuntimeIdentifier,
+        string[] requiredArtifactPaths,
+        params string[] forbiddenAbsolutePaths)
+    {
+        var receiptPath = Path.Combine(outputDirectory, "build-receipt.json");
+        AssertTrue(File.Exists(receiptPath), $"Expected managed build receipt at {receiptPath}.");
+        var bytes = await File.ReadAllBytesAsync(receiptPath);
+        AssertTrue(bytes.Length > 0 && bytes[^1] == (byte)'\n' && !bytes.Contains((byte)'\r'),
+            "Build receipts must be UTF-8 JSON with LF line endings and a final newline.");
+        var json = new UTF8Encoding(false, true).GetString(bytes);
+        foreach (var forbiddenPath in forbiddenAbsolutePaths)
+            AssertTrue(!json.Contains(forbiddenPath, StringComparison.OrdinalIgnoreCase),
+                $"Build receipts must not leak an absolute workspace path: {forbiddenPath}");
+        AssertTrue(!Regex.IsMatch(json, @"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])")
+            && !Regex.IsMatch(json, @"(?i)(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])"),
+            "Build receipts must not contain generated GUIDs.");
+
+        var document = JsonDocument.Parse(bytes);
+        var root = document.RootElement;
+        AssertJsonPropertyOrder(root,
+            "schema_version,build,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,audit_snapshot_sha256,artifacts");
+        AssertEqual(1, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 1.");
+        var build = root.GetProperty("build");
+        AssertJsonPropertyOrder(build, "mode,framework,runtime_identifier");
+        AssertEqual(expectedMode, build.GetProperty("mode").GetString(), "Unexpected build receipt mode.");
+        AssertEqual("net10.0", build.GetProperty("framework").GetString(), "Unexpected receipt target framework.");
+        if (expectedRuntimeIdentifier is null)
+            AssertEqual(JsonValueKind.Null, build.GetProperty("runtime_identifier").ValueKind,
+                "Managed builds should have a null runtime identifier.");
+        else
+            AssertEqual(expectedRuntimeIdentifier, build.GetProperty("runtime_identifier").GetString(),
+                "NativeAOT receipts should identify the selected runtime.");
+
+        foreach (var package in root.GetProperty("package_graph").EnumerateArray())
+        {
+            AssertJsonPropertyOrder(package, "identity,role,content_sha256,dependencies");
+            AssertJsonPropertyOrder(package.GetProperty("identity"), "name,version,path");
+            AssertTrue(IsLowerSha256(package.GetProperty("content_sha256").GetString()),
+                "Package graph content hashes must be lowercase SHA-256 values.");
+            foreach (var dependency in package.GetProperty("dependencies").EnumerateArray())
+            {
+                AssertJsonPropertyOrder(dependency, "alias,package");
+                AssertJsonPropertyOrder(dependency.GetProperty("package"), "name,version,path");
+            }
+        }
+
+        var toolchain = root.GetProperty("toolchain");
+        AssertJsonPropertyOrder(toolchain, "compiler_version,compiler_sha256,dotnet_sdk_version,foreign_dependencies");
+        AssertTrue(!string.IsNullOrWhiteSpace(toolchain.GetProperty("compiler_version").GetString()),
+            "Build receipts should identify the compiler version.");
+        AssertTrue(IsLowerSha256(toolchain.GetProperty("compiler_sha256").GetString()),
+            "Build receipts should identify the compiler bytes with SHA-256.");
+        AssertTrue(!string.IsNullOrWhiteSpace(toolchain.GetProperty("dotnet_sdk_version").GetString()),
+            "Build receipts should identify the .NET SDK version.");
+
+        string? previousInputKey = null;
+        foreach (var input in root.GetProperty("inputs").EnumerateArray())
+        {
+            AssertJsonPropertyOrder(input, "package,kind,path,sha256");
+            var packagePath = ".";
+            if (input.GetProperty("package").ValueKind != JsonValueKind.Null)
+            {
+                var identity = input.GetProperty("package");
+                AssertJsonPropertyOrder(identity, "name,version,path");
+                packagePath = identity.GetProperty("path").GetString() ?? string.Empty;
+            }
+            AssertTrue(IsPortableRelativePath(input.GetProperty("path").GetString(), allowParentSegments: false),
+                "Receipt input paths must be relative package paths.");
+            AssertTrue(IsLowerSha256(input.GetProperty("sha256").GetString()),
+                "Receipt input hashes must be lowercase SHA-256 values.");
+            var inputKey = packagePath + "\0" + input.GetProperty("path").GetString();
+            AssertTrue(previousInputKey is null || StringComparer.Ordinal.Compare(previousInputKey, inputKey) <= 0,
+                "Receipt inputs should be sorted by package and relative path.");
+            previousInputKey = inputKey;
+        }
+
+        var grants = root.GetProperty("manifest_grants").EnumerateArray()
+            .Select(grant => grant.GetString() ?? string.Empty).ToArray();
+        AssertTrue(grants.SequenceEqual(grants.Order(StringComparer.Ordinal), StringComparer.Ordinal),
+            "Receipt manifest grants should be sorted.");
+        foreach (var claim in root.GetProperty("trusted_components").EnumerateArray())
+        {
+            AssertJsonPropertyOrder(claim, "operation,source,effects,assurance,reachable_from");
+            foreach (var reachable in claim.GetProperty("reachable_from").EnumerateArray())
+            {
+                AssertJsonPropertyOrder(reachable, "package,module,name");
+                AssertJsonPropertyOrder(reachable.GetProperty("package"), "name,version,path");
+            }
+        }
+        AssertTrue(root.GetProperty("foreign_dependencies").GetRawText() == toolchain.GetProperty("foreign_dependencies").GetRawText(),
+            "Top-level and toolchain foreign dependency records should match.");
+        foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
+            AssertJsonPropertyOrder(dependency, "name,version,ecosystem,reason");
+        AssertTrue(IsLowerSha256(root.GetProperty("audit_snapshot_sha256").GetString()),
+            "Build receipts should bind the checked audit snapshot with SHA-256.");
+
+        var artifacts = root.GetProperty("artifacts").EnumerateArray().ToArray();
+        var artifactPaths = artifacts.Select(artifact => artifact.GetProperty("path").GetString() ?? string.Empty).ToArray();
+        AssertTrue(artifactPaths.SequenceEqual(artifactPaths.Order(StringComparer.Ordinal), StringComparer.Ordinal),
+            "Receipt artifact paths must be sorted.");
+        AssertEqual(artifactPaths.Length, artifactPaths.Distinct(StringComparer.Ordinal).Count(),
+            "Receipt artifact paths must be unique.");
+        AssertTrue(!artifactPaths.Contains("build-receipt.json", StringComparer.Ordinal),
+            "The receipt must not hash itself.");
+        AssertTrue(requiredArtifactPaths.All(path => artifactPaths.Contains(path, StringComparer.Ordinal)),
+            $"Receipt artifacts must include [{string.Join(", ", requiredArtifactPaths)}].");
+        foreach (var artifact in artifacts)
+        {
+            AssertJsonPropertyOrder(artifact, "path,sha256");
+            var relativePath = artifact.GetProperty("path").GetString() ?? string.Empty;
+            AssertTrue(IsPortableRelativePath(relativePath, allowParentSegments: false),
+                $"Artifact paths must be normalized relative paths: {relativePath}.");
+            AssertTrue(IsLowerSha256(artifact.GetProperty("sha256").GetString()),
+                $"Artifact {relativePath} must have a lowercase SHA-256 hash.");
+            var filePath = Path.Combine(outputDirectory, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            AssertTrue(File.Exists(filePath), $"Receipt artifact is missing: {filePath}.");
+            var actualHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(filePath))).ToLowerInvariant();
+            AssertEqual(artifact.GetProperty("sha256").GetString(), actualHash,
+                $"Receipt artifact hash does not match {relativePath}.");
+        }
+
+        var actualArtifactPaths = Directory.EnumerateFiles(outputDirectory, "*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFullPath(path), Path.GetFullPath(receiptPath),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            .Select(path => Path.GetRelativePath(outputDirectory, path)
+                .Replace(Path.DirectorySeparatorChar, '/')
+                .Replace(Path.AltDirectorySeparatorChar, '/'))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        AssertTrue(artifactPaths.SequenceEqual(actualArtifactPaths, StringComparer.Ordinal),
+            "Receipt artifact entries should cover every build output file except build-receipt.json.");
+
+        Visit(root, "$");
+        return document;
+
+        static bool IsLowerSha256(string? value) =>
+            value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+        static bool IsPortableRelativePath(string? value, bool allowParentSegments)
+        {
+            if (string.IsNullOrEmpty(value) || Path.IsPathFullyQualified(value) || value.Contains('\\'))
+                return false;
+            return allowParentSegments || !value.Split('/').Any(segment => segment is ".." or "");
+        }
+
+        static void Visit(JsonElement element, string path)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in element.EnumerateObject())
+                {
+                    var name = property.Name;
+                    AssertTrue(name is not "id" and not "function_id" and not "package_id",
+                        $"Receipt should use symbolic identities instead of numeric IDs at {path}.{name}.");
+                    AssertTrue(!Regex.IsMatch(name, @"(?i)(timestamp|built_at|created_at)"),
+                        $"Receipt should not include timestamps at {path}.{name}.");
+                    Visit(property.Value, $"{path}.{name}");
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                var index = 0;
+                foreach (var item in element.EnumerateArray())
+                    Visit(item, $"{path}[{index++}]");
+            }
+            else if (element.ValueKind == JsonValueKind.String)
+            {
+                var value = element.GetString() ?? string.Empty;
+                AssertTrue(!Path.IsPathFullyQualified(value), $"Receipt contains an absolute path at {path}: {value}");
+                if (path.EndsWith(".path", StringComparison.Ordinal))
+                    AssertTrue(IsPortableRelativePath(value, allowParentSegments: true), $"Receipt path is not portable at {path}: {value}");
+            }
+        }
+    }
+
+    private static void AssertJsonPropertyOrder(JsonElement element, string expected)
+    {
+        AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
+            "JSON property order should match the serialized contract.");
     }
 
     private sealed class Harness(string repositoryRoot, string compilerDll, string dotnet, string temporaryRoot)
