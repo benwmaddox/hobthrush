@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -253,6 +254,13 @@ internal static class Driver
 
         var graph = resolved.Graph!;
         var package = graph.Root.Package;
+        if (aotRid is not null && package.Manifest.Kind == "web")
+        {
+            return ReportBuildTargetError(
+                "NativeAOT publishing is not supported for web packages",
+                package.ManifestFile);
+        }
+
         if (aotRid is not null && package.Manifest.IsLibrary)
         {
             return ReportBuildTargetError(
@@ -333,7 +341,8 @@ internal static class Driver
             graph.Root.Id,
             entryModuleExists ? entryModule : null,
             package.Manifest.Capabilities,
-            rootIsCliPackage: !package.Manifest.IsLibrary);
+            rootIsCliPackage: package.Manifest.Kind == "cli",
+            rootIsWebPackage: package.Manifest.Kind == "web");
         if (checkedPackage.Diagnostics.Count == 0 && entryModuleExists)
             return checkedPackage;
 
@@ -565,7 +574,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang test [FILE_OR_PACKAGE]");
 
     private static int ReportBuildTargetError(string message, string file)
     {
@@ -685,6 +694,7 @@ internal static class Driver
         bool hasApplicationSeparator = false,
         string[]? applicationArguments = null)
     {
+        var isWebPackage = package?.Manifest.Kind == "web";
         var entry = package is null
             ? program.Functions.FirstOrDefault(IsRunnableEntryPoint)
             : program.EntryFunctionId is { } entryFunctionId
@@ -693,6 +703,26 @@ internal static class Driver
         var entryCommand = program.EntryCommandId is int entryCommandId
             ? program.Commands.FirstOrDefault(command => command.Id == entryCommandId)
             : null;
+        if (isWebPackage && program.Routes.Count == 0)
+        {
+            PrintDiagnostics(
+            [
+                AtStart(
+                    "E_ENTRYPOINT",
+                    "Web package entry module must declare at least one route",
+                    sourceFile)
+            ],
+            json: false);
+            return 1;
+        }
+
+        if (aotRid is not null && isWebPackage)
+        {
+            return ReportBuildTargetError(
+                "NativeAOT publishing is not supported for web packages",
+                sourceFile);
+        }
+
         if (aotRid is not null && entry is null && entryCommand is null)
         {
             return ReportBuildTargetError(
@@ -700,13 +730,23 @@ internal static class Driver
                 sourceFile);
         }
 
-        if (command == "run" && hasApplicationSeparator && entryCommand is null)
+        if (command == "run" && hasApplicationSeparator && isWebPackage)
+        {
+            if (applicationArguments is not { Length: 2 } ||
+                applicationArguments[0] != "--urls" ||
+                string.IsNullOrWhiteSpace(applicationArguments[1]))
+            {
+                PrintUsage();
+                return 2;
+            }
+        }
+        else if (command == "run" && hasApplicationSeparator && entryCommand is null)
         {
             PrintUsage();
             return 2;
         }
 
-        if (command == "run" && entry is null && entryCommand is null)
+        if (command == "run" && entry is null && entryCommand is null && !isWebPackage)
         {
             PrintDiagnostics(
             [
@@ -719,7 +759,7 @@ internal static class Driver
             return 1;
         }
 
-        var executable = entry is not null || entryCommand is not null;
+        var executable = isWebPackage || entry is not null || entryCommand is not null;
         var assemblyName = package?.Manifest.Name ?? "Generated";
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -741,7 +781,9 @@ internal static class Driver
                 "Release",
                 "net10.0",
                 assemblyName + ".dll");
-            File.WriteAllText(projectFile, ProjectFileContents(executable, aotRid, assemblyName));
+            File.WriteAllText(
+                projectFile,
+                ProjectFileContents(executable, aotRid, assemblyName, webPackage: isWebPackage));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
                 Emitter.Emit(program, executable));
@@ -877,6 +919,13 @@ internal static class Driver
                             Emitter.EmitCommandSchema(program),
                             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                     }
+                    if (isWebPackage)
+                    {
+                        File.WriteAllText(
+                            Path.Combine(Path.GetDirectoryName(stagedAssemblyFile)!, "openapi.json"),
+                            Emitter.EmitOpenApi(program),
+                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    }
                     CopyBuildArtifacts(
                         Path.GetDirectoryName(stagedAssemblyFile)!,
                         outputDirectory);
@@ -898,9 +947,19 @@ internal static class Driver
                 return 0;
             }
 
+            var runArguments = BuildApplicationArguments(stagedAssemblyFile, applicationArguments);
+            if (isWebPackage)
+            {
+                return await ExecWebHostAsync(
+                    dotnet,
+                    runArguments,
+                    package?.Root ?? Directory.GetCurrentDirectory(),
+                    sourceFile) ?? 1;
+            }
+
             var run = await ExecAsync(
                 dotnet,
-                BuildApplicationArguments(stagedAssemblyFile, applicationArguments),
+                runArguments,
                 package?.Root ?? Directory.GetCurrentDirectory(),
                 sourceFile,
                 forwardOutput: true);
@@ -1000,11 +1059,15 @@ internal static class Driver
         }
     }
 
-    private static string ProjectFileContents(bool executable, string? aotRid, string assemblyName = "Generated")
+    private static string ProjectFileContents(
+        bool executable,
+        string? aotRid,
+        string assemblyName = "Generated",
+        bool webPackage = false)
     {
         var outputType = executable ? "Exe" : "Library";
         return
-            "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
+            $"<Project Sdk=\"{(webPackage ? "Microsoft.NET.Sdk.Web" : "Microsoft.NET.Sdk")}\">\n" +
             "  <PropertyGroup>\n" +
             $"    <OutputType>{outputType}</OutputType>\n" +
             $"    <AssemblyName>{assemblyName}</AssemblyName>\n" +
@@ -1122,6 +1185,182 @@ internal static class Driver
             return null;
         }
     }
+
+    private static async Task<int?> ExecWebHostAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        string workingDirectory,
+        string sourceFile)
+    {
+        Process? process = null;
+        ConsoleCancelEventHandler? cancelHandler = null;
+        PosixSignalRegistration? sigtermHandler = null;
+        var shutdownRequested = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = false;
+
+        try
+        {
+            process = new Process();
+            process.StartInfo.FileName = executable;
+            process.StartInfo.WorkingDirectory = workingDirectory;
+            foreach (var argument in arguments)
+                process.StartInfo.ArgumentList.Add(argument);
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.RedirectStandardError = true;
+            process.StartInfo.RedirectStandardInput = true;
+            process.StartInfo.StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            process.StartInfo.StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            process.StartInfo.Environment["LANG_PARENT_PROCESS_ID"] =
+                Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            cancelHandler = (_, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                shutdownRequested.TrySetResult(true);
+            };
+            Console.CancelKeyPress += cancelHandler;
+
+            if (!OperatingSystem.IsWindows())
+            {
+                sigtermHandler = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+                {
+                    context.Cancel = true;
+                    shutdownRequested.TrySetResult(true);
+                });
+            }
+
+            if (!process.Start())
+                throw new InvalidOperationException("The web host process did not start");
+            started = true;
+
+            var stdoutTask = ForwardLiveOutputAsync(process.StandardOutput, Console.Out);
+            var stderrTask = ForwardLiveOutputAsync(process.StandardError, Console.Error);
+            var exitTask = process.WaitForExitAsync();
+            var completedTask = await Task.WhenAny(exitTask, shutdownRequested.Task);
+            if (completedTask == shutdownRequested.Task)
+            {
+                TryCloseWebHostStandardInput(process);
+                if (!process.HasExited)
+                {
+                    if (!OperatingSystem.IsWindows())
+                        _ = SendUnixSignal(process.Id, 15); // SIGTERM
+
+                    try
+                    {
+                        await exitTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (TimeoutException)
+                    {
+                        TryKillProcessTree(process);
+                        await WaitAfterForcedTerminationAsync(process);
+                    }
+                }
+                else
+                    await exitTask;
+            }
+            else
+            {
+                await exitTask;
+            }
+
+            await Task.WhenAll(stdoutTask, stderrTask);
+            return process.ExitCode;
+        }
+        catch (Exception error) when (IsProcessError(error) || error is InvalidOperationException)
+        {
+            PrintDiagnostics(
+            [
+                AtStart(
+                    "E_PROCESS",
+                    $"Could not start or wait for '{Path.GetFileName(executable)}': {error.Message}",
+                    sourceFile)
+            ],
+            json: false);
+            return null;
+        }
+        finally
+        {
+            if (cancelHandler is not null)
+                Console.CancelKeyPress -= cancelHandler;
+            sigtermHandler?.Dispose();
+
+            if (started && process is not null)
+            {
+                TryCloseWebHostStandardInput(process);
+                if (!process.HasExited)
+                {
+                    if (!OperatingSystem.IsWindows())
+                        _ = SendUnixSignal(process.Id, 15); // SIGTERM
+                    try
+                    {
+                        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (TimeoutException)
+                    {
+                        TryKillProcessTree(process);
+                        await WaitAfterForcedTerminationAsync(process);
+                    }
+                }
+            }
+
+            process?.Dispose();
+        }
+    }
+
+    private static async Task ForwardLiveOutputAsync(StreamReader reader, TextWriter writer)
+    {
+        var buffer = new char[1024];
+        while (true)
+        {
+            var read = await reader.ReadAsync(buffer.AsMemory());
+            if (read == 0)
+                return;
+
+            await writer.WriteAsync(buffer.AsMemory(0, read));
+            await writer.FlushAsync();
+        }
+    }
+
+    private static void TryKillProcessTree(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+        {
+            // The process may have exited while shutdown was being escalated.
+        }
+    }
+
+    private static void TryCloseWebHostStandardInput(Process process)
+    {
+        try
+        {
+            process.StandardInput.Close();
+        }
+        catch (Exception error) when (error is IOException or InvalidOperationException)
+        {
+            // Shutdown may race with the child exiting or closing its input stream.
+        }
+    }
+
+    private static async Task WaitAfterForcedTerminationAsync(Process process)
+    {
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
+            // The forced process-tree termination is best effort if the OS cannot reap the child.
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int SendUnixSignal(int processId, int signal);
 
     private static bool IsProcessError(Exception error) =>
         error is Win32Exception or IOException or UnauthorizedAccessException;

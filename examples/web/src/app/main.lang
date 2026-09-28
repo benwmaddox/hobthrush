@@ -1,0 +1,79 @@
+module app::main;
+
+struct Profile { city: Text }
+struct GreetingRequest { name: Text, profile: self::app::main::Profile }
+struct Greeting { message: Text, profile: self::app::main::Profile }
+
+union HomeReply { Page(Html) }
+union LookupReply { Found(self::app::main::Greeting), Missing }
+union CreateReply { Created(self::app::main::Greeting), Invalid }
+union FaultReply { Completed }
+union ResetReply { Reset }
+
+fn home() -> self::app::main::HomeReply effects {} {
+    let body: Html = html.concat(
+        html.heading("A safe web page"),
+        html.paragraph("<script>bad()</script> & escaped text")
+    );
+    let content: Html = html.concat(body, html.text("Plain text stays escaped too."));
+    return self::app::main::HomeReply.Page(html.document("Web example", content));
+}
+
+fn lookup() -> self::app::main::LookupReply effects {} {
+    return self::app::main::LookupReply.Found(self::app::main::Greeting {
+        message: "Hello from lang",
+        profile: self::app::main::Profile { city: "London" }
+    });
+}
+
+fn create(request: self::app::main::GreetingRequest) -> self::app::main::CreateReply effects {} {
+    let normalized: Text = match validation::text::validation::normalize(request.name) {
+        Ok(name) => name,
+        Err(error) => ""
+    };
+    if normalized.length == 0 {
+        return self::app::main::CreateReply.Invalid;
+    }
+
+    return self::app::main::CreateReply.Created(self::app::main::Greeting {
+        message: normalized,
+        profile: request.profile
+    });
+}
+
+fn fault() -> self::app::main::FaultReply effects {} {
+    let crash: i32 = 2147483647 + 1;
+    return self::app::main::FaultReply.Completed;
+}
+
+fn reset() -> self::app::main::ResetReply effects {} {
+    return self::app::main::ResetReply.Reset;
+}
+
+route GET "/" {
+    handler: self::app::main::home;
+    response Page: 200 html;
+}
+
+route GET "/api/greeting" {
+    handler: self::app::main::lookup;
+    response Found: 200 json self::app::main::Greeting;
+    response Missing: 404;
+}
+
+route POST "/api/greeting" {
+    body: self::app::main::GreetingRequest;
+    handler: self::app::main::create;
+    response Created: 201 json self::app::main::Greeting;
+    response Invalid: 400;
+}
+
+route GET "/fault" {
+    handler: self::app::main::fault;
+    response Completed: 200;
+}
+
+route GET "/reset" {
+    handler: self::app::main::reset;
+    response Reset: 205;
+}

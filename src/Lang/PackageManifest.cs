@@ -458,7 +458,7 @@ internal static class PackageLoader
             var rawValue = trimmed[(equals + 1)..].Trim();
             if (inCapabilities)
             {
-                if (key != "fs.read")
+                if (key is not ("fs.read" or "net.listen"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
@@ -573,8 +573,8 @@ internal static class PackageLoader
         if (values.TryGetValue("version", out var version) && string.IsNullOrWhiteSpace(version))
             diagnostics.Add(AtStart("E_MANIFEST", "version must not be empty", file));
 
-        if (values.TryGetValue("kind", out var kind) && kind is not ("lib" or "cli"))
-            diagnostics.Add(AtStart("E_MANIFEST", "kind must be either \"lib\" or \"cli\"", file));
+        if (values.TryGetValue("kind", out var kind) && kind is not ("lib" or "cli" or "web"))
+            diagnostics.Add(AtStart("E_MANIFEST", "kind must be \"lib\", \"cli\", or \"web\"", file));
 
         if (values.TryGetValue("source_root", out var sourceRoot) && !IsNormalizedRelativePath(sourceRoot))
         {
@@ -587,13 +587,22 @@ internal static class PackageLoader
         var hasEntryModule = values.TryGetValue("entry_module", out var entryModule);
         if (values.TryGetValue("kind", out kind))
         {
-            if (kind == "cli" && !hasEntryModule)
-                diagnostics.Add(AtStart("E_MANIFEST", "CLI packages require entry_module", file));
+            if ((kind is "cli" or "web") && !hasEntryModule)
+                diagnostics.Add(AtStart("E_MANIFEST", $"{(kind == "web" ? "Web" : "CLI")} packages require entry_module", file));
             else if (kind == "lib" && hasEntryModule)
                 diagnostics.Add(AtStart("E_MANIFEST", "Library packages must not declare entry_module", file));
 
             if (kind == "lib" && capabilities.Count != 0)
                 diagnostics.Add(AtStart("E_MANIFEST", "Library packages cannot declare capabilities", file));
+
+            if (kind == "cli" && capabilities.Contains("net.listen"))
+                diagnostics.Add(AtStart("E_MANIFEST", "The net.listen capability is only valid for web packages", file));
+
+            if (kind == "web" && !capabilities.Contains("net.listen"))
+                diagnostics.Add(AtStart(
+                    "E_CAPABILITY_MISSING",
+                    "Web packages require the root package's net.listen capability grant",
+                    file));
         }
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))

@@ -1,10 +1,13 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text;
+using System.Net.Sockets;
 
 return await IntegrationTests.RunAsync();
 
@@ -94,6 +97,7 @@ internal static class IntegrationTests
             ("dependency source roots and reparse paths stay inside package boundaries", TestDependencyFilesystemSafety),
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
+            ("maintained web package serves typed routes with bounded request handling", TestMaintainedWebExample),
             ("maintained scan CLI receives FsRead and handles typed file and normalization results", TestScanCliExample),
             ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
@@ -112,11 +116,23 @@ internal static class IntegrationTests
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
 
+        // Set LANG_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
+        var filter = Environment.GetEnvironmentVariable("LANG_INTEGRATION_TEST_FILTER");
+        var selectedCases = string.IsNullOrWhiteSpace(filter)
+            ? cases
+            : cases.Where(test => test.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (selectedCases.Length == 0)
+        {
+            Console.Error.WriteLine($"No integration test matched LANG_INTEGRATION_TEST_FILTER='{filter}'.");
+            Directory.Delete(temporaryRoot, recursive: true);
+            return 2;
+        }
+
         var failures = 0;
         var skipped = 0;
         try
         {
-            foreach (var test in cases)
+            foreach (var test in selectedCases)
             {
                 try
                 {
@@ -151,7 +167,7 @@ internal static class IntegrationTests
             }
         }
 
-        Console.WriteLine($"{cases.Length - failures - skipped} passed, {skipped} skipped, {failures} failed");
+        Console.WriteLine($"{selectedCases.Length - failures - skipped} passed, {skipped} skipped, {failures} failed");
         return failures == 0 ? 0 : 1;
     }
 
@@ -3205,6 +3221,385 @@ internal static class IntegrationTests
         AssertRunOutput("ready" + Environment.NewLine, run);
     }
 
+    private static async Task TestMaintainedWebExample(Harness harness)
+    {
+        var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "web");
+        var manifest = await File.ReadAllTextAsync(Path.Combine(packageRoot, "lang.toml"));
+        var normalizedManifest = manifest.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        AssertTrue(normalizedManifest.Contains("kind = \"web\"", StringComparison.Ordinal),
+            "The maintained web sample must declare kind=web.");
+        AssertTrue(normalizedManifest.Contains("entry_module = \"app::main\"", StringComparison.Ordinal),
+            "The maintained web sample must declare its route entry module.");
+        AssertTrue(normalizedManifest.Contains("[capabilities]\nnet.listen = \"allow\"", StringComparison.Ordinal),
+            "The maintained web sample must explicitly grant net.listen.");
+        AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
+            "The maintained web sample must consume the shared validation package.");
+        AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
+            "The maintained web sample must include its path dependency lockfile.");
+
+        var sourcePath = Path.Combine(packageRoot, "src", "app", "main.lang");
+        var source = await File.ReadAllTextAsync(sourcePath);
+        AssertTrue(source.Contains("html.document", StringComparison.Ordinal)
+            && source.Contains("html.heading", StringComparison.Ordinal)
+            && source.Contains("html.paragraph", StringComparison.Ordinal)
+            && source.Contains("html.concat", StringComparison.Ordinal),
+            "The maintained web page must use the safe Html builder API.");
+        AssertTrue(source.Contains("validation::text::validation::normalize", StringComparison.Ordinal),
+            "The POST handler must normalize its request through the shared validation library.");
+
+        var check = await harness.InvokePackageDirectoryAsync("maintained-web-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var firstBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-first", packageRoot, "build");
+        var firstArtifact = AssertBuiltWebApplication(firstBuild, packageRoot);
+        var firstOpenApiPath = Path.Combine(Path.GetDirectoryName(firstArtifact)!, "openapi.json");
+        AssertTrue(File.Exists(firstOpenApiPath), $"Expected the generated OpenAPI artifact at {firstOpenApiPath}.");
+        var firstOpenApiBytes = await File.ReadAllBytesAsync(firstOpenApiPath);
+        using (var document = JsonDocument.Parse(firstOpenApiBytes))
+        {
+            var paths = document.RootElement.GetProperty("paths");
+            AssertTrue(paths.TryGetProperty("/api/greeting", out var greetingPath),
+                "OpenAPI should describe the static greeting route.");
+            AssertTrue(greetingPath.TryGetProperty("get", out _) && greetingPath.TryGetProperty("post", out _),
+                "OpenAPI should describe both GET and POST mappings at the shared static path.");
+            AssertTrue(paths.TryGetProperty("/reset", out var resetPath)
+                && resetPath.TryGetProperty("get", out var resetOperation)
+                && resetOperation.GetProperty("responses").TryGetProperty("205", out var resetResponse)
+                && !resetResponse.TryGetProperty("content", out _),
+                "OpenAPI 205 responses should not advertise a response body.");
+        }
+
+        var secondBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-second", packageRoot, "build");
+        var secondArtifact = AssertBuiltWebApplication(secondBuild, packageRoot);
+        var secondOpenApiPath = Path.Combine(Path.GetDirectoryName(secondArtifact)!, "openapi.json");
+        AssertTrue(File.Exists(secondOpenApiPath), $"Expected the generated OpenAPI artifact at {secondOpenApiPath}.");
+        var secondOpenApiBytes = await File.ReadAllBytesAsync(secondOpenApiPath);
+        AssertTrue(firstOpenApiBytes.SequenceEqual(secondOpenApiBytes),
+            "Equivalent web builds must emit byte-for-byte deterministic OpenAPI documents.");
+
+        var runtimeConfigPath = Path.ChangeExtension(firstArtifact, ".runtimeconfig.json");
+        AssertTrue(File.Exists(runtimeConfigPath), $"Expected the managed web runtime configuration at {runtimeConfigPath}.");
+        using (var runtimeConfig = JsonDocument.Parse(await File.ReadAllBytesAsync(runtimeConfigPath)))
+        {
+            var runtimeOptions = runtimeConfig.RootElement.GetProperty("runtimeOptions");
+            var configProperties = runtimeOptions.GetProperty("configProperties");
+            AssertTrue(configProperties.TryGetProperty("System.GC.Server", out var serverGc)
+                && !serverGc.GetBoolean(),
+                "The generated web application must explicitly use Workstation GC.");
+            var frameworks = new List<JsonElement>();
+            if (runtimeOptions.TryGetProperty("frameworks", out var frameworkList))
+                frameworks.AddRange(frameworkList.EnumerateArray());
+            else if (runtimeOptions.TryGetProperty("framework", out var singleFramework))
+                frameworks.Add(singleFramework);
+            AssertTrue(frameworks.Any(framework =>
+                    framework.TryGetProperty("name", out var frameworkName)
+                    && frameworkName.GetString() == "Microsoft.AspNetCore.App"),
+                "The managed web artifact must reference the ASP.NET Core shared framework.");
+        }
+
+        var missingGrantManifest = "name = \"web-missing-grant\"\n"
+            + "version = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n";
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "web-missing-net-listen-grant",
+            missingGrantManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    union Reply { Ok }
+                    fn handler() -> self::app::main::Reply effects {} {
+                        return self::app::main::Reply.Ok;
+                    }
+                    route GET "/" {
+                        handler: self::app::main::handler;
+                        response Ok: 200;
+                    }
+                    """
+            },
+            "E_CAPABILITY_MISSING",
+            "lang.toml");
+
+        var aot = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-aot-rejected", packageRoot, "build", "--aot", "--rid", CurrentHostAotRid());
+        AssertTrue(aot.ExitCode != 0, Describe(aot));
+        AssertEqual(string.Empty, aot.StandardOutput, Describe(aot));
+        AssertTrue(aot.StandardError.Contains("E_BUILD_TARGET", StringComparison.Ordinal),
+            $"Web packages must be rejected before Native AOT publishing. {Describe(aot)}");
+
+        var port = GetUnusedLoopbackPort();
+        var baseAddress = new Uri($"http://127.0.0.1:{port}");
+        var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(4) };
+        using var process = harness.StartWebPackageProcess(
+            "maintained-web-run", packageRoot, "--urls", baseAddress.ToString().TrimEnd('/'));
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var assertionsCompleted = false;
+        try
+        {
+            await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
+
+            using (var page = await client.GetAsync("/"))
+            {
+                AssertEqual(HttpStatusCode.OK, page.StatusCode, "The HTML route should return 200.");
+                AssertEqual("text/html", page.Content.Headers.ContentType?.MediaType,
+                    "The HTML route should set a text/html content type.");
+                var html = await page.Content.ReadAsStringAsync();
+                AssertTrue(html.Contains("&lt;script&gt;bad()&lt;/script&gt; &amp; escaped text", StringComparison.Ordinal),
+                    $"Html paragraph text should be escaped. Received: {html}");
+                AssertTrue(!html.Contains("<script>", StringComparison.Ordinal),
+                    "The HTML response must not render user text as markup.");
+            }
+
+            using (var get = await client.GetAsync("/api/greeting"))
+            {
+                AssertEqual(HttpStatusCode.OK, get.StatusCode, "The GET JSON route should return its mapped 200 status.");
+                AssertEqual("application/json", get.Content.Headers.ContentType?.MediaType,
+                    "The GET route should set an application/json content type.");
+                using var greeting = JsonDocument.Parse(await get.Content.ReadAsStringAsync());
+                AssertEqual("Hello from lang", greeting.RootElement.GetProperty("message").GetString(),
+                    "The GET route should serialize its nested response struct.");
+                AssertEqual("London", greeting.RootElement.GetProperty("profile").GetProperty("city").GetString(),
+                    "The GET route should serialize its nested profile.");
+            }
+
+            using (var reset = await client.GetAsync("/reset"))
+            {
+                AssertEqual((HttpStatusCode)205, reset.StatusCode, "The no-content route should return 205.");
+                AssertEqual(0, (await reset.Content.ReadAsByteArrayAsync()).Length,
+                    "A 205 response must not serialize a body.");
+                AssertTrue(reset.Content.Headers.ContentType is null,
+                    "A 205 response must not set a content type.");
+            }
+
+            using (var created = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\" Ada \",\"profile\":{\"city\":\"Paris\"}}")))
+            {
+                AssertEqual(HttpStatusCode.Created, created.StatusCode,
+                    "A valid POST body should select the mapped Created status.");
+                using var response = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+                AssertEqual("Ada", response.RootElement.GetProperty("message").GetString(),
+                    "The POST handler should normalize input through the validation library.");
+                AssertEqual("Paris", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
+                    "The POST route should preserve its nested JSON request and response values.");
+            }
+
+            using (var invalid = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"  \",\"profile\":{\"city\":\"Paris\"}}")))
+                AssertEqual(HttpStatusCode.BadRequest, invalid.StatusCode,
+                    "A validation failure should select the mapped Invalid status.");
+
+            using (var malformed = await client.PostAsync("/api/greeting", JsonBody("{broken")))
+                AssertEqual(HttpStatusCode.BadRequest, malformed.StatusCode,
+                    "Malformed JSON should be rejected with 400.");
+
+            using (var wrongShape = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":42,\"profile\":{\"city\":\"Paris\"}}")))
+                AssertEqual(HttpStatusCode.BadRequest, wrongShape.StatusCode,
+                    "A JSON body with an incompatible field type should be rejected with 400.");
+
+            using (var unknownField = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"Ada\",\"profile\":{\"city\":\"Paris\"},\"extra\":true}")))
+                AssertEqual(HttpStatusCode.BadRequest, unknownField.StatusCode,
+                    "A JSON body with an unknown field should be rejected with 400.");
+
+            using (var duplicateField = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"Ada\",\"name\":\"Grace\",\"profile\":{\"city\":\"Paris\"}}")))
+                AssertEqual(HttpStatusCode.BadRequest, duplicateField.StatusCode,
+                    "A JSON body with a duplicate field should be rejected with 400.");
+
+            using (var missingField = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"Ada\"}")))
+                AssertEqual(HttpStatusCode.BadRequest, missingField.StatusCode,
+                    "A JSON body missing a required nested field should be rejected with 400.");
+
+            using (var nestedWrongShape = await client.PostAsync("/api/greeting", JsonBody(
+                       "{\"name\":\"Ada\",\"profile\":{\"city\":42}}")))
+                AssertEqual(HttpStatusCode.BadRequest, nestedWrongShape.StatusCode,
+                    "A nested JSON field with an incompatible type should be rejected with 400.");
+
+            var boundaryPrefix = "{\"name\":\"Ada\",\"profile\":{\"city\":\"Paris\"}}";
+            var exactlyOneMiB = boundaryPrefix + new string(' ', 1_048_576 - Encoding.UTF8.GetByteCount(boundaryPrefix));
+            using (var boundary = await client.PostAsync("/api/greeting", JsonBody(exactlyOneMiB)))
+                AssertEqual(HttpStatusCode.Created, boundary.StatusCode,
+                    "A valid request body exactly at the 1 MiB limit should be accepted.");
+
+            var oversizedJson = "{\"name\":\"" + new string('x', 1_048_600)
+                + "\",\"profile\":{\"city\":\"Paris\"}}";
+            using (var oversized = await client.PostAsync("/api/greeting", JsonBody(oversizedJson)))
+                AssertEqual((HttpStatusCode)413, oversized.StatusCode,
+                    "A request body over the managed host's 1 MiB limit should return 413.");
+
+            var oversizedBytes = Encoding.UTF8.GetBytes(oversizedJson);
+            using (var chunkedContent = new StreamContent(new NonSeekableMemoryStream(oversizedBytes)))
+            using (var chunkedRequest = new HttpRequestMessage(HttpMethod.Post, "/api/greeting")
+                   {
+                       Content = chunkedContent
+                   })
+            {
+                chunkedContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                chunkedRequest.Headers.TransferEncodingChunked = true;
+                AssertTrue(chunkedContent.Headers.ContentLength is null,
+                    "The oversized stream request must not declare Content-Length.");
+                using var chunkedOversized = await client.SendAsync(chunkedRequest);
+                AssertEqual((HttpStatusCode)413, chunkedOversized.StatusCode,
+                    "A chunked body over the managed host's 1 MiB limit should return 413.");
+            }
+
+            using (var missing = await client.GetAsync("/not-found"))
+                AssertEqual(HttpStatusCode.NotFound, missing.StatusCode, "An unmapped path should return 404.");
+
+            using (var wrongMethod = await client.SendAsync(new HttpRequestMessage(HttpMethod.Put, "/api/greeting")))
+                AssertEqual(HttpStatusCode.MethodNotAllowed, wrongMethod.StatusCode,
+                    "A static route with a different method should return 405.");
+
+            using (var fault = await client.GetAsync("/fault"))
+            {
+                AssertEqual(HttpStatusCode.InternalServerError, fault.StatusCode,
+                    "An unexpected checked runtime overflow should map to a generic 500 response.");
+                AssertEqual("application/json", fault.Content.Headers.ContentType?.MediaType,
+                    "The unexpected-fault response should be JSON.");
+                if (!fault.Headers.TryGetValues("X-Request-Id", out var requestIds) || requestIds is null)
+                    throw new InvalidOperationException("The generic 500 response should include an X-Request-Id header.");
+                var requestId = requestIds.Single();
+                AssertTrue(!string.IsNullOrWhiteSpace(requestId) && requestId.Length <= 128
+                    && !requestId.Any(char.IsControl),
+                    "The fault request ID should be a short, nonempty header-safe value.");
+                var faultBody = await fault.Content.ReadAsStringAsync();
+                AssertEqual("{\"error\":\"internal_server_error\"}", faultBody,
+                    "The unexpected-fault response should expose only its fixed safe body.");
+                AssertTrue(!faultBody.Contains("OverflowException", StringComparison.Ordinal)
+                    && !faultBody.Contains(" at ", StringComparison.Ordinal)
+                    && !faultBody.Contains(harness.RepositoryRoot, StringComparison.OrdinalIgnoreCase)
+                    && !faultBody.Contains("2147483647", StringComparison.Ordinal),
+                    "The generic fault response must not leak exception details, stack traces, source paths, or values.");
+            }
+
+            assertionsCompleted = true;
+        }
+        finally
+        {
+            // Close the keep-alive client before asking the managed host to drain and exit.
+            client.Dispose();
+            if (!process.HasExited)
+            {
+                // On the successful path, the generated host must observe the wrapper exit and stop itself.
+                // If an assertion failed, kill the complete tree so a broken host cannot leak into later cases.
+                process.Kill(entireProcessTree: !assertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await process.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The managed web process did not terminate within 10 seconds after a tree kill.");
+                }
+            }
+
+            await Task.WhenAll(stdoutTask, stderrTask);
+            await AssertLoopbackPortReleasedAsync(port);
+        }
+
+    }
+
+    private static StringContent JsonBody(string json) => new(json, Encoding.UTF8, "application/json");
+
+    private sealed class NonSeekableMemoryStream(byte[] content) : MemoryStream(content, writable: false)
+    {
+        public override bool CanSeek => false;
+    }
+
+    private static int GetUnusedLoopbackPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    private static async Task WaitForWebServerAsync(
+        Process process,
+        HttpClient client,
+        Task<string> stdoutTask,
+        Task<string> stderrTask)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(30))
+        {
+            if (process.HasExited)
+            {
+                var stdout = await stdoutTask;
+                var stderr = await stderrTask;
+                throw new InvalidOperationException(
+                    $"The maintained web host exited before becoming ready (exit {process.ExitCode}). stdout=<{stdout}> stderr=<{stderr}>");
+            }
+
+            try
+            {
+                using var response = await client.GetAsync("/");
+                if (response.StatusCode == HttpStatusCode.OK)
+                    return;
+            }
+            catch (HttpRequestException)
+            {
+            }
+            catch (TaskCanceledException)
+            {
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException("The maintained web host did not become ready within 30 seconds.");
+    }
+
+    private static async Task AssertLoopbackPortReleasedAsync(int port)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(20))
+        {
+            var probe = new TcpListener(IPAddress.Loopback, port);
+            try
+            {
+                probe.Start();
+                probe.Stop();
+                return;
+            }
+            catch (SocketException)
+            {
+                probe.Stop();
+                await Task.Delay(100);
+            }
+        }
+
+        throw new InvalidOperationException($"The web host kept loopback port {port} open 20 seconds after process termination.");
+    }
+
+    private static string AssertBuiltWebApplication(ProcessResult result, string packageRoot)
+    {
+        AssertEqual(0, result.ExitCode, Describe(result));
+        const string prefix = "Built executable: ";
+        AssertTrue(result.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(result));
+        AssertTrue(result.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(result));
+        var artifactPath = result.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertEqual(prefix + artifactPath + Environment.NewLine, result.StandardOutput,
+            "A web package build should print only its executable artifact line.");
+        AssertTrue(Path.IsPathFullyQualified(artifactPath) && File.Exists(artifactPath),
+            $"Expected a durable managed web executable at {artifactPath}.");
+        AssertEqual(".dll", Path.GetExtension(artifactPath), "Managed web builds should retain a DLL artifact.");
+        var outputDirectory = Path.GetFullPath(Path.GetDirectoryName(artifactPath)!);
+        var expectedOutputRoot = Path.GetFullPath(Path.Combine(packageRoot, "out"));
+        AssertEqual(expectedOutputRoot, Path.GetDirectoryName(outputDirectory),
+            "The web DLL should be written below the package's durable out directory.");
+        AssertTrue(File.Exists(Path.ChangeExtension(artifactPath, ".deps.json")),
+            "A managed web app should include its dependency manifest.");
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        return artifactPath;
+    }
+
     private static async Task TestScanCliExample(Harness harness)
     {
         var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "scan-cli");
@@ -3730,9 +4125,11 @@ internal static class IntegrationTests
             ("route-duplicate-response", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Found: 201 json Text; response Empty: 204; }"), "E_ROUTE_RESPONSE_DUPLICATE"),
             ("route-response-payload-mismatch", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json i32; response Empty: 204; }"), "E_ROUTE_CODEC_UNSUPPORTED"),
             ("route-response-html-content-mismatch", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 html; response Empty: 204; }"), "E_ROUTE_CODEC_UNSUPPORTED"),
+            ("route-no-content-status-payload", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 205 json Text; response Empty: 204; }"), "E_ROUTE_CODEC_UNSUPPORTED"),
             ("route-with-main", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }\npub fn main() -> i32 effects {} { return 0; }"), "E_ROUTE_DECL"),
             ("route-with-command", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }\ncommand route {}"), "E_ROUTE_DECL"),
-            ("route-duplicate-method-path", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; } route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL")
+            ("route-duplicate-method-path", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; } route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-duplicate-case-insensitive-method-path", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; } route GET \"/ITEMS\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL")
         };
 
         foreach (var (name, source, code) in cases)
@@ -4935,6 +5332,37 @@ internal static class IntegrationTests
                 ProcessTimeout,
                 null,
                 additionalArguments);
+
+        public Process StartWebPackageProcess(string caseName, string packageRoot, params string[] applicationArguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                WorkingDirectory = packageRoot,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add(compilerDll);
+            startInfo.ArgumentList.Add("run");
+            startInfo.ArgumentList.Add(packageRoot);
+            startInfo.ArgumentList.Add("--");
+            foreach (var argument in applicationArguments)
+                startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["LANG_DOTNET"] = dotnet;
+
+            var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                process.Dispose();
+                throw new InvalidOperationException($"Could not start the managed web process for {caseName}.");
+            }
+
+            return process;
+        }
 
         public Task<ProcessResult> InvokePackageDirectoryWithTimeoutAsync(
             string caseName,
