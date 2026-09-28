@@ -32,6 +32,9 @@ internal static class Driver
         if (args.Length != 0 && args[0] == "lock")
             return RunLock(args);
 
+        if (args.Length != 0 && args[0] == "audit")
+            return AuditPackage(args);
+
         if (args.Length != 0 && args[0] == "inspect")
             return args.Length > 1 && args[1] == "api"
                 ? InspectApi(args)
@@ -183,6 +186,7 @@ internal static class Driver
 
         return await BuildCheckedAsync(
             result.Program!, file, args[0], isAotBuild ? rid : null,
+            sourceText: source,
             hasApplicationSeparator: hasApplicationSeparator,
             applicationArguments: applicationArguments);
     }
@@ -234,6 +238,60 @@ internal static class Driver
             Console.WriteLine($"No dependencies to lock for package '{graph.Root.Package.Manifest.Name}'.");
 
         return 0;
+    }
+
+    private static int AuditPackage(string[] args)
+    {
+        if (args.Length != 3 || args[2] != "--json")
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
+        try
+        {
+            packageDirectory = Path.GetFullPath(args[1]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics([AtStart("E_IO", $"Invalid package directory: {error.Message}", args[1])], json: true);
+            return 1;
+        }
+
+        var resolved = ResolvePackageGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
+                ? resolved.Diagnostics
+                : [AtStart("E_DEPENDENCY", "Could not resolve package dependency graph", packageDirectory)];
+            PrintDiagnostics(diagnostics, json: true);
+            return 1;
+        }
+
+        var graph = resolved.Graph!;
+        var checkedPackage = CheckPackageGraph(graph);
+        if (checkedPackage.Diagnostics.Count != 0 || checkedPackage.Program is null)
+        {
+            PrintDiagnostics(checkedPackage.Diagnostics, json: true);
+            return 1;
+        }
+
+        try
+        {
+            var snapshot = AuditReport.Create(graph, checkedPackage.Program);
+            Console.Write(Encoding.UTF8.GetString(snapshot.Json));
+            return 0;
+        }
+        catch (Exception error) when (IsFileError(error) || error is EncoderFallbackException)
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Could not hash package inputs for audit: {error.Message}", graph.Root.Package.ManifestFile)
+            ],
+            json: true);
+            return 1;
+        }
     }
 
     private static async Task<int> RunPackageAsync(
@@ -299,8 +357,10 @@ internal static class Driver
             command,
             aotRid,
             package,
-            hasApplicationSeparator,
-            applicationArguments);
+            graph,
+            sourceText: string.Empty,
+            hasApplicationSeparator: hasApplicationSeparator,
+            applicationArguments: applicationArguments);
     }
 
     private static (PackageDependencyGraph? Graph, List<Diagnostic> Diagnostics) ResolvePackageGraph(
@@ -914,163 +974,16 @@ internal static class Driver
         _ => throw new InvalidOperationException("Unknown checked command default value")
     };
 
-    private static string[] RequiredCapabilities(IEnumerable<string> effects) => effects
-        .Where(effect => effect is "fs.read" or "db.read" or "db.write")
-        .Distinct(StringComparer.Ordinal)
-        .OrderBy(effect => effect, StringComparer.Ordinal)
-        .ToArray();
-
     private sealed record ApiPackageReference(string Alias, string Name, string Version);
     private sealed record ApiPackageIdentity(string Name, string Version);
 
+    private static string[] RequiredCapabilities(IEnumerable<string> effects) =>
+        CheckedReportFacts.RequiredCapabilities(effects);
+
     private static IReadOnlyList<TrustedOperation> FindTrustedAdapterOperations(
         CheckedProgram program,
-        CheckedFunction root)
-    {
-        var functionById = program.Functions.ToDictionary(function => function.Id);
-        var visitedFunctions = new HashSet<int>();
-        var operationNames = new SortedSet<string>(StringComparer.Ordinal);
-
-        VisitFunction(root);
-        return operationNames.Select(operation => new TrustedOperation(
-            operation,
-            "trusted_adapter",
-            [operation switch
-            {
-                "FsRead.read_text" => "fs.read",
-                "DbRead.query_one" => "db.read",
-                _ => "db.write"
-            }])).ToArray();
-
-        void VisitFunction(CheckedFunction function)
-        {
-            if (!visitedFunctions.Add(function.Id))
-                return;
-
-            foreach (var statement in function.Body)
-                VisitStatement(statement);
-        }
-
-        void VisitStatement(TypedStmt statement)
-        {
-            switch (statement)
-            {
-                case TypedLetStmt let:
-                    VisitExpression(let.Value);
-                    break;
-                case TypedAssignStmt assigned:
-                    VisitExpression(assigned.Value);
-                    break;
-                case TypedReturnStmt returned:
-                    VisitExpression(returned.Value);
-                    break;
-                case TypedIfStmt conditional:
-                    VisitExpression(conditional.Condition);
-                    foreach (var nested in conditional.ThenBody)
-                        VisitStatement(nested);
-                    if (conditional.ElseBody is not null)
-                    {
-                        foreach (var nested in conditional.ElseBody)
-                            VisitStatement(nested);
-                    }
-                    break;
-                case TypedForStmt loop:
-                    VisitExpression(loop.Collection);
-                    foreach (var nested in loop.Body)
-                        VisitStatement(nested);
-                    break;
-                case TypedWithTransactionStmt transaction:
-                    operationNames.Add("DbWrite.begin");
-                    VisitExpression(transaction.Database);
-                    foreach (var nested in transaction.Body)
-                        VisitStatement(nested);
-                    break;
-            }
-        }
-
-        void VisitExpression(TypedExpr expression)
-        {
-            switch (expression)
-            {
-                case TypedListExpr list:
-                    foreach (var item in list.Items)
-                        VisitExpression(item);
-                    break;
-                case TypedBinaryExpr binary:
-                    VisitExpression(binary.Left);
-                    VisitExpression(binary.Right);
-                    break;
-                case TypedCompareExpr comparison:
-                    VisitExpression(comparison.Left);
-                    VisitExpression(comparison.Right);
-                    break;
-                case TypedTextLengthExpr length:
-                    VisitExpression(length.Target);
-                    break;
-                case TypedTextTrimExpr trim:
-                    VisitExpression(trim.Target);
-                    break;
-                case TypedListLengthExpr length:
-                    VisitExpression(length.Target);
-                    break;
-                case TypedListGetExpr get:
-                    VisitExpression(get.Target);
-                    VisitExpression(get.Index);
-                    break;
-                case TypedListAppendExpr append:
-                    VisitExpression(append.Target);
-                    VisitExpression(append.Value);
-                    break;
-                case TypedCallExpr call:
-                    foreach (var argument in call.Arguments)
-                        VisitExpression(argument);
-                    if (functionById.TryGetValue(call.FunctionId, out var calledFunction))
-                        VisitFunction(calledFunction);
-                    break;
-                case TypedIntrinsicCallExpr intrinsic:
-                    if (intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText)
-                        operationNames.Add("FsRead.read_text");
-                    foreach (var argument in intrinsic.Arguments)
-                        VisitExpression(argument);
-                    break;
-                case TypedDatabaseCallExpr databaseCall:
-                    operationNames.Add(databaseCall.Operation.Kind switch
-                    {
-                        CheckedDatabaseOperationKind.QueryOne => "DbRead.query_one",
-                        CheckedDatabaseOperationKind.Execute => "DbWrite.execute",
-                        CheckedDatabaseOperationKind.TransactionExecute => "Transaction.execute",
-                        _ => throw new InvalidOperationException("Unknown checked database operation")
-                    });
-                    VisitExpression(databaseCall.Receiver);
-                    VisitExpression(databaseCall.Parameters);
-                    break;
-                case TypedTransactionCommitExpr:
-                    operationNames.Add("Transaction.commit");
-                    break;
-                case TypedBuiltinConstructExpr builtin:
-                    foreach (var argument in builtin.Arguments)
-                        VisitExpression(argument);
-                    break;
-                case TypedUnionConstructExpr union:
-                    foreach (var argument in union.Arguments)
-                        VisitExpression(argument);
-                    break;
-                case TypedStructConstructExpr structure:
-                    foreach (var field in structure.Fields)
-                        VisitExpression(field.Value);
-                    break;
-                case TypedFieldAccessExpr field:
-                    VisitExpression(field.Target);
-                    break;
-                case TypedMatchExpr match:
-                    VisitExpression(match.Value);
-                    foreach (var arm in match.Arms)
-                        VisitExpression(arm.Body);
-                    break;
-            }
-        }
-    }
-
+        CheckedFunction root) =>
+        CheckedReportFacts.FindTrustedAdapterOperations(program, root);
     private static bool TryParseInspectSymbol(string symbol, out string module, out string function)
     {
         module = string.Empty;
@@ -1118,8 +1031,6 @@ internal static class Driver
         (value >= (byte)'a' && value <= (byte)'z') ||
         (value >= (byte)'0' && value <= (byte)'9') ||
         value == (byte)'-' || value == (byte)'.' || value == (byte)'_' || value == (byte)'~';
-
-    private sealed record TrustedOperation(string Operation, string Trust, IReadOnlyList<string> Effects);
 
     private static (List<PackageModuleInput> Modules, List<Diagnostic> Diagnostics) ParsePackageSources(
         PackageDependencyGraph graph)
@@ -1174,7 +1085,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang inspect api PACKAGE_DIRECTORY --json | lang test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang audit PACKAGE_DIRECTORY --json | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang inspect api PACKAGE_DIRECTORY --json | lang test [FILE_OR_PACKAGE]");
 
     private static int ReportBuildTargetError(string message, string file)
     {
@@ -1291,6 +1202,8 @@ internal static class Driver
         string command,
         string? aotRid,
         LoadedPackage? package = null,
+        PackageDependencyGraph? packageGraph = null,
+        string sourceText = "",
         bool hasApplicationSeparator = false,
         string[]? applicationArguments = null)
     {
@@ -1445,7 +1358,7 @@ internal static class Driver
                 var executablePath = Path.Combine(outputDirectory, executableName);
                 try
                 {
-                    EnsurePackageOutputPathSafe(package);
+                    EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
                     if (entryCommand is not null)
                     {
                         File.WriteAllText(
@@ -1453,6 +1366,7 @@ internal static class Driver
                             Emitter.EmitCommandSchema(program),
                             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                     }
+                    EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
                     CopyBuildArtifacts(stagedPublishDirectory, outputDirectory);
                     if (!File.Exists(executablePath))
                     {
@@ -1476,13 +1390,32 @@ internal static class Driver
                             UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
                             UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
                     }
+
+                    if (command == "build")
+                    {
+                        var sdkVersion = await GetSdkVersionForReceiptAsync(dotnet, sourceFile);
+                        if (sdkVersion is null)
+                        {
+                            TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
+                            return 1;
+                        }
+
+                        BuildReceipt.Write(
+                            outputDirectory,
+                            program,
+                            sourceText,
+                            packageGraph,
+                            "native_aot",
+                            aotRid,
+                            sdkVersion);
+                    }
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
                     TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
                     PrintDiagnostics(
                     [
-                        AtStart("E_IO", $"Could not save NativeAOT artifacts: {error.Message}", sourceFile)
+                        AtStart("E_IO", $"Could not save NativeAOT artifacts or build receipt: {error.Message}", sourceFile)
                     ],
                     json: false);
                     return 1;
@@ -1517,7 +1450,7 @@ internal static class Driver
                 var outputDirectory = CreateBuildOutputDirectory(sourceFile, package);
                 try
                 {
-                    EnsurePackageOutputPathSafe(package);
+                    EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
                     if (entryCommand is not null)
                     {
                         File.WriteAllText(
@@ -1532,16 +1465,32 @@ internal static class Driver
                             Emitter.EmitOpenApi(program),
                             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                     }
+                    EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
                     CopyBuildArtifacts(
                         Path.GetDirectoryName(stagedAssemblyFile)!,
                         outputDirectory);
+                    var sdkVersion = await GetSdkVersionForReceiptAsync(dotnet, sourceFile);
+                    if (sdkVersion is null)
+                    {
+                        TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
+                        return 1;
+                    }
+
+                    BuildReceipt.Write(
+                        outputDirectory,
+                        program,
+                        sourceText,
+                        packageGraph,
+                        "managed",
+                        runtimeIdentifier: null,
+                        sdkVersion);
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
                     TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
                     PrintDiagnostics(
                     [
-                        AtStart("E_IO", $"Could not save build artifacts: {error.Message}", sourceFile)
+                        AtStart("E_IO", $"Could not save build artifacts or build receipt: {error.Message}", sourceFile)
                     ],
                     json: false);
                     return 1;
@@ -1585,6 +1534,28 @@ internal static class Driver
         if (arguments is not null)
             result.AddRange(arguments);
         return result;
+    }
+
+    private static async Task<string?> GetSdkVersionForReceiptAsync(string dotnet, string sourceFile)
+    {
+        var sdk = await ExecAsync(
+            dotnet,
+            ["--version"],
+            FindRoot() ?? Directory.GetCurrentDirectory(),
+            sourceFile);
+        if (sdk is null)
+            return null;
+        var version = sdk.StandardOutput.Trim();
+        if (sdk.ExitCode == 0 && version.Length != 0)
+            return version;
+
+        PrintDiagnostics(
+        [
+            AtStart("E_PROCESS", "Could not determine the .NET SDK version for the build receipt", sourceFile)
+        ],
+        json: false);
+        WriteProcessOutputToError(sdk);
+        return null;
     }
 
     private static bool UsesDatabaseAdapter(CheckedProgram program) =>
@@ -1632,6 +1603,79 @@ internal static class Driver
             (File.GetAttributes(outputRoot) & FileAttributes.ReparsePoint) != 0)
         {
             throw new IOException("Package out directory cannot be a symbolic link or reparse point");
+        }
+    }
+
+    private static void EnsureBuildOutputPathSafe(
+        string sourceFile,
+        string outputDirectory,
+        LoadedPackage? package)
+    {
+        if (package is not null)
+        {
+            EnsurePackageOutputPathSafe(package);
+            return;
+        }
+
+        var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(sourceFile)) ??
+            throw new IOException("Standalone source has no containing directory");
+        var outputRoot = Path.GetFullPath(Path.Combine(sourceDirectory, "out"));
+        var destination = Path.GetFullPath(outputDirectory);
+        if (!IsWithinDirectory(sourceDirectory, outputRoot) || !IsWithinDirectory(outputRoot, destination))
+            throw new IOException("Standalone build output resolves outside the source output directory");
+        if (HasReparsePointOnPath(sourceDirectory) || HasReparsePointOnPath(destination))
+            throw new IOException("Standalone build output cannot resolve through a symbolic link or reparse point");
+    }
+
+    private static bool IsWithinDirectory(string root, string path)
+    {
+        var fullRoot = Path.GetFullPath(root);
+        var fullPath = Path.GetFullPath(path);
+        var prefix = Path.EndsInDirectorySeparator(fullRoot)
+            ? fullRoot
+            : fullRoot + Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return fullPath.StartsWith(prefix, comparison);
+    }
+
+    private static bool HasReparsePointOnPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var pathRoot = Path.GetPathRoot(fullPath) ??
+            throw new IOException("Standalone output path has no filesystem root");
+        var current = pathRoot;
+        if (HasReparsePoint(current))
+            return true;
+
+        foreach (var segment in fullPath[pathRoot.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (HasReparsePoint(current))
+                return true;
+            if (!File.Exists(current) && !Directory.Exists(current))
+                return false;
+        }
+
+        return false;
+    }
+
+    private static bool HasReparsePoint(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
         }
     }
 
@@ -1702,6 +1746,20 @@ internal static class Driver
             Console.Error.WriteLine(
                 $"{sourceFile}:1:1: E_IO: Refusing to remove build output outside the source output directory");
             return;
+        }
+
+        if (package is null)
+        {
+            try
+            {
+                EnsureBuildOutputPathSafe(sourceFile, path, package: null);
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                Console.Error.WriteLine(
+                    $"{sourceFile}:1:1: E_IO: Refusing to remove standalone build output through an unsafe path: {error.Message}");
+                return;
+            }
         }
 
         try
