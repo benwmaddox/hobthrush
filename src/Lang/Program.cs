@@ -494,7 +494,7 @@ internal static class Driver
 
         var inferredEffects = function.InferredEffects;
         var requiredCapabilities = inferredEffects
-            .Where(effect => effect is "fs.read" or "db.read" or "db.write")
+            .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write")
             .Distinct(StringComparer.Ordinal)
             .OrderBy(effect => effect, StringComparer.Ordinal)
             .ToArray();
@@ -706,7 +706,16 @@ internal static class Driver
                 error_formatter = ApiFunctionId(command.ErrorFunctionId, functionsById, packageReferences),
                 error_formatter_source_ids = ApiFunctionSourceIds(command.ErrorFunctionId, functionsById, sourceAliasesByPackageId),
                 error_type = ApiType(command.ErrorType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
-                required_capabilities = command.RequiresFsRead ? new[] { "fs.read" } : Array.Empty<string>()
+                required_capabilities = command.Capabilities
+                    .Select(capability => capability.Kind switch
+                    {
+                        CheckedCapabilityKind.FsRead => "fs.read",
+                        CheckedCapabilityKind.FsWrite => "fs.write",
+                        _ => throw new InvalidOperationException("Unknown checked command capability")
+                    })
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(capability => capability, StringComparer.Ordinal)
+                    .ToArray()
             })
             .OrderBy(command => command.id, StringComparer.Ordinal)
             .ToArray();
@@ -743,8 +752,9 @@ internal static class Driver
                 required_capabilities = route.Capabilities
                     .Select(capability => capability.Kind switch
                     {
-                        CheckedRouteCapabilityKind.DbRead => "db.read",
-                        CheckedRouteCapabilityKind.DbWrite => "db.write",
+                        CheckedCapabilityKind.FsWrite => "fs.write",
+                        CheckedCapabilityKind.DbRead => "db.read",
+                        CheckedCapabilityKind.DbWrite => "db.write",
                         _ => throw new InvalidOperationException("Unknown checked route capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -756,8 +766,9 @@ internal static class Driver
                         name = capability.ParameterName,
                         capability = capability.Kind switch
                         {
-                            CheckedRouteCapabilityKind.DbRead => "db.read",
-                            CheckedRouteCapabilityKind.DbWrite => "db.write",
+                            CheckedCapabilityKind.FsWrite => "fs.write",
+                            CheckedCapabilityKind.DbRead => "db.read",
+                            CheckedCapabilityKind.DbWrite => "db.write",
                             _ => throw new InvalidOperationException("Unknown checked route capability")
                         }
                     })
@@ -799,6 +810,7 @@ internal static class Driver
         LangTypeKind.Html => new { kind = "primitive", name = "Html" },
         LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
         LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
+        LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
         LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
         LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
         LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },

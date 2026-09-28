@@ -3,7 +3,7 @@ internal sealed record TrustedOperation(string Operation, string Trust, IReadOnl
 internal static class CheckedReportFacts
 {
     public static string[] RequiredCapabilities(IEnumerable<string> effects) => effects
-        .Where(effect => effect is "fs.read" or "db.read" or "db.write")
+        .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write")
         .Distinct(StringComparer.Ordinal)
         .OrderBy(effect => effect, StringComparer.Ordinal)
         .ToArray();
@@ -23,8 +23,10 @@ internal static class CheckedReportFacts
             [operation switch
             {
                 "FsRead.read_text" => "fs.read",
+                "FsWrite.write_text" => "fs.write",
                 "DbRead.query_one" => "db.read",
-                _ => "db.write"
+                "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => "db.write",
+                _ => throw new InvalidOperationException($"Unknown trusted adapter operation '{operation}'")
             }])).ToArray();
 
         void VisitFunction(CheckedFunction function)
@@ -115,6 +117,8 @@ internal static class CheckedReportFacts
                 case TypedIntrinsicCallExpr intrinsic:
                     if (intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText)
                         operationNames.Add("FsRead.read_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteText)
+                        operationNames.Add("FsWrite.write_text");
                     foreach (var argument in intrinsic.Arguments)
                         VisitExpression(argument);
                     break;

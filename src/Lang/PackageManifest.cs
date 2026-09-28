@@ -501,7 +501,7 @@ internal static class PackageLoader
             var rawValue = trimmed[(equals + 1)..].Trim();
             if (inCapabilities)
             {
-                if (key is not ("fs.read" or "net.listen" or "db.read" or "db.write"))
+                if (key is not ("fs.read" or "fs.write" or "net.listen" or "db.read" or "db.write"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
