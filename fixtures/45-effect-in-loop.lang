@@ -1,0 +1,8 @@
+module fixture::effect_in_loop;
+
+pub fn read_all(fs: FsRead, paths: List<Text>) -> i32 effects {} {
+    for path in paths {
+        let result: Result<Text, FsError> = fs.read_text(path);
+    }
+    return 0;
+}

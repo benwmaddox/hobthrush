@@ -12,6 +12,7 @@ internal enum LangTypeKind
     Union,
     Struct,
     Option,
+    List,
     Result,
     FsRead,
     FsError,
@@ -56,6 +57,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsDbRead => Kind == LangTypeKind.DbRead;
     public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
     public bool IsTransaction => Kind == LangTypeKind.Transaction;
+    public bool IsList => Kind == LangTypeKind.List;
     public bool IsDbError => Kind == LangTypeKind.DbError;
     internal int UnionId { get; }
     internal int StructId { get; }
@@ -81,6 +83,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId: unionId);
     internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
     internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
+    internal static LangType List(LangType item) => new(LangTypeKind.List, $"List<{item.DisplayName}>", arguments: [item]);
     internal static LangType Result(LangType ok, LangType error) => new(LangTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
 
     public bool Equals(LangType? other)
@@ -256,11 +259,15 @@ internal abstract record TypedExpr(LangType Type, Token At);
 internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(LangType.I32, At);
 internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(LangType.Text, At);
+internal sealed record TypedListExpr(LangType Type, IReadOnlyList<TypedExpr> Items, Token At) : TypedExpr(Type, At);
 internal sealed record TypedLocalExpr(LangType Type, int LocalId, Token At) : TypedExpr(Type, At);
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr(LangType.Text, At);
+internal sealed record TypedListLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
+internal sealed record TypedListGetExpr(LangType Type, TypedExpr Target, TypedExpr Index, Token At) : TypedExpr(Type, At);
+internal sealed record TypedListAppendExpr(LangType Type, TypedExpr Target, TypedExpr Value, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCallExpr(
     LangType Type,
     int FunctionId,
@@ -275,7 +282,8 @@ internal enum BuiltinIntrinsic
     HtmlHeading,
     HtmlParagraph,
     HtmlConcat,
-    HtmlDocument
+    HtmlDocument,
+    TextSplit
 }
 
 internal sealed record TypedIntrinsicCallExpr(
@@ -356,11 +364,17 @@ internal sealed record TypedMatchExpr(
 
 internal abstract record TypedStmt(Token At);
 internal sealed record TypedLetStmt(int LocalId, string Name, LangType Type, TypedExpr Value, Token At) : TypedStmt(At);
+internal sealed record TypedAssignStmt(int LocalId, TypedExpr Value, Token At) : TypedStmt(At);
 internal sealed record TypedReturnStmt(TypedExpr Value, Token At) : TypedStmt(At);
 internal sealed record TypedIfStmt(
     TypedExpr Condition,
     IReadOnlyList<TypedStmt> ThenBody,
     IReadOnlyList<TypedStmt>? ElseBody,
+    Token At) : TypedStmt(At);
+internal sealed record TypedForStmt(
+    TypedExpr Collection,
+    BoundLocal Item,
+    IReadOnlyList<TypedStmt> Body,
     Token At) : TypedStmt(At);
 internal sealed record TypedWithTransactionStmt(
     TypedExpr Database,
@@ -551,6 +565,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<CommandSymbol> _commands = [];
     private readonly List<CheckedRoute> _routes = [];
     private readonly HashSet<int> _activeTransactionLocals = [];
+    private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
+    private bool[] _resourceReachableDeclarations = [];
+    private bool[] _illegalListReachableDeclarations = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
@@ -622,11 +639,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             RegisterRoutes(module, rootPackageId, entryModule);
         }
 
+        BuildResourceGraphSummaries();
         ValidatePublicSignatures();
 
         foreach (var function in _functions)
             CheckFunctionBody(function);
 
+        ValidateResourceListInvariant();
         InferEffectsAndValidateBounds();
         ValidateCommandFormatterEffects();
 
@@ -1768,6 +1787,49 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     typedStatements.Add(new TypedLetStmt(id, let.Name, localType, value, let.At));
                     break;
                 }
+                case VarStmt variable:
+                {
+                    var localType = ResolveType(variable.Type, 0, _currentFunction!.TypeParametersByName);
+                    var value = CheckExpr(variable.Value, localType, locals, 0);
+                    if (!localType.IsError && ContainsResourceHandle(localType))
+                        Add("E_RESOURCE_ESCAPE", "Resource handles cannot be stored in mutable local bindings", variable.NameAt);
+
+                    var id = _nextLocalId++;
+                    if (locals.ContainsKey(variable.Name))
+                    {
+                        Add("E_NAME_DUPLICATE", $"Local '{variable.Name}' is already declared in this scope", variable.NameAt);
+                    }
+                    else
+                    {
+                        locals.Add(variable.Name, new LocalSymbol(id, localType, IsMutable: true));
+                    }
+                    typedStatements.Add(new TypedLetStmt(id, variable.Name, localType, value, variable.At));
+                    break;
+                }
+                case AssignmentStmt assignment:
+                {
+                    if (!locals.TryGetValue(assignment.Name, out var local))
+                    {
+                        Add("E_NAME_UNRESOLVED", $"Name '{assignment.Name}' is not in scope", assignment.NameAt);
+                        _ = CheckExpr(assignment.Value, null, locals, 0);
+                        break;
+                    }
+
+                    var value = CheckExpr(assignment.Value, local.Type, locals, 0);
+                    if (ContainsResourceHandle(local.Type))
+                    {
+                        Add("E_RESOURCE_ESCAPE", $"Resource handle '{assignment.Name}' cannot be rebound", assignment.NameAt);
+                        break;
+                    }
+                    if (!local.IsMutable)
+                    {
+                        Add("E_ASSIGN_IMMUTABLE", $"Cannot assign to immutable local '{assignment.Name}'", assignment.NameAt);
+                        break;
+                    }
+
+                    typedStatements.Add(new TypedAssignStmt(local.Id, value, assignment.At));
+                    break;
+                }
                 case ReturnStmt ret:
                 {
                     var value = CheckExpr(ret.Value, _currentFunction!.ReturnType, locals, 0);
@@ -1803,6 +1865,45 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 case WithTransactionStmt transaction:
                     guaranteesReturn = CheckTransactionScope(transaction, typedStatements, locals);
                     break;
+                case ForStmt loop:
+                {
+                    var collection = CheckExpr(loop.Collection, null, locals, 0);
+                    var itemType = LangType.Error;
+                    if (!collection.Type.IsError)
+                    {
+                        if (!collection.Type.IsList)
+                        {
+                            Add("E_TYPE_MISMATCH", $"For loops require a List<T> value, found '{collection.Type.DisplayName}'", loop.Collection.At);
+                        }
+                        else
+                        {
+                            itemType = collection.Type.Arguments[0];
+                            if (ContainsResourceHandle(itemType))
+                                Add("E_RESOURCE_ESCAPE", "Resource handles cannot be iterated from a list", loop.NameAt);
+                        }
+                    }
+
+                    var itemId = _nextLocalId++;
+                    var bodyLocals = new Dictionary<string, LocalSymbol>(locals, StringComparer.Ordinal);
+                    if (bodyLocals.ContainsKey(loop.Name))
+                    {
+                        Add("E_NAME_DUPLICATE", $"Local '{loop.Name}' is already declared in this scope", loop.NameAt);
+                    }
+                    else
+                    {
+                        bodyLocals.Add(loop.Name, new LocalSymbol(itemId, itemType));
+                    }
+
+                    var body = new List<TypedStmt>();
+                    _ = CheckStatements(loop.Body, body, bodyLocals);
+                    typedStatements.Add(new TypedForStmt(
+                        collection,
+                        new BoundLocal(loop.Name, itemId, itemType, loop.NameAt),
+                        ReadOnly(body),
+                        loop.At));
+                    // A loop may execute zero times, so its body cannot guarantee a return.
+                    break;
+                }
                 default:
                     Add("E_UNSUPPORTED", "Statement is not implemented in this language slice", statement.At);
                     break;
@@ -1867,6 +1968,301 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             ReadOnly(body),
             transaction.At));
         return bodyReturns;
+    }
+
+    private void ValidateResourceListInvariant()
+    {
+        foreach (var union in _unions)
+        foreach (var variant in union.Variants)
+        foreach (var field in variant.Fields)
+            ValidateResourceListType(field.Type, field.At);
+
+        foreach (var structure in _structs)
+        foreach (var field in structure.Fields)
+            ValidateResourceListType(field.Type, field.At);
+
+        foreach (var function in _functions)
+        {
+            foreach (var parameter in function.Parameters)
+                ValidateResourceListType(parameter.Type, parameter.At);
+            ValidateResourceListType(function.ReturnType, function.Declaration.ReturnType.At);
+            if (function.CheckedFunction is not null)
+                ValidateResourceListStatements(function.CheckedFunction.Body);
+        }
+
+        foreach (var command in _commands)
+        {
+            ValidateResourceListType(command.ArgsStruct.Type, command.Declaration.At);
+            foreach (var input in command.Inputs)
+                ValidateResourceListType(input.Type, command.Declaration.At);
+            ValidateResourceListType(command.ErrorType, command.Declaration.At);
+        }
+
+        foreach (var route in _routes)
+        {
+            if (route.BodyType is not null)
+                ValidateResourceListType(route.BodyType, route.BodyTypeAt ?? route.At);
+            foreach (var field in route.BodySchema)
+                ValidateResourceListType(field.Type, field.At);
+            foreach (var response in route.Responses)
+                if (response.PayloadType is not null)
+                    ValidateResourceListType(response.PayloadType, response.PayloadTypeAt ?? response.At);
+        }
+    }
+
+    private void ValidateResourceListType(LangType type, Token at)
+    {
+        if (!ContainsIllegalResourceList(type))
+            return;
+
+        if (_resourceListDiagnosticLocations.Add((at.File, at.Line, at.Column)))
+            Add("E_RESOURCE_ESCAPE", "Lists cannot contain resource handles, directly or through nested types", at);
+    }
+
+    private void BuildResourceGraphSummaries()
+    {
+        var declarationCount = _structs.Count + _unions.Count;
+        var dependents = Enumerable.Range(0, declarationCount)
+            .Select(_ => new HashSet<int>())
+            .ToArray();
+        var reverseDependents = Enumerable.Range(0, declarationCount)
+            .Select(_ => new List<int>())
+            .ToArray();
+        var directlyContainsResource = new bool[declarationCount];
+        var listElementTypes = Enumerable.Range(0, declarationCount)
+            .Select(_ => new List<LangType>())
+            .ToArray();
+
+        foreach (var structure in _structs)
+        foreach (var field in structure.Fields)
+            CollectResourceGraphFacts(
+                field.Type,
+                structure.Id,
+                dependents,
+                directlyContainsResource,
+                listElementTypes);
+
+        foreach (var union in _unions)
+        foreach (var variant in union.Variants)
+        foreach (var field in variant.Fields)
+            CollectResourceGraphFacts(
+                field.Type,
+                _structs.Count + union.Id,
+                dependents,
+                directlyContainsResource,
+                listElementTypes);
+
+        for (var source = 0; source < dependents.Length; source++)
+        foreach (var target in dependents[source])
+            reverseDependents[target].Add(source);
+
+        _resourceReachableDeclarations = ComputeReverseReachability(
+            directlyContainsResource,
+            reverseDependents);
+
+        var directlyContainsIllegalList = new bool[declarationCount];
+        for (var declaration = 0; declaration < declarationCount; declaration++)
+        foreach (var elementType in listElementTypes[declaration])
+        {
+            if (!ContainsResourceHandle(elementType, _resourceReachableDeclarations))
+                continue;
+            directlyContainsIllegalList[declaration] = true;
+            break;
+        }
+
+        _illegalListReachableDeclarations = ComputeReverseReachability(
+            directlyContainsIllegalList,
+            reverseDependents);
+    }
+
+    private void CollectResourceGraphFacts(
+        LangType root,
+        int sourceDeclaration,
+        HashSet<int>[] dependents,
+        bool[] directlyContainsResource,
+        List<LangType>[] listElementTypes)
+    {
+        var pending = new Stack<LangType>();
+        pending.Push(root);
+        while (pending.TryPop(out var type))
+        {
+            if (IsResourceHandle(type))
+            {
+                directlyContainsResource[sourceDeclaration] = true;
+                continue;
+            }
+
+            if (type.IsList)
+                listElementTypes[sourceDeclaration].Add(type.Arguments[0]);
+
+            if (type.Kind == LangTypeKind.Struct)
+            {
+                dependents[sourceDeclaration].Add(type.StructId);
+                continue;
+            }
+            if (type.Kind == LangTypeKind.Union)
+            {
+                dependents[sourceDeclaration].Add(_structs.Count + type.UnionId);
+                continue;
+            }
+
+            foreach (var argument in type.Arguments)
+                pending.Push(argument);
+        }
+    }
+
+    private static bool[] ComputeReverseReachability(bool[] roots, IReadOnlyList<List<int>> reverseDependents)
+    {
+        var reachable = (bool[])roots.Clone();
+        var pending = new Queue<int>();
+        for (var declaration = 0; declaration < roots.Length; declaration++)
+            if (roots[declaration])
+                pending.Enqueue(declaration);
+
+        while (pending.TryDequeue(out var target))
+        foreach (var dependent in reverseDependents[target])
+        {
+            if (reachable[dependent])
+                continue;
+            reachable[dependent] = true;
+            pending.Enqueue(dependent);
+        }
+
+        return reachable;
+    }
+
+    private bool ContainsIllegalResourceList(LangType type)
+    {
+        var pending = new Stack<LangType>();
+        pending.Push(type);
+        while (pending.TryPop(out var current))
+        {
+            if (current.IsList && ContainsResourceHandle(current.Arguments[0], _resourceReachableDeclarations))
+                return true;
+
+            if (TryGetDeclarationNode(current, out var declaration)
+                && _illegalListReachableDeclarations[declaration])
+                return true;
+
+            if (current.Kind is LangTypeKind.Struct or LangTypeKind.Union)
+                continue;
+
+            foreach (var argument in current.Arguments)
+                pending.Push(argument);
+        }
+
+        return false;
+    }
+
+    private void ValidateResourceListStatements(IEnumerable<TypedStmt> statements)
+    {
+        foreach (var statement in statements)
+        {
+            switch (statement)
+            {
+                case TypedLetStmt let:
+                    ValidateResourceListType(let.Type, let.At);
+                    ValidateResourceListExpression(let.Value);
+                    break;
+                case TypedAssignStmt assignment:
+                    ValidateResourceListExpression(assignment.Value);
+                    break;
+                case TypedReturnStmt ret:
+                    ValidateResourceListExpression(ret.Value);
+                    break;
+                case TypedIfStmt conditional:
+                    ValidateResourceListExpression(conditional.Condition);
+                    ValidateResourceListStatements(conditional.ThenBody);
+                    if (conditional.ElseBody is not null)
+                        ValidateResourceListStatements(conditional.ElseBody);
+                    break;
+                case TypedForStmt loop:
+                    ValidateResourceListType(loop.Item.Type, loop.Item.At);
+                    ValidateResourceListExpression(loop.Collection);
+                    ValidateResourceListStatements(loop.Body);
+                    break;
+                case TypedWithTransactionStmt transaction:
+                    ValidateResourceListExpression(transaction.Database);
+                    ValidateResourceListStatements(transaction.Body);
+                    break;
+            }
+        }
+    }
+
+    private void ValidateResourceListExpression(TypedExpr expression)
+    {
+        ValidateResourceListType(expression.Type, expression.At);
+        switch (expression)
+        {
+            case TypedListExpr list:
+                foreach (var item in list.Items)
+                    ValidateResourceListExpression(item);
+                break;
+            case TypedBinaryExpr binary:
+                ValidateResourceListExpression(binary.Left);
+                ValidateResourceListExpression(binary.Right);
+                break;
+            case TypedCompareExpr comparison:
+                ValidateResourceListExpression(comparison.Left);
+                ValidateResourceListExpression(comparison.Right);
+                break;
+            case TypedCallExpr call:
+                foreach (var typeArgument in call.TypeArguments)
+                    ValidateResourceListType(typeArgument, call.At);
+                foreach (var argument in call.Arguments)
+                    ValidateResourceListExpression(argument);
+                break;
+            case TypedDatabaseCallExpr databaseCall:
+                ValidateResourceListExpression(databaseCall.Receiver);
+                ValidateResourceListExpression(databaseCall.Parameters);
+                break;
+            case TypedTextLengthExpr length:
+                ValidateResourceListExpression(length.Target);
+                break;
+            case TypedTextTrimExpr trim:
+                ValidateResourceListExpression(trim.Target);
+                break;
+            case TypedListLengthExpr length:
+                ValidateResourceListExpression(length.Target);
+                break;
+            case TypedListGetExpr get:
+                ValidateResourceListExpression(get.Target);
+                ValidateResourceListExpression(get.Index);
+                break;
+            case TypedListAppendExpr append:
+                ValidateResourceListExpression(append.Target);
+                ValidateResourceListExpression(append.Value);
+                break;
+            case TypedIntrinsicCallExpr intrinsic:
+                foreach (var argument in intrinsic.Arguments)
+                    ValidateResourceListExpression(argument);
+                break;
+            case TypedBuiltinConstructExpr builtin:
+                foreach (var argument in builtin.Arguments)
+                    ValidateResourceListExpression(argument);
+                break;
+            case TypedUnionConstructExpr variant:
+                foreach (var argument in variant.Arguments)
+                    ValidateResourceListExpression(argument);
+                break;
+            case TypedStructConstructExpr structure:
+                foreach (var field in structure.Fields)
+                    ValidateResourceListExpression(field.Value);
+                break;
+            case TypedFieldAccessExpr field:
+                ValidateResourceListExpression(field.Target);
+                break;
+            case TypedMatchExpr match:
+                ValidateResourceListExpression(match.Value);
+                foreach (var arm in match.Arms)
+                {
+                    if (arm.Pattern is TypedVariantPattern variantPattern)
+                    foreach (var binding in variantPattern.Bindings)
+                        ValidateResourceListType(binding.Type, binding.At);
+                    ValidateResourceListExpression(arm.Body);
+                }
+                break;
+        }
     }
 
     private void InferEffectsAndValidateBounds()
@@ -1983,6 +2379,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             NumberExpr number => new TypedNumberExpr(number.At, number.Value),
             BoolExpr boolean => new TypedBoolExpr(boolean.At, boolean.Value),
             TextExpr text => new TypedTextExpr(text.At, text.Value),
+            ListExpr list => CheckListLiteral(list, expected, locals, depth + 1),
             NameExpr name => CheckName(name, expected, locals),
             DeclarationRefExpr reference => CheckDeclarationReference(reference),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
@@ -1997,6 +2394,35 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (expected is not null && !expected.IsError && !result.Type.IsError && result.Type != expected)
             AddMismatch(expected, result.Type, expression.At);
         return result;
+    }
+
+    private TypedExpr CheckListLiteral(
+        ListExpr expression,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var expectedItemType = expected is not null && expected.IsList ? expected.Arguments[0] : null;
+        if (expression.Items.Count == 0)
+        {
+            if (expectedItemType is not null)
+                return new TypedListExpr(LangType.List(expectedItemType), [], expression.At);
+            if (expected?.IsError == true)
+                return new TypedErrorExpr(expression.At);
+            if (expected is null)
+                Add("E_TYPE_MISMATCH", "Empty list literal requires an expected type of List<T>", expression.At);
+            else
+                AddMismatch(expected, "List<T>", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var values = new List<TypedExpr>(expression.Items.Count);
+        values.Add(CheckExpr(expression.Items[0], expectedItemType, locals, depth));
+        var itemType = expectedItemType ?? values[0].Type;
+        for (var i = 1; i < expression.Items.Count; i++)
+            values.Add(CheckExpr(expression.Items[i], itemType, locals, depth));
+
+        return new TypedListExpr(LangType.List(itemType), ReadOnly(values), expression.At);
     }
 
     private TypedExpr CheckDeclarationReference(DeclarationRefExpr expression)
@@ -2224,6 +2650,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
             return new TypedTextLengthExpr(target, expression.At);
+        if (target.Type.IsList && expression.Field == "length")
+            return new TypedListLengthExpr(target, expression.At);
         if (target.Type.Kind != LangTypeKind.Struct)
         {
             Add("E_TYPE_MISMATCH", $"Field access requires a struct value, found '{target.Type.DisplayName}'", expression.At);
@@ -2342,10 +2770,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             if (hasCorrectArity && signatureTypesValid && diagnostics.Count == diagnosticsBeforeArguments)
                 _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
 
-            var returnType = isGeneric ? SubstituteType(function.ReturnType, inferredTypeArguments) : function.ReturnType;
+            var instantiatedReturnType = isGeneric
+                ? SubstituteType(function.ReturnType, inferredTypeArguments)
+                : function.ReturnType;
+            var returnType = instantiatedReturnType;
             if (isGeneric && (!hasCorrectArity || diagnostics.Count != diagnosticsBeforeArguments ||
                               typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type))))
                 returnType = LangType.Error;
+
+            if (isGeneric && typeArguments.All(typeArgument => !ContainsError(typeArgument)))
+            {
+                foreach (var parameter in function.Parameters)
+                    ValidateResourceListType(SubstituteType(parameter.Type, inferredTypeArguments), expression.At);
+                ValidateResourceListType(instantiatedReturnType, expression.At);
+                for (var i = 0; i < arguments.Count; i++)
+                    ValidateResourceListType(arguments[i].Type, expression.Arguments[i].At);
+            }
+
             return new TypedCallExpr(returnType, function.Id, ReadOnly(typeArguments), ReadOnly(arguments), expression.At);
         }
 
@@ -2456,6 +2897,35 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (receiver.Type.IsList && expression.Member is ("get" or "append"))
+        {
+            var get = expression.Member == "get";
+            var operation = get ? "List.get" : "List.append";
+            if (expression.Arguments.Count != 1)
+            {
+                Add("E_TYPE_MISMATCH", $"Intrinsic '{operation}' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+                for (var i = 0; i < expression.Arguments.Count; i++)
+                {
+                    var argumentType = i == 0 ? (get ? LangType.I32 : receiver.Type.Arguments[0]) : null;
+                    _ = CheckExpr(expression.Arguments[i], argumentType, locals, depth);
+                }
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (get)
+            {
+                var index = CheckExpr(expression.Arguments[0], LangType.I32, locals, depth);
+                return new TypedListGetExpr(
+                    LangType.Option(receiver.Type.Arguments[0]),
+                    receiver,
+                    index,
+                    expression.At);
+            }
+
+            var value = CheckExpr(expression.Arguments[0], receiver.Type.Arguments[0], locals, depth);
+            return new TypedListAppendExpr(receiver.Type, receiver, value, expression.At);
+        }
+
         if (receiver.Type.IsFsRead && expression.Member == "read_text")
         {
             var diagnosticsBeforeCall = diagnostics.Count;
@@ -2528,6 +2998,24 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
             return new TypedTextTrimExpr(receiver, expression.At);
+        }
+
+        if (receiver.Type.IsText && expression.Member == "split")
+        {
+            if (expression.Arguments.Count != 1)
+            {
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'Text.split' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+                for (var i = 0; i < expression.Arguments.Count; i++)
+                    _ = CheckExpr(expression.Arguments[i], i == 0 ? LangType.Text : null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            var separator = CheckExpr(expression.Arguments[0], LangType.Text, locals, depth);
+            return new TypedIntrinsicCallExpr(
+                LangType.List(LangType.Text),
+                BuiltinIntrinsic.TextSplit,
+                ReadOnly([receiver, separator]),
+                expression.At);
         }
 
         foreach (var argument in expression.Arguments)
@@ -3129,6 +3617,52 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return type.Arguments.Any(argument => ContainsType(argument, sought));
     }
 
+    private bool ContainsResourceHandle(LangType type, bool[] resourceReachableDeclarations)
+    {
+        var pending = new Stack<LangType>();
+        pending.Push(type);
+        while (pending.TryPop(out var current))
+        {
+            if (IsResourceHandle(current))
+                return true;
+
+            if (TryGetDeclarationNode(current, out var declaration))
+            {
+                if (resourceReachableDeclarations[declaration])
+                    return true;
+                continue;
+            }
+
+            foreach (var argument in current.Arguments)
+                pending.Push(argument);
+        }
+
+        return false;
+    }
+
+    private static bool IsResourceHandle(LangType type) =>
+        type.Kind is LangTypeKind.FsRead or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.Transaction;
+
+    private bool TryGetDeclarationNode(LangType type, out int declaration)
+    {
+        if (type.Kind == LangTypeKind.Struct && type.StructId >= 0 && type.StructId < _structs.Count)
+        {
+            declaration = type.StructId;
+            return true;
+        }
+        if (type.Kind == LangTypeKind.Union && type.UnionId >= 0 && type.UnionId < _unions.Count)
+        {
+            declaration = _structs.Count + type.UnionId;
+            return true;
+        }
+
+        declaration = -1;
+        return false;
+    }
+
+    private bool ContainsResourceHandle(LangType type) =>
+        ContainsResourceHandle(type, _resourceReachableDeclarations);
+
     private static bool ContainsError(LangType type) =>
         type.IsError || type.Arguments.Any(ContainsError);
 
@@ -3149,7 +3683,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return previous == actual;
         }
 
-        if (formal.Kind is LangTypeKind.Option or LangTypeKind.Result)
+        if (formal.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Result)
         {
             if (formal.Kind != actual.Kind || formal.Arguments.Count != actual.Arguments.Count)
                 return false;
@@ -3167,6 +3701,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return bindings.TryGetValue(type, out var inferred) ? inferred : LangType.Error;
         if (type.Kind == LangTypeKind.Option)
             return LangType.Option(SubstituteType(type.Arguments[0], bindings));
+        if (type.Kind == LangTypeKind.List)
+            return LangType.List(SubstituteType(type.Arguments[0], bindings));
         if (type.Kind == LangTypeKind.Result)
             return LangType.Result(
                 SubstituteType(type.Arguments[0], bindings),
@@ -3233,6 +3769,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     return LangType.Error;
                 }
                 return LangType.Option(ResolveType(syntax.Args[0], depth + 1, typeParameters));
+            case "List":
+                if (syntax.Args.Count != 1)
+                {
+                    Add("E_TYPE_MISMATCH", $"Type 'List' expects 1 type argument, got {syntax.Args.Count}", syntax.At);
+                    return LangType.Error;
+                }
+                var listItemType = ResolveType(syntax.Args[0], depth + 1, typeParameters);
+                return LangType.List(listItemType);
             case "Result":
                 if (syntax.Args.Count != 2)
                 {
@@ -3412,7 +3956,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private sealed record FunctionCallSite(FunctionSymbol Target, Token At);
     private sealed record DirectEffectCall(string Effect, string IntrinsicName, Token At);
 
-    private sealed record LocalSymbol(int Id, LangType Type);
+    private sealed record LocalSymbol(int Id, LangType Type, bool IsMutable = false);
 
     private int _nextLocalId;
 }

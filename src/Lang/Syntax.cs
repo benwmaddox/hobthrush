@@ -96,6 +96,7 @@ internal abstract record Expr(Token At);
 internal sealed record NumberExpr(Token At, int Value) : Expr(At);
 internal sealed record BoolExpr(Token At, bool Value) : Expr(At);
 internal sealed record TextExpr(Token At, string Value) : Expr(At);
+internal sealed record ListExpr(Token At, IReadOnlyList<Expr> Items) : Expr(At);
 internal sealed record NameExpr(Token At, string Name) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
 internal sealed record DeclarationRefExpr(Token At, SourceDeclarationRefSyntax Reference) : Expr(At);
@@ -125,7 +126,15 @@ internal sealed record WildcardPattern(Token At) : Pattern(At);
 
 internal abstract record Stmt(Token At);
 internal sealed record LetStmt(Token At, string Name, TypeSyntax Type, Expr Value) : Stmt(At);
+internal sealed record VarStmt(Token At, string Name, Token NameAt, TypeSyntax Type, Expr Value) : Stmt(At);
+internal sealed record AssignmentStmt(Token At, string Name, Token NameAt, Expr Value) : Stmt(At);
 internal sealed record ReturnStmt(Token At, Expr Value) : Stmt(At);
+internal sealed record ForStmt(
+    Token At,
+    string Name,
+    Token NameAt,
+    Expr Collection,
+    IReadOnlyList<Stmt> Body) : Stmt(At);
 internal sealed record IfStmt(
     Token At,
     Expr Condition,

@@ -10,9 +10,10 @@ pub union ScanError {
 }
 
 command scan {
-    help "Read a UTF-8 text file and optionally normalize its whitespace.";
+    help "Read a UTF-8 text file and optionally normalize it or return its first nonempty line.";
     argument input: FilePath help "Path of the file to read.";
     flag normalize help "Trim surrounding whitespace after reading.";
+    flag first_line help "Return the first nonempty trimmed line.";
     handler: self::app::scan::run;
     error: self::app::scan::describe_error;
 }

@@ -213,5 +213,30 @@
     "file": "42-test-missing-assert.lang",
     "status": "active",
     "expectedCode": "E_SYNTAX"
+  },
+  {
+    "file": "43-valid-list-iteration.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "44-immutable-assignment.lang",
+    "status": "active",
+    "expectedCodes": ["E_ASSIGN_IMMUTABLE"]
+  },
+  {
+    "file": "45-effect-in-loop.lang",
+    "status": "active",
+    "expectedCodes": ["E_EFFECT_EXCEEDED"]
+  },
+  {
+    "file": "46-loop-may-not-return.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "47-list-resource-escape.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
   }
 ]

@@ -5,9 +5,39 @@ pub fn run(
     fs: FsRead,
 ) -> Result<Text, self::app::main::ScanError> effects { fs.read } {
     return match fs.read_text(args.input) {
-        Ok(contents) => self::app::scan::normalize_if_requested(contents, args.normalize),
+        Ok(contents) => self::app::scan::process_contents(contents, args.normalize, args.first_line),
         Err(error) => Err(self::app::scan::map_fs_error(error)),
     };
+}
+
+fn process_contents(
+    contents: Text,
+    normalize: bool,
+    first_line: bool,
+) -> Result<Text, self::app::main::ScanError> effects {} {
+    if first_line {
+        return self::app::scan::first_nonempty_line(contents);
+    } else {
+        return self::app::scan::normalize_if_requested(contents, normalize);
+    }
+}
+
+fn first_nonempty_line(contents: Text) -> Result<Text, self::app::main::ScanError> effects {} {
+    var selected: Text = "";
+    for line in contents.split("\n") {
+        let trimmed: Text = line.trim();
+        if selected == "" {
+            if trimmed != "" {
+                selected = trimmed;
+            }
+        }
+    }
+
+    if selected == "" {
+        return Err(self::app::main::ScanError.EmptyInput);
+    } else {
+        return Ok(selected);
+    }
 }
 
 fn normalize_if_requested(

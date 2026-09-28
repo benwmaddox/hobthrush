@@ -403,6 +403,8 @@ internal static class Emitter
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
+            if (UsesListGet) EmitListGetHelper();
+            if (UsesTextSplit) EmitTextSplitHelper();
             if (UsesHtmlBuilders) EmitHtmlHelpers();
             if (UsesDatabase) EmitDatabaseHelpers();
             EmitArithmeticHelpers();
@@ -617,6 +619,11 @@ internal static class Emitter
                     _source.Append(EmitType(let.Type)).Append(" Local_").Append(let.LocalId)
                         .Append(" = ").Append(EmitExpr(let.Value)).AppendLine(";");
                     break;
+                case TypedAssignStmt assignment:
+                    Indent(indent);
+                    _source.Append("Local_").Append(assignment.LocalId).Append(" = ")
+                        .Append(EmitExpr(assignment.Value)).AppendLine(";");
+                    break;
                 case TypedReturnStmt ret:
                     Indent(indent);
                     _source.Append("return ").Append(EmitExpr(ret.Value)).AppendLine(";");
@@ -640,6 +647,16 @@ internal static class Emitter
                         _source.AppendLine("}");
                     }
                     break;
+                case TypedForStmt loop:
+                    Indent(indent);
+                    _source.Append("foreach (var Local_").Append(loop.Item.LocalId.ToString(CultureInfo.InvariantCulture))
+                        .Append(" in ").Append(EmitExpr(loop.Collection)).AppendLine(")");
+                    Indent(indent);
+                    _source.AppendLine("{");
+                    EmitStatements(loop.Body, indent + 1);
+                    Indent(indent);
+                    _source.AppendLine("}");
+                    break;
                 case TypedWithTransactionStmt transaction:
                     Indent(indent);
                     _source.Append("using (var Local_")
@@ -661,6 +678,7 @@ internal static class Emitter
             TypedNumberExpr number => number.Value.ToString(CultureInfo.InvariantCulture),
             TypedBoolExpr boolean => boolean.Value ? "true" : "false",
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
+            TypedListExpr list => EmitList(list),
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
@@ -670,6 +688,9 @@ internal static class Emitter
                 "DatabaseTransactionCommit(Local_" + commit.TransactionLocalId.ToString(CultureInfo.InvariantCulture) + ")",
             TypedTextLengthExpr length => "TextLength(" + EmitExpr(length.Target) + ")",
             TypedTextTrimExpr trim => "(" + EmitExpr(trim.Target) + ").Trim()",
+            TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
+            TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
+            TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
@@ -679,6 +700,16 @@ internal static class Emitter
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
+
+        private string EmitList(TypedListExpr expression)
+        {
+            var itemType = EmitType(expression.Type.Arguments[0]);
+            const string immutableArray = "global::System.Collections.Immutable.ImmutableArray";
+            if (expression.Items.Count == 0)
+                return immutableArray + "<" + itemType + ">.Empty";
+            return immutableArray + ".Create<" + itemType + ">(" +
+                string.Join(", ", expression.Items.Select(EmitExpr)) + ")";
+        }
 
         private string EmitDatabaseCall(TypedDatabaseCallExpr call)
         {
@@ -728,6 +759,8 @@ internal static class Emitter
                 "HtmlConcat(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
             BuiltinIntrinsic.HtmlDocument when expression.Arguments.Count == 2 =>
                 "HtmlDocument(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
+            BuiltinIntrinsic.TextSplit when expression.Arguments.Count == 2 =>
+                "TextSplit(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
             _ => throw new InvalidOperationException("Unknown builtin intrinsic")
         };
 
@@ -871,6 +904,26 @@ internal static class Emitter
             _source.AppendLine("        foreach (var rune in value.EnumerateRunes())");
             _source.AppendLine("            length = checked(length + 1);");
             _source.AppendLine("        return length;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitListGetHelper()
+        {
+            _source.AppendLine("    private static Option<T> ListGet<T>(global::System.Collections.Immutable.ImmutableArray<T> items, int index)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if ((uint)index >= (uint)items.Length) return new Option<T>.None();");
+            _source.AppendLine("        return new Option<T>.Some(items[index]);");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitTextSplitHelper()
+        {
+            _source.AppendLine("    private static global::System.Collections.Immutable.ImmutableArray<string> TextSplit(string value, string separator)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (separator.Length == 0) return global::System.Collections.Immutable.ImmutableArray.Create<string>(value);");
+            _source.AppendLine("        return global::System.Collections.Immutable.ImmutableArray.CreateRange<string>(value.Split(new[] { separator }, StringSplitOptions.None));");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -2102,6 +2155,7 @@ internal static class Emitter
             LangTypeKind.I32 => "int",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
+            LangTypeKind.List => "global::System.Collections.Immutable.ImmutableArray<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.FilePath => "FilePath",
             LangTypeKind.Html => "Html",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
@@ -2185,6 +2239,19 @@ internal static class Emitter
             .SelectMany(EnumerateExpressions)
             .Any(expression => expression is TypedTextLengthExpr);
 
+        private bool UsesListGet => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .Any(expression => expression is TypedListGetExpr);
+
+        private bool UsesTextSplit => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.TextSplit);
+
         private bool UsesHtmlBuilders => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))
             .SelectMany(StatementExpressions)
@@ -2244,6 +2311,9 @@ internal static class Emitter
                         if (conditional.ElseBody is not null)
                             foreach (var nested in EnumerateStatements(conditional.ElseBody)) yield return nested;
                         break;
+                    case TypedForStmt loop:
+                        foreach (var nested in EnumerateStatements(loop.Body)) yield return nested;
+                        break;
                     case TypedWithTransactionStmt transaction:
                         foreach (var nested in EnumerateStatements(transaction.Body)) yield return nested;
                         break;
@@ -2258,11 +2328,17 @@ internal static class Emitter
                 case TypedLetStmt let:
                     yield return let.Value;
                     break;
+                case TypedAssignStmt assignment:
+                    yield return assignment.Value;
+                    break;
                 case TypedReturnStmt ret:
                     yield return ret.Value;
                     break;
                 case TypedIfStmt conditional:
                     yield return conditional.Condition;
+                    break;
+                case TypedForStmt loop:
+                    yield return loop.Collection;
                     break;
                 case TypedWithTransactionStmt transaction:
                     yield return transaction.Database;
@@ -2275,6 +2351,10 @@ internal static class Emitter
             yield return expression;
             switch (expression)
             {
+                case TypedListExpr list:
+                    foreach (var item in list.Items)
+                    foreach (var nested in EnumerateExpressions(item)) yield return nested;
+                    break;
                 case TypedBinaryExpr binary:
                     foreach (var nested in EnumerateExpressions(binary.Left)) yield return nested;
                     foreach (var nested in EnumerateExpressions(binary.Right)) yield return nested;
@@ -2296,6 +2376,17 @@ internal static class Emitter
                     break;
                 case TypedTextTrimExpr trim:
                     foreach (var nested in EnumerateExpressions(trim.Target)) yield return nested;
+                    break;
+                case TypedListLengthExpr length:
+                    foreach (var nested in EnumerateExpressions(length.Target)) yield return nested;
+                    break;
+                case TypedListGetExpr get:
+                    foreach (var nested in EnumerateExpressions(get.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(get.Index)) yield return nested;
+                    break;
+                case TypedListAppendExpr append:
+                    foreach (var nested in EnumerateExpressions(append.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(append.Value)) yield return nested;
                     break;
                 case TypedIntrinsicCallExpr intrinsic:
                     foreach (var argument in intrinsic.Arguments)

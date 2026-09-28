@@ -112,7 +112,7 @@ internal static class Lexer
                 continue;
             }
 
-            if (".;:,(){}=+*-<>".IndexOf(c) >= 0)
+            if (".;:,(){}[]=+*-<>".IndexOf(c) >= 0)
             {
                 tokens.Add(new Token(c.ToString(), c.ToString(), line, column, file));
                 i++;
@@ -839,13 +839,60 @@ internal sealed class Parser
 
         if (Is("if")) return ParseIfStatement();
 
+        if (Is("for") && LookAhead().Kind == "id" && LookAhead(2).Text == "in")
+            return ParseForStatement();
+
         if (Is("with")) return ParseWithTransactionStatement();
 
-        if (Is("var") || Is("await"))
+        if (Is("var") && LookAhead().Kind == "id" && LookAhead(2).Text == ":")
+        {
+            var at = Take();
+            var local = ExpectBareIdentifier();
+            Expect(":");
+            var type = ParseType();
+            Expect("=");
+            var value = ParseExpr();
+            Expect(";");
+            return new VarStmt(at, local.Text, local, type, value);
+        }
+
+        if (IsBareIdentifier(Current) && LookAhead().Text == "=")
+        {
+            var local = Take();
+            Expect("=");
+            var value = ParseExpr();
+            Expect(";");
+            return new AssignmentStmt(local, local.Text, local, value);
+        }
+
+        if (Is("await"))
             Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
 
         Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
         throw new ParseFailure();
+    }
+
+    private ForStmt ParseForStatement()
+    {
+        var at = Expect("for");
+        if (_statementNestingDepth >= MaximumNestingDepth)
+            Fail(at, "E_SYNTAX", "Statement nesting is too deep");
+
+        _statementNestingDepth++;
+        try
+        {
+            var local = ExpectBareIdentifier();
+            Expect("in");
+            // The following brace begins the loop body, so it cannot begin a
+            // struct construction in the collection expression.
+            var collection = ParseExpr(allowStructConstruction: false);
+            var body = ParseStatementBlock("Unclosed for block");
+            return new ForStmt(at, local.Text, local, collection, body);
+        }
+        finally
+        {
+            _statementNestingDepth--;
+        }
     }
 
     private IfStmt ParseIfStatement()
@@ -1114,6 +1161,28 @@ internal sealed class Parser
     private Expr ParsePrimary(bool allowStructConstruction)
     {
         var token = Current;
+        if (Is("["))
+        {
+            var at = Take();
+            var items = new List<Expr>();
+            while (!Is("]"))
+            {
+                if (Current.Kind == "eof") Fail(Current, "E_SYNTAX", "Unclosed list literal");
+                items.Add(ParseExpr());
+                if (Is(","))
+                {
+                    Take();
+                    if (Is("]")) break;
+                }
+                else if (!Is("]"))
+                {
+                    Expect(",");
+                }
+            }
+            Expect("]");
+            var depth = 1 + items.Select(ExpressionDepth).DefaultIfEmpty(0).Max();
+            return ParsePostfix(RegisterExpression(new ListExpr(at, items), depth));
+        }
         if (token.Kind == "number")
         {
             Take();

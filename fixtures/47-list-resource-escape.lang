@@ -1,0 +1,10 @@
+module fixture::list_resource_escape;
+
+fn singleton<T>(item: T) -> List<T> effects {} {
+    return [item];
+}
+
+pub fn escape(fs: FsRead) -> i32 effects {} {
+    let count: i32 = self::fixture::list_resource_escape::singleton(fs).length;
+    return count;
+}

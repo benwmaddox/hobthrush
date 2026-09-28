@@ -37,7 +37,7 @@ parameter       = bare_identifier, ":", type ;
 type            = type_name, [ "<", type, { ",", type }, ">" ] ;
 type_name       = builtin_type | type_parameter | qualified_ref ;
 builtin_type    = "i32" | "bool" | "Text" | "Html" | "Option" | "Result"
-                | "FsError" | "FsRead" | "FilePath" | "DbError" | "DbRead" | "DbWrite" ;
+                | "List" | "FsError" | "FsRead" | "FilePath" | "DbError" | "DbRead" | "DbWrite" ;
 type_parameter  = bare_identifier ;
 
 union           = "union", bare_identifier, "{", [ variant, { ",", variant }, [ "," ] ], "}" ;
@@ -56,10 +56,16 @@ test_let         = "let", bare_identifier, ":", type, "=", expression, ";" ;
 
 block           = "{", { statement }, "}" ;
 statement       = "let", bare_identifier, ":", type, "=", expression, ";"
+                | var_declaration
+                | assignment
                 | "return", expression, ";"
                 | if_statement
+                | for_statement
                 | with_transaction_statement ;
+var_declaration = "var", bare_identifier, ":", type, "=", expression, ";" ;
+assignment      = bare_identifier, "=", expression, ";" ;
 if_statement    = "if", expression, block, [ "else", block ] ;
+for_statement   = "for", bare_identifier, "in", expression, block ;
 with_transaction_statement = "with", expression, "as", bare_identifier, block ;
 
 expression      = match_expression | equality ;
@@ -72,7 +78,8 @@ postfix         = primary, { field_access | member_call } ;
 field_access    = ".", member_identifier ;
 member_call     = ".", member_identifier, "(", [ arguments ], ")" ;
 primary         = integer | boolean | text | bare_identifier | qualified_ref | call | struct_construction
-                | "(", expression, ")" ;
+                | list_literal | "(", expression, ")" ;
+list_literal     = "[", [ arguments ], "]" ;
 call            = qualified_ref, "(", [ arguments ], ")" | bare_identifier, "(", [ arguments ], ")" ;
 struct_construction
                 = qualified_ref, "{", [ field_values ], "}" | bare_identifier, "{", [ field_values ], "}" ;
@@ -99,6 +106,14 @@ bare_identifier = lexical_identifier except "true", "false", "null", "match", "i
 ```
 
 The `qualified_ref` primary is a syntactic declaration-reference form, including the base of a zero-payload union variant such as `self::app::main::Choice.Empty`. Semantic checking accepts it as a value only when it resolves to a supported value-producing case; arbitrary function or type declarations are not first-class values. Calls and struct constructions use their separate productions.
+
+## Lists and iteration
+
+In an unqualified type position, `List<T>` names the built-in immutable list; qualified references such as `self::collections::types::List` still resolve to user declarations named `List`. A list literal is `[item, ...]`. Items must have the same exact type. An empty `[]` is accepted only when an expected `List<T>` type supplies its element type. `Map<K, V>` remains part of the wider V1 target and is not implemented.
+
+For a list `items: List<T>`, `items.length` returns `i32`, `items.get(index)` returns `Option<T>` and yields `None` for negative or out-of-range indexes, and `items.append(value)` returns a list with the value appended without changing the original list. `Text.split(separator)` returns `List<Text>`, matches the exact separator, and preserves empty fields. An empty separator returns one item containing the original text.
+
+`for item in items { ... }` visits elements in list order. Its binding is scoped to the loop body and immutable. Calls in the loop body contribute to the enclosing function's inferred effects. A loop does not guarantee that its body runs, so a `return` inside a loop does not establish that the enclosing function returns on every path. `var name: T = value;` declares a rebindable local; assignment uses `name = value;` and requires the same type. `let` bindings and loop bindings are immutable. Resource handles cannot be stored in lists or rebindable `var` locals. List contents have no mutation or index-assignment syntax. `break` and `continue` are not implemented.
 
 Every package source file has one `module` header followed by declarations; source-level imports do not exist, and a legacy top-level `import` is a syntax error. A package manifest chooses the source root; each module path maps to a `.lang` path beneath it by replacing `::` with directory separators. For example, `module text::validation;` maps to `src/text/validation.lang` when `source_root = "src"`. Every user declaration reference has a package root, one or more module segments, and a declaration name separated by `::`: `self::text::validation::normalize` names a declaration in the current package, while `validation::text::validation::normalize` names one in the direct dependency alias `validation`. The alias `self` is reserved. A dependency alias exposes only that direct package; aliases are not re-exported transitively. Built-in types and constructors such as `Option<T>`, `Some`, `None`, `Ok`, `Err`, and `FsError` retain short forms, as do local value expressions. Bare `self` follows ordinary local-name rules and is a namespace root only when followed by `::`. An unqualified user declaration may parse as a name, but only locals, built-ins, and type parameters are valid in that form; user declarations require qualification. Use `.` for value fields, member operations, and union variants, such as `self::catalog::message::Message.Ready(value)`. Module and declaration segments use contextual identifier rules.
 
@@ -146,7 +161,7 @@ A union variant uses either named fields such as `TooLong(max: i32)` or position
 
 There are no explicit type arguments, generic structs or unions, traits, or constructor-driven generic inference. `Some`, `None`, `Ok`, and `Err` still need an expected built-in type. A direct call such as `require(Some("present"), "fallback")` cannot pass the unresolved `Option<T>` expectation into `Some`; it reports `E_TYPE_MISMATCH` with a constructor-specific message that an expected `Option<T>` type is required. Bind the constructor to an annotated local first, then pass that local to the generic function. `Option<T>` and `Result<T, E>` remain compiler-provided generic types; their type arguments must be supported types.
 
-Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, and `await`; those six retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, `pub`, `test`, `assert`, and `with`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions; top-level `route` dispatches to the contextual route grammar below.
+Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, and `await`; those six retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, `pub`, `test`, `assert`, and `with`) are accepted as ordinary names where the surrounding syntax expects a name. `for`, `var`, and `in` are recognized as collection syntax only in their statement positions and can still be ordinary names where the grammar expects an identifier. `List` is the built-in only in an unqualified type position; a qualified `...::List` is a user type reference. Grammar dispatch still treats declaration and statement keywords specially in their positions; top-level `route` dispatches to the contextual route grammar below.
 
 Member positions are unambiguous and accept any lexical identifier: struct field declarations and initializers, union variant and named-payload labels, and the name after `.` in field access, qualified types, variant construction, and qualified patterns. Module path segments also accept any lexical identifier. A leading/root type name, constructor name, declaration name, function name, parameter, local binding, or unqualified pattern variant uses a bare identifier. `null` remains invalid as a value; `true` and `false` remain boolean literals.
 
