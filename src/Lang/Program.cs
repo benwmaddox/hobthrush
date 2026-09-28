@@ -1046,12 +1046,47 @@ internal static class Driver
 
     private static void CopyBuildArtifacts(string stagedOutputDirectory, string destinationDirectory)
     {
-        Directory.CreateDirectory(destinationDirectory);
-        foreach (var artifact in Directory.GetFiles(stagedOutputDirectory))
+        var stagedRoot = Path.GetFullPath(stagedOutputDirectory);
+        var destinationRoot = Path.GetFullPath(destinationDirectory);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var destinationPrefix = Path.EndsInDirectorySeparator(destinationRoot)
+            ? destinationRoot
+            : destinationRoot + Path.DirectorySeparatorChar;
+        var artifacts = Directory.EnumerateFiles(
+                stagedRoot,
+                "*",
+                new EnumerationOptions
+                {
+                    AttributesToSkip = FileAttributes.ReparsePoint,
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = false,
+                    ReturnSpecialDirectories = false
+                })
+            .Select(path => new
+            {
+                FullPath = path,
+                RelativePath = Path.GetRelativePath(stagedRoot, path)
+                    .Replace(Path.DirectorySeparatorChar, '/')
+                    .Replace(Path.AltDirectorySeparatorChar, '/')
+            })
+            .OrderBy(artifact => artifact.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+
+        Directory.CreateDirectory(destinationRoot);
+        foreach (var artifact in artifacts)
         {
+            var outputPath = Path.GetFullPath(Path.Combine(
+                destinationRoot,
+                artifact.RelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!outputPath.StartsWith(destinationPrefix, comparison))
+                throw new IOException("Generated runtime artifact resolves outside its output directory");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
             File.Copy(
-                artifact,
-                Path.Combine(destinationDirectory, Path.GetFileName(artifact)),
+                artifact.FullPath,
+                outputPath,
                 overwrite: false);
         }
     }

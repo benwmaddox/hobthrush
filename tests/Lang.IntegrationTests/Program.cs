@@ -3343,8 +3343,7 @@ internal static class IntegrationTests
         var firstBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-first", packageRoot, "build");
         var firstArtifact = AssertBuiltWebApplication(firstBuild, packageRoot);
         var firstDependencyManifest = await File.ReadAllTextAsync(Path.ChangeExtension(firstArtifact, ".deps.json"));
-        AssertTrue(firstDependencyManifest.Contains("\"Microsoft.Data.Sqlite/10.0.12\"", StringComparison.Ordinal),
-            "SQLite-enabled web builds must include the pinned Microsoft.Data.Sqlite runtime dependency.");
+        AssertBuiltSqliteRuntimeAssets(firstArtifact, firstDependencyManifest);
         var firstOpenApiPath = Path.Combine(Path.GetDirectoryName(firstArtifact)!, "openapi.json");
         AssertTrue(File.Exists(firstOpenApiPath), $"Expected the generated OpenAPI artifact at {firstOpenApiPath}.");
         var firstOpenApiBytes = await File.ReadAllBytesAsync(firstOpenApiPath);
@@ -3366,6 +3365,8 @@ internal static class IntegrationTests
 
         var secondBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-second", packageRoot, "build");
         var secondArtifact = AssertBuiltWebApplication(secondBuild, packageRoot);
+        var secondDependencyManifest = await File.ReadAllTextAsync(Path.ChangeExtension(secondArtifact, ".deps.json"));
+        AssertBuiltSqliteRuntimeAssets(secondArtifact, secondDependencyManifest);
         var secondOpenApiPath = Path.Combine(Path.GetDirectoryName(secondArtifact)!, "openapi.json");
         AssertTrue(File.Exists(secondOpenApiPath), $"Expected the generated OpenAPI artifact at {secondOpenApiPath}.");
         var secondOpenApiBytes = await File.ReadAllBytesAsync(secondOpenApiPath);
@@ -4190,6 +4191,58 @@ internal static class IntegrationTests
             "A managed web app should include its dependency manifest.");
         AssertEqual(string.Empty, result.StandardError, Describe(result));
         return artifactPath;
+    }
+
+    private static void AssertBuiltSqliteRuntimeAssets(string artifactPath, string dependencyManifest)
+    {
+        foreach (var dependency in new[]
+        {
+            "Microsoft.Data.Sqlite/10.0.12",
+            "SQLitePCLRaw.bundle_e_sqlite3/",
+            "SQLitePCLRaw.core/",
+            "SQLitePCLRaw.provider.e_sqlite3/"
+        })
+        {
+            AssertTrue(dependencyManifest.Contains(dependency, StringComparison.Ordinal),
+                $"A SQLite-enabled web artifact must include managed runtime dependency {dependency}.");
+        }
+
+        var (runtimeIdentifier, assetFileName) = CurrentSqliteRuntimeAsset();
+        var outputDirectory = Path.GetDirectoryName(artifactPath)!;
+        var runtimeAssetPath = Path.Combine(outputDirectory, "runtimes", runtimeIdentifier, "native", assetFileName);
+        var rootAssetPath = Path.Combine(outputDirectory, assetFileName);
+        AssertTrue(File.Exists(runtimeAssetPath) || File.Exists(rootAssetPath),
+            $"A SQLite-enabled web artifact must include the current platform native asset at either "
+                + $"{runtimeAssetPath} or {rootAssetPath}.");
+    }
+
+    private static (string RuntimeIdentifier, string AssetFileName) CurrentSqliteRuntimeAsset()
+    {
+        var runtimePrefix = OperatingSystem.IsWindows()
+            ? "win"
+            : OperatingSystem.IsLinux()
+                ? "linux"
+                : OperatingSystem.IsMacOS()
+                    ? "osx"
+                    : throw new InvalidOperationException("SQLite runtime asset assertions require Windows, Linux, or macOS.");
+        var architecture = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.X86 => "x86",
+            Architecture.Arm64 => "arm64",
+            Architecture.Arm => "arm",
+            _ => throw new InvalidOperationException(
+                $"SQLite runtime asset assertions do not support architecture {RuntimeInformation.ProcessArchitecture}.")
+        };
+        var assetFileName = runtimePrefix switch
+        {
+            "win" => "e_sqlite3.dll",
+            "linux" => "libe_sqlite3.so",
+            "osx" => "libe_sqlite3.dylib",
+            _ => throw new InvalidOperationException($"Unsupported SQLite runtime platform {runtimePrefix}.")
+        };
+
+        return ($"{runtimePrefix}-{architecture}", assetFileName);
     }
 
     private static async Task TestScanCliExample(Harness harness)
