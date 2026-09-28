@@ -68,6 +68,7 @@ internal sealed record FunctionDecl(
     string Name,
     IReadOnlyList<TypeParameterSyntax> TypeParameters,
     bool Public,
+    bool IsAsync,
     IReadOnlyList<ParameterDecl> Parameters,
     TypeSyntax ReturnType,
     IReadOnlyList<EffectSyntax> Effects,
@@ -114,6 +115,7 @@ internal sealed record StructConstructExpr(
     IReadOnlyList<StructFieldValue> Fields) : Expr(At);
 internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
+internal sealed record AwaitExpr(Token At, Expr Value) : Expr(At);
 internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
 
 internal abstract record Pattern(Token At);

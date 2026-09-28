@@ -372,7 +372,12 @@ internal sealed class Parser
 
                 if (Is("fn"))
                 {
-                    functions.Add(ParseFunction(isPublic));
+                    functions.Add(ParseFunction(isPublic, isAsync: false));
+                }
+                else if (Is("async") && LookAhead().Text == "fn")
+                {
+                    Take();
+                    functions.Add(ParseFunction(isPublic, isAsync: true));
                 }
                 else if (Is("union"))
                 {
@@ -703,10 +708,8 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private FunctionDecl ParseFunction(bool isPublic)
+    private FunctionDecl ParseFunction(bool isPublic, bool isAsync)
     {
-        if (Is("async"))
-            Fail(Current, "E_UNSUPPORTED", "Async functions are not implemented yet");
         Expect("fn");
         var name = ExpectBareIdentifier();
         var typeParameters = ParseFunctionTypeParameters();
@@ -736,7 +739,7 @@ internal sealed class Parser
         Expect("effects");
         var effects = ParseEffects();
         var body = ParseStatementBlock("Unclosed function body");
-        return new FunctionDecl(name.Text, typeParameters, isPublic, parameters, returnType, effects, body, name);
+        return new FunctionDecl(name.Text, typeParameters, isPublic, isAsync, parameters, returnType, effects, body, name);
     }
 
     private TestDecl ParseTest()
@@ -1161,6 +1164,15 @@ internal sealed class Parser
     private Expr ParsePrimary(bool allowStructConstruction)
     {
         var token = Current;
+        if (Is("await"))
+        {
+            var at = Take();
+            var value = ParseExpr(6, allowStructConstruction);
+            var depth = ExpressionDepth(value) + 1;
+            if (depth > MaximumNestingDepth)
+                Fail(at, "E_SYNTAX", "Expression nesting is too deep");
+            return ParsePostfix(RegisterExpression(new AwaitExpr(at, value), depth));
+        }
         if (Is("["))
         {
             var at = Take();
@@ -1229,7 +1241,7 @@ internal sealed class Parser
                 Fail(token, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
             if (Is("match"))
                 return ParsePostfix(ParseMatch(Take()));
-            if (Is("await") || Is("if"))
+            if (Is("if"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
             if (!IsBareIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");

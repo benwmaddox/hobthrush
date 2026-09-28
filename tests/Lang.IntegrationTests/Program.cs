@@ -60,6 +60,8 @@ internal static class IntegrationTests
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
             ("duplicate and reserved struct names are rejected", TestStructDeclarationNames),
             ("contextual keywords are identifiers only in their grammar contexts", TestContextualIdentifiers),
+            ("async functions support contextual names, generic calls, and recursive awaits", TestAsyncManagedRuntime),
+            ("await diagnostics identify invalid targets without cascades", TestAsyncDiagnostics),
             ("static GET and POST routes produce checked route IR", TestStaticRouteDeclarations),
             ("route signatures, mappings, codecs, names, and placement are checked", TestRouteContractDiagnostics),
             ("opaque Html signatures build as managed libraries", TestHtmlManagedLibraryBuild),
@@ -76,6 +78,7 @@ internal static class IntegrationTests
             ("effect annotations are closed upper bounds and enforce FsRead capabilities", TestEffectAnnotationsAndCapabilities),
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
             ("inspect effects reports deterministic compiler-derived paths and trusted boundaries", TestInspectEffects),
+            ("async FsRead calls retain effect paths and trusted adapter provenance", TestAsyncEffects),
             ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
             ("inspect api exports a deterministic source-facing package graph", TestInspectApi),
             ("inspect api projects checked web routes and database capabilities", TestInspectApiWebRoutes),
@@ -83,11 +86,13 @@ internal static class IntegrationTests
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
+            ("async FsRead adapter maps results and honors pre-canceled tokens", TestAsyncFsReadAdapter),
             ("managed FsWrite maps strict UTF-8 writes and filesystem errors", TestFsWriteManagedLibrary),
             ("managed build receipts bind checked inputs and artifact bytes", TestStandaloneBuildReceipt),
             ("CLI capability grants including FsWrite are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
+            ("async CLI handlers await FsRead results and format typed failures", TestAsyncCliCommandRuntime),
             ("FsWrite CLI grants, reports, receipts, and web route projections are checked", TestFsWritePackageContracts),
             ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
             ("typed CLI declarations validate entries, signatures, and parser spans", TestTypedCliCommandDiagnostics),
@@ -947,6 +952,127 @@ internal static class IntegrationTests
             route
             """;
         await ExpectDiagnosticsAsync(harness, "malformed-route-declaration", standaloneRouteSource, "E_ROUTE_DECL");
+    }
+
+    private static async Task TestAsyncManagedRuntime(Harness harness)
+    {
+        const string source = """
+            module app::main;
+
+            pub async fn identity<T>(value: T) -> T effects {} {
+                return value;
+            }
+
+            fn async(value: i32) -> i32 effects {} {
+                return value;
+            }
+
+            async fn descend(value: i32) -> i32 effects {} {
+                if value == 0 { return 0; }
+                return await self::app::main::descend(value - 1) + 1;
+            }
+
+            async fn is_even(value: i32) -> bool effects {} {
+                if value == 0 { return true; }
+                return await self::app::main::is_odd(value - 1);
+            }
+
+            async fn is_odd(value: i32) -> bool effects {} {
+                if value == 0 { return false; }
+                return await self::app::main::is_even(value - 1);
+            }
+
+            pub async fn main() -> i32 effects {} {
+                let sum: i32 = await self::app::main::identity(20) + await self::app::main::identity(22);
+                let text: Text = await self::app::main::identity("λ");
+                let contextual_name: i32 = self::app::main::async(0);
+                let recursive: i32 = await self::app::main::descend(2);
+                let even: bool = await self::app::main::is_even(4);
+                let odd: bool = await self::app::main::is_odd(3);
+                if even {
+                    if odd {
+                        return sum + text.length + contextual_name + recursive;
+                    }
+                }
+                return 0;
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "async-runtime-package",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("async-runtime-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("async-runtime-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        var artifact = ParseBuiltArtifact(build, "Built executable: ");
+        using var receipt = await AssertBuildReceiptAsync(
+            Path.GetDirectoryName(artifact)!,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(Path.GetDirectoryName(artifact)!, artifact).Replace(Path.DirectorySeparatorChar, '/')],
+            packageRoot);
+
+        var run = await harness.InvokePackageDirectoryAsync("async-runtime-run", packageRoot, "run");
+        AssertRunOutput("45" + Environment.NewLine, run);
+    }
+
+    private static async Task TestAsyncDiagnostics(Harness harness)
+    {
+        var cases = new (string Name, string Source, string[] Codes, string RangeToken, int Occurrence)[]
+        {
+            ("await-outside-async", """
+                module harness::await_outside_async;
+                async fn target() -> i32 effects {} { return 1; }
+                pub fn main() -> i32 effects {} { return await self::harness::await_outside_async::target(); }
+                """, ["E_AWAIT_CONTEXT"], "await", 1),
+            ("await-sync-call", """
+                module harness::await_sync_call;
+                fn sync_target() -> i32 effects {} { return 1; }
+                pub async fn main() -> i32 effects {} { return await self::harness::await_sync_call::sync_target(); }
+                """, ["E_AWAIT_SYNC"], "self", 1),
+            ("await-non-call", """
+                module harness::await_non_call;
+                pub async fn main() -> i32 effects {} {
+                    let value: i32 = 1;
+                    return await value;
+                }
+                """, ["E_AWAIT_TARGET"], "await", 1),
+            ("unawaited-async-call", """
+                module harness::unawaited_async_call;
+                async fn target() -> i32 effects {} { return 1; }
+                pub async fn main() -> i32 effects {} { return self::harness::unawaited_async_call::target(); }
+                """, ["E_ASYNC_CALL_UNAWAITED"], "self", 1),
+            ("await-unresolved-target", """
+                module harness::await_unresolved_target;
+                pub async fn main() -> i32 effects {} { return await self::harness::await_unresolved_target::missing(); }
+                """, ["E_NAME_UNRESOLVED"], "self", 1),
+            ("await-missing-fsread-capability", """
+                module harness::await_missing_fsread;
+                pub async fn main() -> Result<Text, FsError> effects { fs.read } {
+                    return await fs.read_text_async("missing.txt");
+                }
+                """, ["E_CAPABILITY_MISSING"], "fs", 2)
+        };
+
+        foreach (var testCase in cases)
+        {
+            var diagnostics = await ExpectDiagnosticsAsync(
+                harness,
+                testCase.Name,
+                testCase.Source,
+                testCase.Codes);
+            var actualCodes = diagnostics.Select(diagnostic => diagnostic.Code).ToArray();
+            AssertTrue(testCase.Codes.SequenceEqual(actualCodes, StringComparer.Ordinal),
+                $"{testCase.Name} should produce exactly [{string.Join(", ", testCase.Codes)}], got [{string.Join(", ", actualCodes)}].");
+            AssertRangeAtToken(testCase.Source, diagnostics.Single(), testCase.RangeToken, testCase.Occurrence);
+        }
     }
 
     private static async Task TestStructDeclarationNames(Harness harness)
@@ -1880,6 +2006,56 @@ internal static class IntegrationTests
         }
     }
 
+    private static async Task TestAsyncEffects(Harness harness)
+    {
+        const string source = """
+            module app::async_effects;
+
+            async fn read_leaf(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
+                return await fs.read_text_async(path);
+            }
+
+            pub async fn read_root(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
+                return await self::app::async_effects::read_leaf(fs, path);
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "async-inspect-effects",
+            LibraryPackageManifest("async-inspect-effects"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/async_effects.lang"] = source
+            });
+
+        var result = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::app::async_effects::read_root", "--json");
+        AssertEqual(0, result.ExitCode, Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var report = document.RootElement;
+        AssertEqual(1, report.GetProperty("schema_version").GetInt32(),
+            "Async calls must preserve inspect-effects schema version 1.");
+        AssertJsonStringArray(report.GetProperty("declared_effects"), ["fs.read"]);
+        AssertJsonStringArray(report.GetProperty("inferred_effects"), ["fs.read"]);
+        AssertJsonStringArray(report.GetProperty("required_capabilities"), ["fs.read"]);
+        var effectPath = report.GetProperty("effect_paths").EnumerateArray()
+            .Single(path => path.GetProperty("effect").GetString() == "fs.read");
+        var effectSteps = effectPath.GetProperty("steps").EnumerateArray()
+            .Select(step => step.GetString() ?? string.Empty);
+        AssertEqual("app::async_effects::read_root -> app::async_effects::read_leaf -> fs.read_text_async",
+            string.Join(" -> ", effectSteps),
+            "The inferred async effect path should cross the async function before the adapter.");
+        var operations = report.GetProperty("trusted_operations").EnumerateArray().ToArray();
+        AssertEqual(1, operations.Length, "An async FsRead call should report one reachable adapter operation.");
+        AssertEqual("FsRead.read_text_async", operations[0].GetProperty("operation").GetString(),
+            "The async filesystem adapter should have a stable operation name.");
+        AssertEqual("trusted_adapter", operations[0].GetProperty("trust").GetString(),
+            "The async filesystem adapter should retain its trust classification.");
+        AssertEqual("fs.read", string.Join(",", operations[0].GetProperty("effects").EnumerateArray()
+            .Select(effect => effect.GetString())),
+            "The async filesystem adapter should carry fs.read.");
+    }
+
     private static async Task TestInspectApi(Harness harness)
     {
         var usage = await harness.InvokeCompilerCommandAsync();
@@ -1905,7 +2081,7 @@ internal static class IntegrationTests
                 struct HiddenRoot { note: Text }
                 fn hidden_root() -> i32 effects {} { return 1; }
 
-                pub fn generic_root<T>(items: List<Option<T>>) -> Result<Option<T>, direct::records::Status> effects {} {
+                pub async fn generic_root<T>(items: List<Option<T>>) -> Result<Option<T>, direct::records::Status> effects {} {
                     return Err(direct::records::Status.Empty);
                 }
 
@@ -1920,7 +2096,7 @@ internal static class IntegrationTests
                 """;
             const string handlersSource = """
                 module handlers;
-                pub fn run(args: self::app::main::ScanArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                pub async fn run(args: self::app::main::ScanArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
                     let loaded: Result<direct::records::Record, FsError> = direct::service::read_record(fs);
                     return Ok("scan complete");
                 }
@@ -2013,7 +2189,7 @@ internal static class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(1, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 1.");
+        AssertEqual(2, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 2.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2034,6 +2210,9 @@ internal static class IntegrationTests
         };
         AssertTrue(expectedFunctionIds.SequenceEqual(functionIds, StringComparer.Ordinal),
             $"Only public root and direct dependency functions should be exposed, got [{string.Join(", ", functionIds)}].");
+        AssertTrue(functions.Single(function => function.GetProperty("id").GetString() == "self::app::main::generic_root")
+                .GetProperty("is_async").GetBoolean(),
+            "The API should project async on generic functions.");
         AssertTrue(functionIds.All(id => !id.Contains("hidden", StringComparison.Ordinal)),
             "Private declarations must not appear in the API function list.");
         var structIds = api.GetProperty("structs").EnumerateArray()
@@ -2077,6 +2256,7 @@ internal static class IntegrationTests
             "Transitive-only types must remain references rather than exported package declarations.");
 
         var run = functions.Single(function => function.GetProperty("id").GetString() == "self::handlers::run");
+        AssertTrue(run.GetProperty("is_async").GetBoolean(), "The API should project an async function marker.");
         AssertJsonStringArray(run.GetProperty("required_capabilities"), ["fs.read"]);
         var directCall = run.GetProperty("calls")[0];
         AssertEqual("direct::service::read_record", directCall.GetProperty("source_id").GetString(),
@@ -2108,6 +2288,7 @@ internal static class IntegrationTests
         var command = api.GetProperty("commands").EnumerateArray().Single();
         AssertEqual("self::app::main::scan", command.GetProperty("id").GetString(), "Command IDs must use source names.");
         AssertEqual("self::handlers::run", command.GetProperty("handler").GetString(), "The command handler should retain its source ID.");
+        AssertTrue(command.GetProperty("handler_is_async").GetBoolean(), "The API should project the command handler's async marker.");
         AssertJsonStringArray(command.GetProperty("handler_source_ids"), ["self::handlers::run"]);
         AssertEqual("self::handlers::describe", command.GetProperty("error_formatter").GetString(),
             "The command error formatter should retain its source ID.");
@@ -2148,7 +2329,7 @@ internal static class IntegrationTests
             pub struct Request { id: i32, name: Text }
             pub struct Record { id: i32, name: Text }
             pub union Reply { Created(self::app::main::Record), Invalid(Text), Failed(Text), Empty }
-            fn create(request: self::app::main::Request, db: DbRead, writer: DbWrite) -> self::app::main::Reply effects {} {
+            async fn create(request: self::app::main::Request, db: DbRead, writer: DbWrite) -> self::app::main::Reply effects {} {
                 return self::app::main::Reply.Empty;
             }
             route POST "/records" {
@@ -2176,6 +2357,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
+        AssertEqual(2, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 2.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(0, api.GetProperty("commands").GetArrayLength(), "Web packages should not invent CLI commands.");
         var route = api.GetProperty("routes").EnumerateArray().Single();
@@ -2187,6 +2369,7 @@ internal static class IntegrationTests
             "POST route bodies should use source-facing type IDs.");
         AssertEqual("self::app::main::create", route.GetProperty("handler").GetString(),
             "Route handler references should use source-facing IDs.");
+        AssertTrue(route.GetProperty("handler_is_async").GetBoolean(), "The API should project the route handler's async marker.");
         AssertJsonStringArray(route.GetProperty("handler_source_ids"), ["self::app::main::create"]);
         var responseType = route.GetProperty("response_type");
         AssertEqual("nominal", responseType.GetProperty("kind").GetString(),
@@ -2237,7 +2420,7 @@ internal static class IntegrationTests
                 return loaded;
             }
 
-            fn handler(db: DbRead) -> self::app::main::Reply effects { db.read } {
+            async fn handler(db: DbRead) -> self::app::main::Reply effects { db.read } {
                 let loaded: Result<Option<self::app::main::Row>, DbError> = self::app::main::load(db);
                 return self::app::main::Reply.Ready;
             }
@@ -2301,7 +2484,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(1, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 1.");
+        AssertEqual(2, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 2.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2333,9 +2516,13 @@ internal static class IntegrationTests
         AssertTrue(expectedFunctionFacts.SequenceEqual(functionFacts, StringComparer.Ordinal),
             $"Compiler facts should include public and private functions from all packages in deterministic order. Got [{string.Join(", ", functionFacts)}].");
         var rootPublic = functions.Single(function => function.GetProperty("name").GetString() == "root_public");
+        AssertEqual(false, rootPublic.GetProperty("is_async").GetBoolean(),
+            "The audit should retain false for synchronous functions.");
         AssertEqual("through", rootPublic.GetProperty("direct_calls")[0].GetProperty("name").GetString(),
             "Compiler facts should retain direct cross-package calls.");
         var rootHandler = functions.Single(function => function.GetProperty("name").GetString() == "handler");
+        AssertTrue(rootHandler.GetProperty("is_async").GetBoolean(),
+            "The audit should report asynchronous route handlers.");
         AssertJsonStringArray(rootHandler.GetProperty("required_capabilities"), ["db.read"]);
 
         var claims = report.GetProperty("trusted_claims").EnumerateArray().ToArray();
@@ -2450,7 +2637,7 @@ internal static class IntegrationTests
         Order(root.GetProperty("compiler"), "functions");
         foreach (var function in root.GetProperty("compiler").GetProperty("functions").EnumerateArray())
         {
-            Order(function, "package,module,name,visibility,declared_effects,inferred_effects,effect_paths,direct_calls,required_capabilities");
+            Order(function, "package,module,name,visibility,is_async,declared_effects,inferred_effects,effect_paths,direct_calls,required_capabilities");
             Order(function.GetProperty("package"), "name,version,path");
             foreach (var path in function.GetProperty("effect_paths").EnumerateArray())
             {
@@ -2528,7 +2715,7 @@ internal static class IntegrationTests
             "schema_version,package,dependencies,manifest_grants,functions,structs,unions,commands,routes",
             "alias,name,version",
             "name,version",
-            "id,source_ids,package,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
+            "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
             "name,ordinal",
             "name,type",
             "kind,source_id,source_ids,package,module,name",
@@ -2538,14 +2725,14 @@ internal static class IntegrationTests
             "id,source_ids,package,fields",
             "id,source_ids,package,variants",
             "name,payload",
-            "id,package,help,inputs,handler,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
+            "id,package,help,inputs,handler,handler_is_async,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
             "name,kind,type,help,default_value",
             "kind,value",
             "kind,name,ordinal",
             "kind,item",
             "kind,ok,error",
             "kind,declaration_kind,source_id,source_ids,package,module,name",
-            "method,path,body_type,handler,response_type,handler_source_ids,responses,required_capabilities,capability_parameters",
+            "method,path,body_type,handler,handler_is_async,response_type,handler_source_ids,responses,required_capabilities,capability_parameters",
             "variant,status,content_type,payload_type",
             "name,capability"
         };
@@ -2706,6 +2893,50 @@ internal static class IntegrationTests
         }
         AssertTrue(!loadContext.IsAlive, "The generated library's collectible load context should unload after the trusted probe.");
         Directory.Delete(probeDirectory, recursive: true);
+    }
+
+    private static async Task TestAsyncFsReadAdapter(Harness harness)
+    {
+        const string source = """
+            module harness::async_fsread;
+
+            pub async fn read(fs: FsRead, path: Text) -> Result<Text, FsError> effects { fs.read } {
+                return await fs.read_text_async(path);
+            }
+            """;
+        var check = await harness.InvokeAsync("async-fsread-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokeAsync("async-fsread-build", "build", source);
+        AssertBuiltDll(build, Path.GetDirectoryName(harness.LastSourcePath)!);
+        var dllPath = ParseBuiltArtifact(build, "Built library: ");
+        var probeDirectory = Path.Combine(harness.TemporaryRoot, $"async-fsread-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(probeDirectory);
+        var validPath = Path.Combine(probeDirectory, "valid.txt");
+        var missingPath = Path.Combine(probeDirectory, "missing.txt");
+        var invalidTextPath = Path.Combine(probeDirectory, "invalid-utf8.txt");
+        const string validText = "async adapter λ 😀";
+        await File.WriteAllTextAsync(validPath, validText, new UTF8Encoding(false, true));
+        await File.WriteAllBytesAsync(invalidTextPath, [0xC3, 0x28]);
+
+        try
+        {
+            var loadContext = ProbeAsyncFsReadRuntimeMappings(
+                dllPath, validPath, missingPath, invalidTextPath, validText);
+            for (var attempt = 0; attempt < 10 && loadContext.IsAlive; attempt++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+            AssertTrue(!loadContext.IsAlive,
+                "The generated async FsRead library's collectible load context should unload after the trusted probe.");
+        }
+        finally
+        {
+            Directory.Delete(probeDirectory, recursive: true);
+        }
     }
 
     private static async Task TestFsWriteManagedLibrary(Harness harness)
@@ -3050,6 +3281,87 @@ internal static class IntegrationTests
         return weakReference;
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ProbeAsyncFsReadRuntimeMappings(
+        string dllPath,
+        string validPath,
+        string missingPath,
+        string invalidTextPath,
+        string validText)
+    {
+        var loadContext = new AssemblyLoadContext($"async-fs-read-probe-{Guid.NewGuid():N}", isCollectible: true);
+        var weakReference = new WeakReference(loadContext);
+        try
+        {
+            var assembly = loadContext.LoadFromAssemblyPath(Path.GetFullPath(dllPath));
+            var moduleType = assembly.GetType("LangModule", throwOnError: true)!;
+            var fsReadType = moduleType.GetNestedType("FsRead", BindingFlags.Public)
+                ?? throw new InvalidOperationException("Generated async library does not expose its nested FsRead runtime type.");
+            var fsReadConstructor = fsReadType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                [typeof(CancellationToken)],
+                modifiers: null)
+                ?? throw new InvalidOperationException("Generated FsRead has no trusted cancellation-token constructor.");
+            var readFunction = moduleType.GetMethod("Function_0", BindingFlags.Public | BindingFlags.Static)
+                ?? throw new InvalidOperationException("Generated async library does not contain Function_0.");
+
+            object InvokeRead(string path, CancellationToken cancellationToken)
+            {
+                var fsRead = fsReadConstructor.Invoke([cancellationToken]);
+                var task = readFunction.Invoke(null, [fsRead, path, cancellationToken]) as Task
+                    ?? throw new InvalidOperationException("Generated read_text_async did not return a Task.");
+                task.GetAwaiter().GetResult();
+                return task.GetType().GetProperty("Result")?.GetValue(task)
+                    ?? throw new InvalidOperationException("Generated read_text_async returned no Result value.");
+            }
+
+            static void AssertSuccess(object result, string expectedText)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Ok", StringComparison.Ordinal),
+                    $"A readable UTF-8 file should map to Result.Ok, got {result.GetType().FullName}.");
+                AssertEqual(expectedText, result.GetType().GetProperty("Value")?.GetValue(result) as string,
+                    "Result.Ok should carry the strictly decoded UTF-8 text.");
+            }
+
+            static string AssertError(object result, string expectedVariant)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                    $"A filesystem failure should map to Result.Err, got {result.GetType().FullName}.");
+                var error = result.GetType().GetProperty("Error")?.GetValue(result)
+                    ?? throw new InvalidOperationException("Result.Err did not expose its FsError value.");
+                var variant = error.GetType().Name;
+                AssertTrue(variant.StartsWith(expectedVariant, StringComparison.Ordinal),
+                    $"Expected FsError.{expectedVariant}, got {error.GetType().FullName}.");
+                return variant;
+            }
+
+            AssertSuccess(InvokeRead(validPath, CancellationToken.None), validText);
+            AssertError(InvokeRead(missingPath, CancellationToken.None), "NotFound");
+            AssertError(InvokeRead(invalidTextPath, CancellationToken.None), "InvalidText");
+
+            using var canceled = new CancellationTokenSource();
+            canceled.Cancel();
+            var cancellationObserved = false;
+            try
+            {
+                _ = InvokeRead(validPath, canceled.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                cancellationObserved = true;
+            }
+            AssertTrue(cancellationObserved,
+                "A pre-canceled FsRead token should propagate OperationCanceledException from read_text_async.");
+        }
+        finally
+        {
+            loadContext.Unload();
+        }
+
+        return weakReference;
+    }
+
     private static async Task TestLibraryBuild(Harness harness)
     {
         const string source = """
@@ -3355,6 +3667,105 @@ internal static class IntegrationTests
             "Control characters in CLI diagnostic subjects must be escaped on one physical stderr line.");
         AssertEqual(2, Directory.EnumerateFiles(Path.Combine(packageRoot, "out"), "build-receipt.json", SearchOption.AllDirectories).Count(),
             "Typed CLI run commands should not add build receipts after the two explicit builds.");
+    }
+
+    private static async Task TestAsyncCliCommandRuntime(Harness harness)
+    {
+        const string main = """
+            module app::main;
+
+            command read {
+                help "Read a UTF-8 text file.";
+                argument input: FilePath help "Path to read.";
+                handler: self::handlers::read_file;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+
+            pub async fn read_file(
+                args: self::app::main::ReadArgs,
+                fs: FsRead,
+            ) -> Result<Text, FsError> effects { fs.read } {
+                return await fs.read_text_async(args.input);
+            }
+
+            pub fn describe(error: FsError) -> Text effects {} {
+                return match error {
+                    FsError.NotFound => "missing",
+                    FsError.PermissionDenied => "permission denied",
+                    FsError.InvalidPath => "invalid path",
+                    FsError.InvalidText => "invalid text",
+                    FsError.Io => "I/O error",
+                };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "async-cli-runtime",
+            CliPackageManifest() + "\n[capabilities]\nfs.read = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("async-cli-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("async-cli-build", packageRoot, "build");
+        var executable = ParseBuiltArtifact(build, "Built executable: ");
+        var outputDirectory = Path.GetDirectoryName(executable)!;
+        var schemaPath = Path.Combine(outputDirectory, "command-schema.json");
+        AssertTrue(File.Exists(schemaPath), $"Expected async CLI command schema beside the executable: {schemaPath}");
+        using var receipt = await AssertBuildReceiptAsync(
+            outputDirectory,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+            packageRoot);
+        AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async managed CLI builds must preserve build receipt schema version 1.");
+
+        using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
+        {
+            var root = schema.RootElement;
+            AssertEqual(2, root.GetProperty("schema_version").GetInt32(),
+                "Async handlers must preserve command schema version 2.");
+            var command = root.GetProperty("commands").EnumerateArray().Single();
+            AssertEqual("read", command.GetProperty("name").GetString(),
+                "The async command schema should retain its declared name.");
+            AssertEqual("self::handlers::read_file", command.GetProperty("handler").GetString(),
+                "The async command schema should retain the handler reference.");
+            AssertJsonStringArray(command.GetProperty("capabilities"), ["fs.read"]);
+        }
+
+        var temporaryDirectory = Path.Combine(harness.TemporaryRoot, $"async-cli-files-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryDirectory);
+        try
+        {
+            var validPath = Path.Combine(temporaryDirectory, "valid.txt");
+            var invalidPath = Path.Combine(temporaryDirectory, "invalid-utf8.txt");
+            const string expectedText = "async command λ 😀";
+            await File.WriteAllTextAsync(validPath, expectedText, new UTF8Encoding(false, true));
+            await File.WriteAllBytesAsync(invalidPath, [0xC3, 0x28]);
+
+            var success = await harness.InvokePackageDirectoryAsync(
+                "async-cli-success", packageRoot, "run", "--", "read", validPath);
+            AssertRunOutput(expectedText + Environment.NewLine, success);
+
+            var invalidText = await harness.InvokePackageDirectoryAsync(
+                "async-cli-invalid-utf8", packageRoot, "run", "--", "read", invalidPath);
+            AssertEqual(3, invalidText.ExitCode, Describe(invalidText));
+            AssertEqual(string.Empty, invalidText.StandardOutput, Describe(invalidText));
+            AssertEqual("invalid text" + Environment.NewLine, invalidText.StandardError,
+                "The async CLI should pass FsError.InvalidText to its formatter and preserve CLI failure output.");
+        }
+        finally
+        {
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
     }
 
     private static async Task TestFsWritePackageContracts(Harness harness)
@@ -7579,8 +7990,12 @@ internal static class IntegrationTests
                 error: self::app::main::describe_error;
             }
 
-            pub fn run(args: self::app::main::ScanArgs) -> Result<Text, self::app::main::ScanError> effects {} {
-                return Ok(args.input);
+            pub async fn identity<T>(value: T) -> T effects {} {
+                return value;
+            }
+
+            pub async fn run(args: self::app::main::ScanArgs) -> Result<Text, self::app::main::ScanError> effects {} {
+                return Ok(await self::app::main::identity(args.input));
             }
 
             pub fn describe_error(error: self::app::main::ScanError) -> Text effects {} {

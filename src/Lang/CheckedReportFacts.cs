@@ -23,6 +23,7 @@ internal static class CheckedReportFacts
             [operation switch
             {
                 "FsRead.read_text" => "fs.read",
+                "FsRead.read_text_async" => "fs.read",
                 "FsWrite.write_text" => "fs.write",
                 "DbRead.query_one" => "db.read",
                 "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => "db.write",
@@ -79,6 +80,9 @@ internal static class CheckedReportFacts
         {
             switch (expression)
             {
+                case TypedAwaitExpr awaited:
+                    VisitExpression(awaited.Value);
+                    break;
                 case TypedListExpr list:
                     foreach (var item in list.Items)
                         VisitExpression(item);
@@ -117,6 +121,8 @@ internal static class CheckedReportFacts
                 case TypedIntrinsicCallExpr intrinsic:
                     if (intrinsic.Intrinsic == BuiltinIntrinsic.FsReadText)
                         operationNames.Add("FsRead.read_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.FsReadTextAsync)
+                        operationNames.Add("FsRead.read_text_async");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteText)
                         operationNames.Add("FsWrite.write_text");
                     foreach (var argument in intrinsic.Arguments)

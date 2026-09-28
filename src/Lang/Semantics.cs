@@ -185,6 +185,7 @@ internal sealed record CheckedCommand(
     IReadOnlyList<CheckedCommandInput> Inputs,
     int HandlerFunctionId,
     string HandlerReference,
+    bool HandlerIsAsync,
     int ErrorFunctionId,
     string ErrorReference,
     LangType ErrorType,
@@ -222,6 +223,7 @@ internal sealed class CheckedRoute
         IEnumerable<CheckedCapabilityParameter> capabilities,
         int handlerFunctionId,
         string handlerReference,
+        bool handlerIsAsync,
         Token handlerAt,
         int replyUnionId,
         IEnumerable<CheckedRouteResponse> responses,
@@ -239,6 +241,7 @@ internal sealed class CheckedRoute
         Capabilities = Array.AsReadOnly(capabilities.ToArray());
         HandlerFunctionId = handlerFunctionId;
         HandlerReference = handlerReference;
+        HandlerIsAsync = handlerIsAsync;
         HandlerAt = handlerAt;
         ReplyUnionId = replyUnionId;
         Responses = Array.AsReadOnly(responses.ToArray());
@@ -257,6 +260,7 @@ internal sealed class CheckedRoute
     public IReadOnlyList<CheckedCapabilityParameter> Capabilities { get; }
     public int HandlerFunctionId { get; }
     public string HandlerReference { get; }
+    public bool HandlerIsAsync { get; }
     public Token HandlerAt { get; }
     public int ReplyUnionId { get; }
     public IReadOnlyList<CheckedRouteResponse> Responses { get; }
@@ -283,6 +287,7 @@ internal sealed record TypedListAppendExpr(LangType Type, TypedExpr Target, Type
 internal sealed record TypedCallExpr(
     LangType Type,
     int FunctionId,
+    bool IsAsync,
     IReadOnlyList<LangType> TypeArguments,
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
@@ -290,6 +295,7 @@ internal sealed record TypedCallExpr(
 internal enum BuiltinIntrinsic
 {
     FsReadText,
+    FsReadTextAsync,
     FsWriteText,
     HtmlText,
     HtmlHeading,
@@ -304,6 +310,7 @@ internal sealed record TypedIntrinsicCallExpr(
     BuiltinIntrinsic Intrinsic,
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
+internal sealed record TypedAwaitExpr(LangType Type, TypedExpr Value, Token At) : TypedExpr(Type, At);
 
 internal enum CheckedDatabaseOperationKind { QueryOne, Execute, TransactionExecute }
 internal sealed record CheckedDatabaseOperation(
@@ -404,6 +411,7 @@ internal sealed class CheckedFunction
         string module,
         string name,
         bool isPublic,
+        bool isAsync,
         IReadOnlyList<CheckedParameter> parameters,
         IReadOnlyList<LangType> typeParameters,
         LangType returnType,
@@ -417,6 +425,7 @@ internal sealed class CheckedFunction
         Module = module;
         Name = name;
         Public = isPublic;
+        IsAsync = isAsync;
         Parameters = ReadOnly(parameters);
         TypeParameters = ReadOnly(typeParameters);
         ReturnType = returnType;
@@ -433,6 +442,7 @@ internal sealed class CheckedFunction
     public string Module { get; }
     public string Name { get; }
     public bool Public { get; }
+    public bool IsAsync { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
     public IReadOnlyList<LangType> TypeParameters { get; }
     public LangType ReturnType { get; }
@@ -1100,6 +1110,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     formatter.ReturnType.IsText;
                 if (!validSignature)
                     Add("E_COMMAND_HANDLER", "Command error formatter must take exactly E and return Text", command.ErrorSyntax.Reference.At);
+                if (formatter.Declaration.IsAsync)
+                    Add("E_COMMAND_HANDLER", "Command error formatter must be synchronous", command.ErrorSyntax.Reference.At);
                 if (formatter.DeclaredEffects.Count != 0)
                     Add("E_COMMAND_HANDLER", "Command error formatter must declare effects {}", command.ErrorSyntax.Reference.At);
             }
@@ -1315,6 +1327,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             routeCapabilities,
             handler.Id,
             FormatReference(handlers[0].Reference),
+            handler.Declaration.IsAsync,
             handlers[0].At,
             replyUnion.Id,
             typedResponses,
@@ -1751,6 +1764,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 internalName,
                 [],
                 Public: false,
+                IsAsync: false,
                 Parameters: [],
                 new TypeSyntax(new SourceDeclarationRefSyntax(null, [], "bool", test.AssertAt), [], test.AssertAt),
                 Effects: [],
@@ -1843,6 +1857,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.ModuleName,
             function.Declaration.Name,
             function.Declaration.Public,
+            function.Declaration.IsAsync,
             function.Parameters,
             function.TypeParameters,
             function.ReturnType,
@@ -2313,6 +2328,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in call.Arguments)
                     ValidateResourceListExpression(argument);
                 break;
+            case TypedAwaitExpr awaited:
+                ValidateResourceListExpression(awaited.Value);
+                break;
             case TypedDatabaseCallExpr databaseCall:
                 ValidateResourceListExpression(databaseCall.Receiver);
                 ValidateResourceListExpression(databaseCall.Parameters);
@@ -2472,7 +2490,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Expr expression,
         LangType? expected,
         Dictionary<string, LocalSymbol> locals,
-        int depth)
+        int depth,
+        bool isAwaitOperand = false)
     {
         if (depth >= MaximumSemanticDepth)
         {
@@ -2493,8 +2512,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             NameExpr name => CheckName(name, expected, locals),
             DeclarationRefExpr reference => CheckDeclarationReference(reference),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
-            CallExpr call => CheckCall(call, expected, locals, depth + 1),
-            MemberCallExpr call => CheckMemberCall(call, expected, locals, depth + 1),
+            CallExpr call => CheckCall(call, expected, locals, depth + 1, isAwaitOperand),
+            MemberCallExpr call => CheckMemberCall(call, expected, locals, depth + 1, isAwaitOperand),
+            AwaitExpr awaited => CheckAwait(awaited, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
@@ -2504,6 +2524,35 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (expected is not null && !expected.IsError && !result.Type.IsError && result.Type != expected)
             AddMismatch(expected, result.Type, expression.At);
         return result;
+    }
+
+    private TypedExpr CheckAwait(
+        AwaitExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (_currentFunction?.Declaration.IsAsync != true)
+            Add("E_AWAIT_CONTEXT", "The 'await' expression is only valid inside an async function", expression.At);
+
+        var diagnosticsBeforeOperand = diagnostics.Count;
+        var value = CheckExpr(expression.Value, null, locals, depth, isAwaitOperand: true);
+        if (value is TypedCallExpr { IsAsync: true } or
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync })
+            return new TypedAwaitExpr(value.Type, value, expression.At);
+
+        if (value.Type.IsError)
+            return new TypedErrorExpr(expression.At);
+
+        if (expression.Value is CallExpr or MemberCallExpr)
+        {
+            if (!diagnostics.Skip(diagnosticsBeforeOperand).Any(diagnostic => diagnostic.Code == "E_AWAIT_SYNC"))
+                Add("E_AWAIT_SYNC", "The 'await' expression requires an async function call or async intrinsic", expression.At);
+        }
+        else
+        {
+            Add("E_AWAIT_TARGET", "The 'await' expression requires an async function call or async intrinsic", expression.At);
+        }
+        return new TypedErrorExpr(expression.At);
     }
 
     private TypedExpr CheckListLiteral(
@@ -2832,7 +2881,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         CallExpr expression,
         LangType? expected,
         Dictionary<string, LocalSymbol> locals,
-        int depth)
+        int depth,
+        bool isAwaitOperand = false)
     {
         var reference = expression.Reference;
         var name = reference.Declaration;
@@ -2842,6 +2892,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var function = ResolveFunctionReference(reference);
         if (function is not null)
         {
+            if (function.Declaration.IsAsync && !isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", $"Async function '{name}' must be called with 'await'", expression.At);
+            else if (!function.Declaration.IsAsync && isAwaitOperand)
+                Add("E_AWAIT_SYNC", $"Function '{name}' is synchronous and cannot be awaited", expression.At);
+
             var isGeneric = function.TypeParameters.Count != 0;
             if (expression.Arguments.Count != function.Parameters.Count)
                 Add("E_TYPE_MISMATCH", $"Function '{name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}", expression.At);
@@ -2897,7 +2952,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     ValidateResourceListType(arguments[i].Type, expression.Arguments[i].At);
             }
 
-            return new TypedCallExpr(returnType, function.Id, ReadOnly(typeArguments), ReadOnly(arguments), expression.At);
+            return new TypedCallExpr(
+                returnType,
+                function.Id,
+                function.Declaration.IsAsync,
+                ReadOnly(typeArguments),
+                ReadOnly(arguments),
+                expression.At);
         }
 
         foreach (var argument in expression.Arguments)
@@ -2909,7 +2970,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         MemberCallExpr expression,
         LangType? expected,
         Dictionary<string, LocalSymbol> locals,
-        int depth)
+        int depth,
+        bool isAwaitOperand = false)
     {
         if (expression.Target is DeclarationRefExpr declarationReference)
         {
@@ -2969,6 +3031,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
                 Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text' requires a local or parameter of type 'FsRead'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "fs" && expression.Member == "read_text_async")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.read_text_async' requires a local or parameter of type 'FsRead'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
 
@@ -3076,6 +3146,41 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 expression.At);
         }
 
+        if (receiver.Type.IsFsRead && expression.Member == "read_text_async")
+        {
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 1;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text_async' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            var hasSupportedPathType = false;
+            if (expression.Arguments.Count > 0)
+            {
+                var path = CheckExpr(expression.Arguments[0], null, locals, depth);
+                hasSupportedPathType = path.Type.IsText || path.Type.IsFilePath;
+                if (!path.Type.IsError && !hasSupportedPathType)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.read_text_async' expects a Text or FilePath argument, found '{path.Type.DisplayName}'", expression.Arguments[0].At);
+                arguments.Add(path);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+            for (var i = 1; i < expression.Arguments.Count; i++)
+                _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+            var resultType = LangType.Result(LangType.Text, LangType.FsError);
+            var callIsValid = hasCorrectArity && hasSupportedPathType && diagnostics.Count == diagnosticsBeforeCall;
+            if (!isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'fs.read_text_async' must be called with 'await'", expression.At);
+            if (callIsValid)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.read", "fs.read_text_async", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                resultType,
+                BuiltinIntrinsic.FsReadTextAsync,
+                ReadOnly(arguments),
+                expression.At);
+        }
+
         if (receiver.Type.IsFsWrite && expression.Member == "write_text")
         {
             var diagnosticsBeforeCall = diagnostics.Count;
@@ -3139,14 +3244,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        if (expression.Member == "read_text")
+        if (expression.Member is "read_text" or "read_text_async")
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
 
             var message = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
-                ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}' cannot provide capability member 'read_text'"
-                : $"Value of type '{receiver.Type.DisplayName}' cannot provide capability member 'read_text'";
+                ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}' cannot provide capability member '{expression.Member}'"
+                : $"Value of type '{receiver.Type.DisplayName}' cannot provide capability member '{expression.Member}'";
             Add("E_CAPABILITY_MISSING", message, expression.At);
             return new TypedErrorExpr(expression.At);
         }
@@ -4088,6 +4193,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             Inputs,
             HandlerFunction!.Id,
             SemanticChecker.FormatReference(HandlerSyntax!.Reference),
+            HandlerFunction.Declaration.IsAsync,
             ErrorFormatter!.Id,
             SemanticChecker.FormatReference(ErrorSyntax!.Reference),
             ErrorType,
