@@ -1,4 +1,6 @@
 using System.Collections.Frozen;
+using System.Globalization;
+using System.Net;
 using System.Text;
 
 internal sealed record PackageManifest(
@@ -9,6 +11,7 @@ internal sealed record PackageManifest(
     string? EntryModule,
     string? SqlitePath,
     string? SqliteSchema,
+    string? HttpOrigin,
     IReadOnlySet<string> Capabilities,
     IReadOnlyList<PackageDependency> Dependencies)
 {
@@ -92,7 +95,8 @@ internal static class PackageLoader
         "source_root",
         "entry_module",
         "sqlite_path",
-        "sqlite_schema"
+        "sqlite_schema",
+        "http_origin"
     };
 
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
@@ -160,6 +164,10 @@ internal static class PackageLoader
             parsedManifest.Values.GetValueOrDefault("entry_module"),
             parsedManifest.Values.GetValueOrDefault("sqlite_path"),
             parsedManifest.Values.GetValueOrDefault("sqlite_schema"),
+            parsedManifest.Values.TryGetValue("http_origin", out var configuredHttpOrigin) &&
+                TryNormalizeHttpOrigin(configuredHttpOrigin, out var stableHttpOrigin)
+                    ? stableHttpOrigin
+                    : null,
             parsedManifest.Capabilities,
             parsedManifest.Dependencies);
 
@@ -501,7 +509,7 @@ internal static class PackageLoader
             var rawValue = trimmed[(equals + 1)..].Trim();
             if (inCapabilities)
             {
-                if (key is not ("fs.read" or "fs.write" or "net.listen" or "db.read" or "db.write"))
+                if (key is not ("fs.read" or "fs.write" or "net.listen" or "net.client" or "db.read" or "db.write"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
@@ -663,6 +671,30 @@ internal static class PackageLoader
                 file));
         }
 
+        var hasHttpOrigin = values.TryGetValue("http_origin", out var httpOrigin);
+        var hasHttpClientGrant = capabilities.Contains("net.client");
+        if (hasHttpClientGrant && !hasHttpOrigin)
+        {
+            diagnostics.Add(AtStart(
+                "E_CAPABILITY_MISSING",
+                "The net.client capability requires an http_origin",
+                file));
+        }
+        if (!hasHttpClientGrant && hasHttpOrigin)
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "http_origin requires the root package's net.client capability grant",
+                file));
+        }
+        if (hasHttpOrigin && !TryNormalizeHttpOrigin(httpOrigin!, out _))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "http_origin must be one absolute origin using HTTPS (or HTTP for localhost or a loopback IP), with only a root path and no query, fragment, or user info",
+                file));
+        }
+
         var hasEntryModule = values.TryGetValue("entry_module", out var entryModule);
         if (values.TryGetValue("kind", out kind))
         {
@@ -702,6 +734,48 @@ internal static class PackageLoader
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))
             diagnostics.Add(AtStart("E_MANIFEST", "entry_module must be a valid module path using '::' separators", file));
+    }
+
+    private static bool TryNormalizeHttpOrigin(string value, out string normalized)
+    {
+        normalized = string.Empty;
+        if (value.Length == 0 || !string.Equals(value, value.Trim(), StringComparison.Ordinal) ||
+            value.Contains('\\') || value.Contains('?') || value.Contains('#'))
+            return false;
+
+        var schemeSeparator = value.IndexOf("://", StringComparison.Ordinal);
+        if (schemeSeparator <= 0 ||
+            !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            !uri.IsWellFormedOriginalString() ||
+            uri.Scheme is not ("http" or "https") ||
+            uri.AbsolutePath != "/" ||
+            uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.UserInfo.Length != 0)
+            return false;
+
+        var authorityStart = schemeSeparator + 3;
+        var authorityEnd = value.IndexOfAny(['/', '?', '#'], authorityStart);
+        if (authorityEnd < 0)
+            authorityEnd = value.Length;
+        var rawSuffix = value[authorityEnd..];
+        if (rawSuffix is not ("" or "/"))
+            return false;
+        var originalAuthority = value[authorityStart..authorityEnd];
+        if (originalAuthority.Length == 0 || originalAuthority.Contains('@'))
+            return false;
+
+        if (uri.Scheme == "http" &&
+            !string.Equals(uri.IdnHost, "localhost", StringComparison.OrdinalIgnoreCase) &&
+            !(IPAddress.TryParse(uri.Host, out var address) && IPAddress.IsLoopback(address)))
+            return false;
+
+        var host = uri.IdnHost.ToLowerInvariant();
+        if (uri.HostNameType == UriHostNameType.IPv6)
+            host = $"[{host.Trim('[', ']')}]";
+        var authority = uri.IsDefaultPort
+            ? host
+            : host + ":" + uri.Port.ToString(CultureInfo.InvariantCulture);
+        normalized = uri.Scheme.ToLowerInvariant() + "://" + authority;
+        return true;
     }
 
     private static WebDatabaseOptions? LoadWebDatabaseOptions(

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
@@ -79,6 +80,8 @@ internal static class IntegrationTests
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
             ("inspect effects reports deterministic compiler-derived paths and trusted boundaries", TestInspectEffects),
             ("async FsRead calls retain effect paths and trusted adapter provenance", TestAsyncEffects),
+            ("HttpClient checks, manifests, bounded loopback responses, and cancellation", TestHttpClientContracts),
+            ("HttpClient maps bounded loopback responses and host cancellation", TestHttpClientRuntimeAdapter),
             ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
             ("inspect api exports a deterministic source-facing package graph", TestInspectApi),
             ("inspect api projects checked web routes and database capabilities", TestInspectApiWebRoutes),
@@ -2151,7 +2154,8 @@ internal static class IntegrationTests
                 """;
 
             var rootManifest = "name = \"api-root\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
-                + "\n[capabilities]\nfs.read = \"allow\"\n"
+                + "http_origin = \"https://api.example.test\"\n"
+                + "\n[capabilities]\nfs.read = \"allow\"\nnet.client = \"allow\"\n"
                 + "\n[dependencies]\nzeta = \"../direct\"\ndirect = \"../direct\"\n";
             var directManifest = LibraryPackageManifest("api-direct")
                 + "\n[dependencies]\nfoundation = \"../foundation\"\n";
@@ -2189,14 +2193,16 @@ internal static class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(2, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 2.");
+        AssertEqual(3, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 3.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
         AssertEqual(2, dependencies.Length, "Both direct aliases must remain in the dependency list.");
         AssertEqual("direct", dependencies[0].GetProperty("alias").GetString(), "Dependency aliases must be sorted.");
         AssertEqual("zeta", dependencies[1].GetProperty("alias").GetString(), "Dependency aliases must be sorted.");
-        AssertJsonStringArray(api.GetProperty("manifest_grants"), ["fs.read"]);
+        AssertJsonStringArray(api.GetProperty("manifest_grants"), ["fs.read", "net.client"]);
+        AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
+            "The API report should expose the configured root HTTP origin.");
 
         var functions = api.GetProperty("functions").EnumerateArray().ToArray();
         var functionIds = functions.Select(function => function.GetProperty("id").GetString() ?? string.Empty).ToArray();
@@ -2357,8 +2363,10 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(2, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 2.");
+        AssertEqual(3, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 3.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
+        AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
+            "A package without HTTP client access should project a null HTTP origin.");
         AssertEqual(0, api.GetProperty("commands").GetArrayLength(), "Web packages should not invent CLI commands.");
         var route = api.GetProperty("routes").EnumerateArray().Single();
         AssertEqual("POST", route.GetProperty("method").GetString(), "Route methods should retain checked source values.");
@@ -2446,7 +2454,8 @@ internal static class IntegrationTests
 
             var rootManifest = "name = \"audit-root\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
                 + "sqlite_path = \"data/audit.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
-                + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n"
+                + "http_origin = \"https://api.example.test\"\n"
+                + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\nnet.client = \"allow\"\n"
                 + "\n[dependencies]\nzeta = \"../direct\"\ndirect = \"../direct\"\n";
             var directManifest = LibraryPackageManifest("audit-direct") + "\n[dependencies]\nfoundation = \"../foundation\"\n";
             return new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
@@ -2484,7 +2493,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(2, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 2.");
+        AssertEqual(3, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 3.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2502,7 +2511,9 @@ internal static class IntegrationTests
         AssertEqual("db/schema.sql", schemaInput.GetProperty("path").GetString(),
             "Configured SQLite schema should be included as a checked package input.");
 
-        AssertJsonStringArray(report.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
+        AssertJsonStringArray(report.GetProperty("manifest_grants"), ["db.read", "db.write", "net.client", "net.listen"]);
+        AssertEqual("https://api.example.test", report.GetProperty("http_origin").GetString(),
+            "The audit report should expose the configured root HTTP origin.");
         var functions = report.GetProperty("compiler").GetProperty("functions").EnumerateArray().ToArray();
         var functionFacts = functions.Select(function =>
                 $"{function.GetProperty("package").GetProperty("name").GetString()}::{function.GetProperty("name").GetString()}:{function.GetProperty("visibility").GetString()}")
@@ -2621,7 +2632,7 @@ internal static class IntegrationTests
             AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
                 "Audit JSON property order is part of the deterministic report contract.");
 
-        Order(root, "schema_version,packages,compiler,manifest_grants,trusted_claims,foreign_dependencies");
+        Order(root, "schema_version,packages,compiler,manifest_grants,http_origin,trusted_claims,foreign_dependencies");
         foreach (var package in root.GetProperty("packages").EnumerateArray())
         {
             Order(package, "identity,role,content_sha256,dependencies,inputs");
@@ -2712,7 +2723,7 @@ internal static class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,functions,structs,unions,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,http_origin,functions,structs,unions,commands,routes",
             "alias,name,version",
             "name,version",
             "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
@@ -2939,6 +2950,544 @@ internal static class IntegrationTests
         }
     }
 
+    private static async Task TestHttpClientContracts(Harness harness)
+    {
+        const string source = """
+            module app::main;
+
+            pub async fn fetch(client: HttpClient, target: Text) -> Result<HttpResponse, HttpError> effects { net.client } {
+                return await client.get_text_async(target);
+            }
+
+            pub fn status(response: HttpResponse) -> i32 effects {} {
+                return response.status;
+            }
+
+            pub fn body(response: HttpResponse) -> Text effects {} {
+                return response.body;
+            }
+
+            pub fn describe(error: HttpError) -> Text effects {} {
+                return match error {
+                    HttpError.InvalidTarget => "invalid target",
+                    HttpError.Transport => "transport",
+                    HttpError.Timeout => "timeout",
+                    HttpError.ResponseTooLarge => "too large",
+                    HttpError.InvalidText => "invalid text"
+                };
+            }
+
+            pub fn main() -> i32 effects {} { return 0; }
+            """;
+        var validPackage = await harness.WritePackageAsync(
+            "http-client-contracts",
+            CliPackageManifest()
+                + "http_origin = \"https://api.example.test\"\n"
+                + "\n[capabilities]\nnet.client = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source
+            });
+        var validCheck = await harness.InvokePackageDirectoryAsync("http-client-contracts-check", validPackage, "check", "--json");
+        AssertEqual(0, validCheck.ExitCode, Describe(validCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(validCheck.StandardOutput).Length,
+            "HttpClient, HttpResponse fields, and exhaustive HttpError matching should type check.");
+
+        const string unawaitedSource = """
+            module harness::http_unawaited;
+            pub async fn fetch(client: HttpClient, target: Text) -> Result<HttpResponse, HttpError> effects { net.client } {
+                let pending: Result<HttpResponse, HttpError> = client.get_text_async(target);
+                return pending;
+            }
+            """;
+        var unawaited = await ExpectDiagnosticsAsync(
+            harness, "http-client-unawaited", unawaitedSource, "E_ASYNC_CALL_UNAWAITED");
+        AssertTrue(unawaited.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "A valid but unawaited HTTP operation should not add an effect-bound diagnostic.");
+
+        const string wrongArgumentSource = """
+            module harness::http_wrong_argument;
+            pub async fn fetch(client: HttpClient) -> Result<HttpResponse, HttpError> effects {} {
+                return await client.get_text_async(1);
+            }
+            """;
+        var wrongArgument = await ExpectDiagnosticsAsync(
+            harness, "http-client-wrong-argument", wrongArgumentSource, "E_TYPE_MISMATCH");
+        AssertTrue(wrongArgument.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "An invalid HTTP target must not seed a net.client effect.");
+
+        const string exceededSource = """
+            module harness::http_effect_exceeded;
+            pub async fn fetch(client: HttpClient, target: Text) -> Result<HttpResponse, HttpError> effects {} {
+                return await client.get_text_async(target);
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "http-client-effect-exceeded", exceededSource, "E_EFFECT_EXCEEDED");
+
+        const string missingReceiverSource = """
+            module harness::http_missing_receiver;
+            pub async fn fetch(target: Text) -> Result<HttpResponse, HttpError> effects {} {
+                return await http.get_text_async(target);
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "http-client-missing-receiver", missingReceiverSource, "E_CAPABILITY_MISSING");
+
+        var noFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+        var clientGrantOnly = CliPackageManifest() + "\n[capabilities]\nnet.client = \"allow\"\n";
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "http-client-missing-origin",
+            clientGrantOnly,
+            noFiles,
+            "E_CAPABILITY_MISSING",
+            "lang.toml");
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "http-client-orphan-origin",
+            CliPackageManifest() + "http_origin = \"https://api.example.test\"\n",
+            noFiles,
+            "E_MANIFEST",
+            "lang.toml");
+        foreach (var (name, origin) in new[]
+        {
+            ("external-http", "http://api.example.test"),
+            ("origin-path", "https://api.example.test/v1"),
+            ("origin-query", "https://api.example.test/?x=1"),
+            ("origin-fragment", "https://api.example.test/#part"),
+            ("origin-user-info", "https://user:pass@api.example.test/")
+        })
+        {
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                $"http-client-invalid-{name}",
+                CliPackageManifest() + $"http_origin = \"{origin}\"\n\n[capabilities]\nnet.client = \"allow\"\n",
+                noFiles,
+                "E_MANIFEST",
+                "lang.toml");
+        }
+
+        const string rootSource = "module app::main; pub fn main() -> i32 effects {} { return 1; }\n";
+        const string originalOrigin = "https://first.example.test";
+        const string replacementOrigin = "https://second.example.test";
+        var originalManifest = CliPackageManifest()
+            + $"http_origin = \"{originalOrigin}\"\n\n[capabilities]\nnet.client = \"allow\"\n"
+            + "\n[dependencies]\nvalidation = \"../validation\"\n";
+        var lockPackage = await harness.WritePackageGraphAsync(
+            "http-client-origin-lock",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(originalManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = rootSource }),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("http-lock-validation"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/validation.lang"] = "module validation; pub fn marker() -> i32 effects {} { return 1; }"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "http-client-origin-lock-create", lockPackage, "lock"));
+        var lockManifestPath = Path.Combine(lockPackage, "lang.toml");
+        await File.WriteAllTextAsync(lockManifestPath, originalManifest.Replace(originalOrigin, replacementOrigin, StringComparison.Ordinal));
+        var staleOrigin = await harness.InvokePackageDirectoryAsync(
+            "http-client-origin-lock-stale", lockPackage, "check", "--json");
+        AssertTrue(staleOrigin.ExitCode != 0
+            && staleOrigin.StandardOutput.Contains("E_LOCK", StringComparison.Ordinal),
+            $"Changing http_origin must stale the package lock. {Describe(staleOrigin)}");
+
+        const string commandHandlerSource = """
+            module app::main;
+            command fetch {
+                help "Fetch one HTTP target.";
+                argument target: Text help "Relative request target.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string commandCapabilitySource = """
+            module handlers;
+            pub async fn run(args: self::app::main::FetchArgs, client: HttpClient) -> Result<Text, HttpError> effects { net.client } {
+                return match await client.get_text_async(args.target) {
+                    Ok(response) => Ok(response.body),
+                    Err(error) => Err(error)
+                };
+            }
+            pub fn describe(error: HttpError) -> Text effects {} {
+                return match error {
+                    HttpError.InvalidTarget => "invalid target",
+                    HttpError.Transport => "transport",
+                    HttpError.Timeout => "timeout",
+                    HttpError.ResponseTooLarge => "too large",
+                    HttpError.InvalidText => "invalid text"
+                };
+            }
+            """;
+        var missingGrantPackage = await harness.WritePackageAsync(
+            "http-client-command-missing-grant",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = commandHandlerSource,
+                ["src/handlers.lang"] = commandCapabilitySource
+            });
+        var missingGrant = await harness.InvokePackageDirectoryAsync(
+            "http-client-command-missing-grant-check", missingGrantPackage, "check", "--json");
+        AssertTrue(missingGrant.ExitCode != 0, Describe(missingGrant));
+        AssertTrue(ParseDiagnosticSnapshots(missingGrant.StandardOutput)
+                .Any(diagnostic => diagnostic.Code == "E_CAPABILITY_MISSING"),
+            $"An injected CLI HttpClient without net.client should fail capability checking. {Describe(missingGrant)}");
+
+        const string routeSource = """
+            module app::main;
+            pub union Reply { Ready, Failed }
+            pub async fn fetch(client: HttpClient) -> self::app::main::Reply effects { net.client } {
+                let response: Result<HttpResponse, HttpError> = await client.get_text_async("/");
+                return self::app::main::Reply.Ready;
+            }
+            route GET "/" {
+                handler: self::app::main::fetch;
+                response Ready: 200;
+                response Failed: 500;
+            }
+            """;
+        var routeMissingGrantPackage = await harness.WritePackageAsync(
+            "http-client-route-missing-grant",
+            "name = \"http-route-missing-grant\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "\n[capabilities]\nnet.listen = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = routeSource
+            });
+        var routeMissingGrant = await harness.InvokePackageDirectoryAsync(
+            "http-client-route-missing-grant-check", routeMissingGrantPackage, "check", "--json");
+        AssertTrue(routeMissingGrant.ExitCode != 0, Describe(routeMissingGrant));
+        AssertTrue(ParseDiagnosticSnapshots(routeMissingGrant.StandardOutput)
+                .Any(diagnostic => diagnostic.Code == "E_CAPABILITY_MISSING"),
+            $"An injected route HttpClient without net.client should fail capability checking. {Describe(routeMissingGrant)}");
+
+        var webClientPackage = await harness.WritePackageAsync(
+            "http-client-route-projection",
+            "name = \"http-route-projection\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "http_origin = \"https://api.example.test\"\n"
+                + "\n[capabilities]\nnet.listen = \"allow\"\nnet.client = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = routeSource
+            });
+        var webClientApi = await harness.InvokeCompilerCommandAsync("inspect", "api", webClientPackage, "--json");
+        AssertEqual(0, webClientApi.ExitCode, Describe(webClientApi));
+        using (var apiDocument = JsonDocument.Parse(webClientApi.StandardOutput))
+        {
+            var api = apiDocument.RootElement;
+            AssertInspectApiPropertyOrder(api);
+            AssertEqual(3, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 3.");
+            AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
+                "The web API should expose its configured HTTP origin.");
+            AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
+            var route = api.GetProperty("routes").EnumerateArray().Single();
+            AssertJsonStringArray(route.GetProperty("required_capabilities"), ["net.client"]);
+            var parameter = route.GetProperty("capability_parameters").EnumerateArray().Single();
+            AssertEqual("client", parameter.GetProperty("name").GetString(),
+                "The web API should retain the injected HttpClient parameter name.");
+            AssertEqual("net.client", parameter.GetProperty("capability").GetString(),
+                "The web API should map the injected HttpClient to net.client.");
+        }
+    }
+
+    private static async Task TestHttpClientRuntimeAdapter(Harness harness)
+    {
+        await using var server = new RawHttpServer();
+        const string source = """
+            module app::main;
+
+            command get {
+                help "Fetch one HTTP target.";
+                argument target: Text help "Relative request target.";
+                handler: self::app::main::run;
+                error: self::app::main::describe;
+            }
+
+            pub async fn fetch(client: HttpClient, target: Text) -> Result<HttpResponse, HttpError> effects { net.client } {
+                return await client.get_text_async(target);
+            }
+
+            pub async fn run(args: self::app::main::GetArgs, client: HttpClient) -> Result<Text, HttpError> effects { net.client } {
+                return match await self::app::main::fetch(client, args.target) {
+                    Ok(response) => Ok(response.body),
+                    Err(error) => Err(error)
+                };
+            }
+
+            pub fn describe(error: HttpError) -> Text effects {} {
+                return match error {
+                    HttpError.InvalidTarget => "invalid target",
+                    HttpError.Transport => "transport",
+                    HttpError.Timeout => "timeout",
+                    HttpError.ResponseTooLarge => "too large",
+                    HttpError.InvalidText => "invalid text"
+                };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "http-client-runtime",
+            CliPackageManifest()
+                + $"http_origin = \"{server.Origin}\"\n"
+                + "\n[capabilities]\nnet.client = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source
+            });
+        var check = await harness.InvokePackageDirectoryAsync("http-client-runtime-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var apiResult = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, apiResult.ExitCode, Describe(apiResult));
+        using (var apiDocument = JsonDocument.Parse(apiResult.StandardOutput))
+        {
+            var api = apiDocument.RootElement;
+            AssertInspectApiPropertyOrder(api);
+            AssertEqual(3, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 3.");
+            AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
+                "Inspect-api should retain the root HTTP origin.");
+            AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
+            var function = api.GetProperty("functions").EnumerateArray()
+                .Single(item => item.GetProperty("id").GetString() == "self::app::main::fetch");
+            AssertJsonStringArray(function.GetProperty("required_capabilities"), ["net.client"]);
+            var clientType = function.GetProperty("parameters")[0].GetProperty("type");
+            AssertEqual("primitive", clientType.GetProperty("kind").GetString(),
+                "The API should expose HttpClient as a built-in primitive type.");
+            AssertEqual("HttpClient", clientType.GetProperty("name").GetString(),
+                "The API should preserve the HttpClient source type name.");
+            var resultType = function.GetProperty("return_type");
+            AssertEqual("result", resultType.GetProperty("kind").GetString(),
+                "The API should preserve the HTTP Result wrapper.");
+            AssertEqual("HttpResponse", resultType.GetProperty("ok").GetProperty("name").GetString(),
+                "The API should expose HttpResponse as the successful HTTP result type.");
+            AssertEqual("HttpError", resultType.GetProperty("error").GetProperty("name").GetString(),
+                "The API should expose HttpError as the failed HTTP result type.");
+            var command = api.GetProperty("commands").EnumerateArray().Single();
+            AssertEqual("self::app::main::get", command.GetProperty("id").GetString(),
+                "The API should retain the typed HTTP command.");
+            AssertJsonStringArray(command.GetProperty("required_capabilities"), ["net.client"]);
+            AssertJsonStringArray(api.GetProperty("functions").EnumerateArray()
+                .Single(item => item.GetProperty("id").GetString() == "self::app::main::run")
+                .GetProperty("required_capabilities"), ["net.client"]);
+        }
+
+        var effectsResult = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::app::main::fetch", "--json");
+        AssertEqual(0, effectsResult.ExitCode, Describe(effectsResult));
+        using (var effectsDocument = JsonDocument.Parse(effectsResult.StandardOutput))
+        {
+            var report = effectsDocument.RootElement;
+            AssertEqual(1, report.GetProperty("schema_version").GetInt32(),
+                "HTTP effect reports should preserve schema version 1.");
+            AssertJsonStringArray(report.GetProperty("declared_effects"), ["net.client"]);
+            AssertJsonStringArray(report.GetProperty("inferred_effects"), ["net.client"]);
+            var operation = report.GetProperty("trusted_operations").EnumerateArray()
+                .Single(item => item.GetProperty("operation").GetString() == "HttpClient.get_text_async");
+            AssertEqual("trusted_adapter", operation.GetProperty("trust").GetString(),
+                "The HTTP operation should be identified as a trusted adapter.");
+            AssertJsonStringArray(operation.GetProperty("effects"), ["net.client"]);
+        }
+
+        var auditResult = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, auditResult.ExitCode, Describe(auditResult));
+        using (var auditDocument = JsonDocument.Parse(auditResult.StandardOutput))
+        {
+            var audit = auditDocument.RootElement;
+            AssertAuditPropertyOrder(audit);
+            AssertEqual(3, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 3.");
+            AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
+                "Audit should retain the root HTTP origin.");
+            AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
+            AssertTrue(audit.GetProperty("trusted_claims").EnumerateArray()
+                    .Any(item => item.GetProperty("operation").GetString() == "HttpClient.get_text_async"
+                        && JsonStringArrayText(item.GetProperty("effects")) == "net.client"),
+                "Audit should report the reachable HttpClient trusted adapter claim.");
+        }
+
+        var build = await harness.InvokePackageDirectoryAsync("http-client-runtime-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        var artifact = ParseBuiltArtifact(build, "Built executable: ");
+
+        var loadContext = ProbeHttpClientRuntimeMappings(artifact, server.Origin, server);
+        for (var attempt = 0; attempt < 10 && loadContext.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        AssertTrue(!loadContext.IsAlive,
+            "The generated HTTP package's collectible load context should unload after the trusted probe.");
+
+        static string JsonStringArrayText(JsonElement element) =>
+            string.Join(",", element.EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ProbeHttpClientRuntimeMappings(
+        string dllPath,
+        string origin,
+        RawHttpServer server)
+    {
+        var loadContext = new AssemblyLoadContext($"http-client-probe-{Guid.NewGuid():N}", isCollectible: true);
+        var weakReference = new WeakReference(loadContext);
+        try
+        {
+            var assembly = loadContext.LoadFromAssemblyPath(Path.GetFullPath(dllPath));
+            var moduleType = assembly.GetType("LangModule", throwOnError: true)!;
+            var clientType = moduleType.GetNestedType("HttpClientCapability", BindingFlags.Public)
+                ?? throw new InvalidOperationException("Generated package does not expose its nested HttpClient runtime type.");
+            var clientConstructor = clientType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                [typeof(string), typeof(CancellationToken)],
+                modifiers: null)
+                ?? throw new InvalidOperationException("Generated HttpClient has no trusted origin and cancellation-token constructor.");
+            var fetch = moduleType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Single(method => method.Name.StartsWith("Function_", StringComparison.Ordinal)
+                    && method.ReturnType.IsGenericType
+                    && method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>)
+                    && method.GetParameters() is { Length: 3 } parameters
+                    && parameters[0].ParameterType == clientType
+                    && parameters[1].ParameterType == typeof(string)
+                    && parameters[2].ParameterType == typeof(CancellationToken));
+
+            Task InvokeFetch(string target, CancellationToken cancellationToken)
+            {
+                var client = clientConstructor.Invoke([origin, cancellationToken]);
+                return fetch.Invoke(null, [client, target, cancellationToken]) as Task
+                    ?? throw new InvalidOperationException("Generated HttpClient.get_text_async did not return a Task.");
+            }
+
+            static object Complete(Task task)
+            {
+                task.GetAwaiter().GetResult();
+                return task.GetType().GetProperty("Result")?.GetValue(task)
+                    ?? throw new InvalidOperationException("Generated HttpClient.get_text_async returned no Result value.");
+            }
+
+            static object CompleteWithin(Task task, TimeSpan watchdog)
+            {
+                task.WaitAsync(watchdog).GetAwaiter().GetResult();
+                return Complete(task);
+            }
+
+            static object AssertSuccess(object result, int status, string expectedBody)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Ok", StringComparison.Ordinal),
+                    $"An HTTP response should map to Result.Ok, got {result.GetType().FullName}.");
+                var response = result.GetType().GetProperty("Value")?.GetValue(result)
+                    ?? throw new InvalidOperationException("Result.Ok did not expose its HttpResponse value.");
+                AssertEqual(status, response.GetType().GetProperty("Field_0")?.GetValue(response) as int?,
+                    "HttpResponse.status should preserve the received HTTP status.");
+                AssertEqual(expectedBody, response.GetType().GetProperty("Field_1")?.GetValue(response) as string,
+                    "HttpResponse.body should preserve strict UTF-8 response text.");
+                return response;
+            }
+
+            static string AssertError(object result, string expectedVariant)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                    $"An HTTP adapter failure should map to Result.Err, got {result.GetType().FullName}.");
+                var error = result.GetType().GetProperty("Error")?.GetValue(result)
+                    ?? throw new InvalidOperationException("Result.Err did not expose its HttpError value.");
+                var variant = error.GetType().Name;
+                AssertTrue(variant.StartsWith(expectedVariant, StringComparison.Ordinal),
+                    $"Expected HttpError.{expectedVariant}, got {error.GetType().FullName}.");
+                return variant;
+            }
+
+            AssertSuccess(Complete(InvokeFetch("/ok?from=runtime", CancellationToken.None)),
+                200, "loopback λ");
+            AssertSuccess(Complete(InvokeFetch("/not-found", CancellationToken.None)),
+                404, "not found");
+            AssertSuccess(Complete(InvokeFetch("/server-error", CancellationToken.None)),
+                503, "server error");
+
+            var requestsBeforeInvalidTarget = server.Requests.Count;
+            AssertError(Complete(InvokeFetch("//example.invalid/path", CancellationToken.None)), "InvalidTarget");
+            AssertEqual(requestsBeforeInvalidTarget, server.Requests.Count,
+                "An invalid target should be rejected before opening a loopback connection.");
+
+            AssertSuccess(Complete(InvokeFetch("/redirect", CancellationToken.None)), 302, "redirect body");
+            AssertTrue(!server.Requests.Any(request => request.Target == "/followed"),
+                "The HTTP adapter must return redirects without following them.");
+
+            AssertSuccess(Complete(InvokeFetch("/cookie", CancellationToken.None)), 200, "cookie set");
+            var cookieRequest = server.Requests.Single(request => request.Target == "/cookie");
+            AssertSuccess(Complete(InvokeFetch("/after-cookie", CancellationToken.None)), 200, "after cookie");
+            var afterCookie = server.Requests.Single(request => request.Target == "/after-cookie");
+            AssertEqual(cookieRequest.RemotePort, afterCookie.RemotePort,
+                "The cookie check should use a reused HTTP connection.");
+            AssertTrue(!afterCookie.Headers.ContainsKey("Cookie") && !afterCookie.Headers.ContainsKey("Authorization"),
+                "A reused connection must not send cookies or ambient authorization credentials.");
+
+            var exactLimit = new string('x', 1_048_576);
+            AssertSuccess(Complete(InvokeFetch("/exact-limit", CancellationToken.None)), 200, exactLimit);
+            AssertError(Complete(InvokeFetch("/over-limit", CancellationToken.None)), "ResponseTooLarge");
+            AssertError(Complete(InvokeFetch("/invalid-text", CancellationToken.None)), "InvalidText");
+
+            AssertError(Complete(InvokeFetch("/reset", CancellationToken.None)), "Transport");
+
+            using (var preCanceled = new CancellationTokenSource())
+            {
+                preCanceled.Cancel();
+                var observed = false;
+                try
+                {
+                    _ = Complete(InvokeFetch("/pre-canceled", preCanceled.Token));
+                }
+                catch (OperationCanceledException)
+                {
+                    observed = true;
+                }
+                AssertTrue(observed, "A pre-canceled host token must propagate OperationCanceledException.");
+                AssertTrue(!server.Requests.Any(request => request.Target == "/pre-canceled"),
+                    "A pre-canceled host token must stop before sending a request.");
+            }
+
+            using (var inFlightCancellation = new CancellationTokenSource())
+            {
+                var call = InvokeFetch("/hold-cancel", inFlightCancellation.Token);
+                server.WaitForRequestAsync("/hold-cancel").WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                inFlightCancellation.Cancel();
+                server.ReleaseHeldRequest("/hold-cancel");
+                var observed = false;
+                try
+                {
+                    _ = CompleteWithin(call, TimeSpan.FromSeconds(5));
+                }
+                catch (OperationCanceledException)
+                {
+                    observed = true;
+                }
+                AssertTrue(observed, "An in-flight host cancellation must propagate OperationCanceledException.");
+            }
+
+            var timeoutCall = InvokeFetch("/hold-timeout", CancellationToken.None);
+            server.WaitForRequestAsync("/hold-timeout").WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            object timeoutResult;
+            try
+            {
+                timeoutResult = CompleteWithin(timeoutCall, TimeSpan.FromSeconds(15));
+            }
+            finally
+            {
+                server.ReleaseHeldRequest("/hold-timeout");
+            }
+            AssertError(timeoutResult, "Timeout");
+        }
+        finally
+        {
+            loadContext.Unload();
+        }
+
+        return weakReference;
+    }
+
     private static async Task TestFsWriteManagedLibrary(Harness harness)
     {
         const string source = "module harness::fs_write_library;\n"
@@ -3094,7 +3643,7 @@ internal static class IntegrationTests
         await ExpectPackageJsonDiagnosticAsync(
             harness,
             "cli-capability-unknown-manifest",
-            CliPackageManifest() + "\n[capabilities]\nnet.client = \"allow\"\n",
+            CliPackageManifest() + "\n[capabilities]\nnet.unknown = \"allow\"\n",
             noFiles,
             "E_MANIFEST",
             "lang.toml");
@@ -6344,6 +6893,193 @@ internal static class IntegrationTests
         public override bool CanSeek => false;
     }
 
+    private sealed class RawHttpServer : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stopping = new();
+        private readonly ConcurrentQueue<RawHttpRequest> _requests = new();
+        private readonly ConcurrentBag<Task> _connections = [];
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<RawHttpRequest>> _requestSignals = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _holdReleases = new(StringComparer.Ordinal);
+        private readonly Task _acceptLoop;
+
+        public RawHttpServer()
+        {
+            _listener.Start();
+            var port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            Origin = $"http://127.0.0.1:{port}";
+            _acceptLoop = AcceptLoopAsync();
+        }
+
+        public string Origin { get; }
+        public IReadOnlyCollection<RawHttpRequest> Requests => _requests.ToArray();
+
+        public Task<RawHttpRequest> WaitForRequestAsync(string target) =>
+            _requestSignals.GetOrAdd(target, static _ => NewCompletion<RawHttpRequest>()).Task;
+
+        public void ReleaseHeldRequest(string target) =>
+            _holdReleases.GetOrAdd(target, static _ => NewCompletion<bool>()).TrySetResult(true);
+
+        public async ValueTask DisposeAsync()
+        {
+            _stopping.Cancel();
+            _listener.Stop();
+            foreach (var release in _holdReleases.Values)
+                release.TrySetResult(true);
+            try
+            {
+                await _acceptLoop.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception exception) when (exception is OperationCanceledException or SocketException or ObjectDisposedException)
+            {
+            }
+            try
+            {
+                await Task.WhenAll(_connections.ToArray()).WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception exception) when (exception is OperationCanceledException or SocketException or IOException or ObjectDisposedException or TimeoutException)
+            {
+            }
+            _stopping.Dispose();
+        }
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stopping.IsCancellationRequested)
+                {
+                    var client = await _listener.AcceptTcpClientAsync(_stopping.Token);
+                    _connections.Add(HandleConnectionAsync(client));
+                }
+            }
+            catch (OperationCanceledException) when (_stopping.IsCancellationRequested)
+            {
+            }
+            catch (SocketException) when (_stopping.IsCancellationRequested)
+            {
+            }
+            catch (ObjectDisposedException) when (_stopping.IsCancellationRequested)
+            {
+            }
+        }
+
+        private async Task HandleConnectionAsync(TcpClient client)
+        {
+            using (client)
+            {
+                try
+                {
+                    var stream = client.GetStream();
+                    while (!_stopping.IsCancellationRequested)
+                    {
+                        var header = await ReadHeaderAsync(stream, _stopping.Token);
+                        if (header is null)
+                            return;
+                        var lines = header.Split("\r\n", StringSplitOptions.None);
+                        var requestLine = lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (requestLine.Length < 2)
+                            return;
+                        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var line in lines.Skip(1))
+                        {
+                            var separator = line.IndexOf(':');
+                            if (separator > 0)
+                                headers[line[..separator].Trim()] = line[(separator + 1)..].Trim();
+                        }
+                        var remotePort = (client.Client.RemoteEndPoint as IPEndPoint)?.Port ?? 0;
+                        var request = new RawHttpRequest(requestLine[1], headers, remotePort);
+                        _requests.Enqueue(request);
+                        _requestSignals.GetOrAdd(request.Target, static _ => NewCompletion<RawHttpRequest>())
+                            .TrySetResult(request);
+
+                        if (request.Target is "/hold-cancel" or "/hold-timeout")
+                            await _holdReleases.GetOrAdd(request.Target, static _ => NewCompletion<bool>()).Task
+                                .WaitAsync(_stopping.Token);
+
+                        if (request.Target == "/reset")
+                        {
+                            client.Client.LingerState = new LingerOption(enable: true, seconds: 0);
+                            return;
+                        }
+
+                        var response = CreateResponse(request.Target);
+                        var reason = response.Status switch
+                        {
+                            200 => "OK",
+                            302 => "Found",
+                            404 => "Not Found",
+                            _ => "Response"
+                        };
+                        var responseHeaders = new StringBuilder()
+                            .Append("HTTP/1.1 ").Append(response.Status).Append(' ').Append(reason).Append("\r\n")
+                            .Append("Content-Length: ").Append(response.Body.Length).Append("\r\n")
+                            .Append("Content-Type: text/plain; charset=utf-8\r\n")
+                            .Append("Connection: keep-alive\r\n");
+                        foreach (var (name, value) in response.Headers)
+                            responseHeaders.Append(name).Append(": ").Append(value).Append("\r\n");
+                        responseHeaders.Append("\r\n");
+                        var headBytes = Encoding.ASCII.GetBytes(responseHeaders.ToString());
+                        await stream.WriteAsync(headBytes, _stopping.Token);
+                        await stream.WriteAsync(response.Body, _stopping.Token);
+                        await stream.FlushAsync(_stopping.Token);
+                    }
+                }
+                catch (Exception exception) when (exception is OperationCanceledException or IOException or SocketException or ObjectDisposedException)
+                {
+                }
+            }
+        }
+
+        private static async Task<string?> ReadHeaderAsync(NetworkStream stream, CancellationToken cancellationToken)
+        {
+            var bytes = new List<byte>(1024);
+            var one = new byte[1];
+            while (bytes.Count < 64 * 1024)
+            {
+                var read = await stream.ReadAsync(one.AsMemory(), cancellationToken);
+                if (read == 0)
+                    return bytes.Count == 0 ? null : Encoding.ASCII.GetString(bytes.ToArray());
+                bytes.Add(one[0]);
+                var count = bytes.Count;
+                if (count >= 4 && bytes[count - 4] == (byte)'\r' && bytes[count - 3] == (byte)'\n'
+                    && bytes[count - 2] == (byte)'\r' && bytes[count - 1] == (byte)'\n')
+                    return Encoding.ASCII.GetString(bytes.ToArray());
+            }
+            throw new IOException("The test HTTP request headers exceeded the parser limit.");
+        }
+
+        private static RawHttpResponse CreateResponse(string target) => target switch
+        {
+            "/ok?from=runtime" => TextResponse(200, "loopback λ"),
+            "/aot?source=typed-command" => TextResponse(200, "native loopback λ"),
+            "/not-found" => TextResponse(404, "not found"),
+            "/server-error" => TextResponse(503, "server error"),
+            "/redirect" => new RawHttpResponse(302, Encoding.UTF8.GetBytes("redirect body"),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Location"] = "/followed" }),
+            "/followed" => TextResponse(200, "followed"),
+            "/cookie" => new RawHttpResponse(200, Encoding.UTF8.GetBytes("cookie set"),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Set-Cookie"] = "session=private; Path=/" }),
+            "/after-cookie" => TextResponse(200, "after cookie"),
+            "/exact-limit" => new RawHttpResponse(200, Enumerable.Repeat((byte)'x', 1_048_576).ToArray(), EmptyHeaders),
+            "/over-limit" => new RawHttpResponse(200, Enumerable.Repeat((byte)'x', 1_048_577).ToArray(), EmptyHeaders),
+            "/invalid-text" => new RawHttpResponse(200, [0xC3, 0x28], EmptyHeaders),
+            _ => TextResponse(404, "unexpected path")
+        };
+
+        private static RawHttpResponse TextResponse(int status, string body) =>
+            new(status, Encoding.UTF8.GetBytes(body), EmptyHeaders);
+
+        private static IReadOnlyDictionary<string, string> EmptyHeaders { get; } =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private static TaskCompletionSource<T> NewCompletion<T>() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed record RawHttpRequest(string Target, IReadOnlyDictionary<string, string> Headers, int RemotePort);
+    private sealed record RawHttpResponse(int Status, byte[] Body, IReadOnlyDictionary<string, string> Headers);
+
     private static int GetUnusedLoopbackPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -7978,33 +8714,39 @@ internal static class IntegrationTests
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new IntegrationTestSkippedException("The NativeAOT command smoke test targets x64 hosts only.");
 
+        await using var server = new RawHttpServer();
         const string source = """
             module app::main;
 
-            pub union ScanError { Failed }
-
             command scan {
-                help "Echo a value.";
-                argument input: Text help "Value to echo.";
+                help "Fetch text from an HTTP target.";
+                argument target: Text help "Relative HTTP target.";
                 handler: self::app::main::run;
-                error: self::app::main::describe_error;
+                error: self::app::main::describe;
             }
 
-            pub async fn identity<T>(value: T) -> T effects {} {
-                return value;
+            pub async fn run(args: self::app::main::ScanArgs, client: HttpClient) -> Result<Text, HttpError> effects { net.client } {
+                return match await client.get_text_async(args.target) {
+                    Ok(response) => Ok(response.body),
+                    Err(error) => Err(error)
+                };
             }
 
-            pub async fn run(args: self::app::main::ScanArgs) -> Result<Text, self::app::main::ScanError> effects {} {
-                return Ok(await self::app::main::identity(args.input));
-            }
-
-            pub fn describe_error(error: self::app::main::ScanError) -> Text effects {} {
-                return match error { self::app::main::ScanError.Failed => "scan failed" };
+            pub fn describe(error: HttpError) -> Text effects {} {
+                return match error {
+                    HttpError.InvalidTarget => "invalid target",
+                    HttpError.Transport => "transport",
+                    HttpError.Timeout => "timeout",
+                    HttpError.ResponseTooLarge => "too large",
+                    HttpError.InvalidText => "invalid text"
+                };
             }
             """;
         var packageRoot = await harness.WritePackageAsync(
             "command-aot-smoke",
-            CliPackageManifest(),
+            CliPackageManifest()
+                + $"http_origin = \"{server.Origin}\"\n"
+                + "\n[capabilities]\nnet.client = \"allow\"\n",
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = source
@@ -8044,15 +8786,20 @@ internal static class IntegrationTests
                 "The AOT command schema version must be 2.");
             AssertEqual("scan", schema.RootElement.GetProperty("commands")[0].GetProperty("name").GetString(),
                 "The AOT command schema should retain its command declaration.");
+            AssertJsonStringArray(schema.RootElement.GetProperty("commands")[0].GetProperty("capabilities"), ["net.client"]);
         }
+            AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["net.client"]);
+            var httpClaim = receipt.RootElement.GetProperty("trusted_components").EnumerateArray()
+                .Single(item => item.GetProperty("operation").GetString() == "HttpClient.get_text_async");
+            AssertJsonStringArray(httpClaim.GetProperty("effects"), ["net.client"]);
 
         var execution = await ExecuteNativeAsync(
             executablePath,
             TimeSpan.FromSeconds(30),
             "scan",
             "--",
-            "--leading");
-        AssertRunOutput("--leading" + Environment.NewLine, execution);
+            "/aot?source=typed-command");
+        AssertRunOutput("native loopback λ" + Environment.NewLine, execution);
     }
 
     private static async Task TestScanCliAotPublishAndRun(Harness harness)

@@ -493,11 +493,7 @@ internal static class Driver
         }
 
         var inferredEffects = function.InferredEffects;
-        var requiredCapabilities = inferredEffects
-            .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write")
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(effect => effect, StringComparer.Ordinal)
-            .ToArray();
+        var requiredCapabilities = CheckedReportFacts.RequiredCapabilities(inferredEffects);
         var manifestGrants = graph.Root.Package.Manifest.Capabilities
             .OrderBy(capability => capability, StringComparer.Ordinal)
             .ToArray();
@@ -713,6 +709,7 @@ internal static class Driver
                     {
                         CheckedCapabilityKind.FsRead => "fs.read",
                         CheckedCapabilityKind.FsWrite => "fs.write",
+                        CheckedCapabilityKind.HttpClient => "net.client",
                         _ => throw new InvalidOperationException("Unknown checked command capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -758,6 +755,7 @@ internal static class Driver
                         CheckedCapabilityKind.FsWrite => "fs.write",
                         CheckedCapabilityKind.DbRead => "db.read",
                         CheckedCapabilityKind.DbWrite => "db.write",
+                        CheckedCapabilityKind.HttpClient => "net.client",
                         _ => throw new InvalidOperationException("Unknown checked route capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -772,6 +770,7 @@ internal static class Driver
                             CheckedCapabilityKind.FsWrite => "fs.write",
                             CheckedCapabilityKind.DbRead => "db.read",
                             CheckedCapabilityKind.DbWrite => "db.write",
+                            CheckedCapabilityKind.HttpClient => "net.client",
                             _ => throw new InvalidOperationException("Unknown checked route capability")
                         }
                     })
@@ -783,12 +782,13 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 2,
+            schema_version = 3,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
                 .OrderBy(capability => capability, StringComparer.Ordinal)
                 .ToArray(),
+            http_origin = graph.Root.Package.Manifest.HttpOrigin,
             functions,
             structs,
             unions,
@@ -815,6 +815,9 @@ internal static class Driver
         LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
         LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
         LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
+        LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
+        LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
+        LangTypeKind.HttpError => new { kind = "primitive", name = "HttpError" },
         LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
         LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
         LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
@@ -1320,7 +1323,7 @@ internal static class Driver
                     sqlitePackage: usesDatabaseAdapter));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
-                Emitter.Emit(program, executable, package?.WebDatabaseOptions));
+                Emitter.Emit(program, executable, package?.WebDatabaseOptions, package?.Manifest.HttpOrigin));
         }
         catch (Exception error) when (IsFileError(error))
         {

@@ -17,6 +17,9 @@ internal enum LangTypeKind
     FsRead,
     FsWrite,
     FsError,
+    HttpClient,
+    HttpResponse,
+    HttpError,
     DbRead,
     DbWrite,
     Transaction,
@@ -56,6 +59,9 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
     public bool IsFsWrite => Kind == LangTypeKind.FsWrite;
     public bool IsFsError => Kind == LangTypeKind.FsError;
+    public bool IsHttpClient => Kind == LangTypeKind.HttpClient;
+    public bool IsHttpResponse => Kind == LangTypeKind.HttpResponse;
+    public bool IsHttpError => Kind == LangTypeKind.HttpError;
     public bool IsDbRead => Kind == LangTypeKind.DbRead;
     public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
     public bool IsTransaction => Kind == LangTypeKind.Transaction;
@@ -76,6 +82,9 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsWrite { get; } = new(LangTypeKind.FsWrite, "FsWrite");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
+    internal static LangType HttpClient { get; } = new(LangTypeKind.HttpClient, "HttpClient");
+    internal static LangType HttpResponse { get; } = new(LangTypeKind.HttpResponse, "HttpResponse");
+    internal static LangType HttpError { get; } = new(LangTypeKind.HttpError, "HttpError");
     internal static LangType DbRead { get; } = new(LangTypeKind.DbRead, "DbRead");
     internal static LangType DbWrite { get; } = new(LangTypeKind.DbWrite, "DbWrite");
     internal static LangType Transaction { get; } = new(LangTypeKind.Transaction, "Transaction");
@@ -193,7 +202,7 @@ internal sealed record CheckedCommand(
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
-internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite }
+internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient }
 internal sealed record CheckedCapabilityParameter(
     CheckedCapabilityKind Kind,
     int HandlerParameterIndex,
@@ -297,6 +306,7 @@ internal enum BuiltinIntrinsic
     FsReadText,
     FsReadTextAsync,
     FsWriteText,
+    HttpGetTextAsync,
     HtmlText,
     HtmlHeading,
     HtmlParagraph,
@@ -339,6 +349,11 @@ internal enum BuiltinVariant
     FsErrorInvalidPath,
     FsErrorInvalidText,
     FsErrorIo,
+    HttpInvalidTarget,
+    HttpTransport,
+    HttpTimeout,
+    HttpResponseTooLarge,
+    HttpInvalidText,
     DbErrorStatement,
     DbErrorRowShape
 }
@@ -1089,10 +1104,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 command.Capabilities = commandCapabilities;
                 if (handler.TypeParameters.Count != 0 || !validParameters || !validReturn)
                 {
+                    var hasHttpClient = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.HttpClient);
                     var hasFsWrite = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite);
-                    var expectation = hasFsWrite
-                        ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
-                        : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
+                    var expectation = hasHttpClient
+                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, and HttpClient in that order, and return Result<Text, E> for a concrete error type"
+                        : hasFsWrite
+                            ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
+                            : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
                     Add("E_COMMAND_HANDLER", expectation, command.HandlerSyntax.Reference.At);
                 }
             }
@@ -1264,7 +1282,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 if (!validParameters || !validReturn || !validGenericity)
                 {
                     var hasFsWrite = handler.Parameters.Any(parameter => parameter.Type.IsFsWrite);
-                    var capabilityOrder = hasFsWrite ? "FsWrite, DbRead, and DbWrite" : "DbRead and DbWrite";
+                    var hasHttpClient = handler.Parameters.Any(parameter => parameter.Type.IsHttpClient);
+                    var capabilityOrder = hasHttpClient
+                        ? hasFsWrite ? "FsWrite, DbRead, DbWrite, and HttpClient" : "DbRead, DbWrite, and HttpClient"
+                        : hasFsWrite ? "FsWrite, DbRead, and DbWrite" : "DbRead and DbWrite";
                     var expectation = route.Method == "GET"
                         ? $"a non-generic function taking optional {capabilityOrder} capabilities in that order, and returning a declared union"
                         : $"a non-generic function taking the route body type followed by optional {capabilityOrder} capabilities in that order, and returning a declared union";
@@ -1355,14 +1376,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.FsWrite => 0,
                 CheckedCapabilityKind.DbRead => 1,
                 CheckedCapabilityKind.DbWrite => 2,
+                CheckedCapabilityKind.HttpClient => 3,
                 _ => -1
             };
 
             if (kind is null || order < 0)
             {
+                var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
                 Add(
                     "E_ROUTE_HANDLER",
-                    "Route handlers may receive only DbRead followed by DbWrite capability parameters after the request body",
+                    hasHttpClient
+                        ? "Route handlers may receive only FsWrite, DbRead, DbWrite, and HttpClient capability parameters after the request body"
+                        : "Route handlers may receive only DbRead followed by DbWrite capability parameters after the request body",
                     parameter.At);
                 valid = false;
                 continue;
@@ -1375,9 +1400,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
             if (order < lastOrder)
             {
-                var orderMessage = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsFsWrite)
-                    ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite order"
-                    : "Route handler capability parameters must appear in DbRead, DbWrite order";
+                var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
+                var hasFsWrite = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsFsWrite);
+                var orderMessage = hasHttpClient
+                    ? hasFsWrite
+                        ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient order"
+                        : "Route handler capability parameters must appear in DbRead, DbWrite, HttpClient order"
+                    : hasFsWrite
+                        ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite order"
+                        : "Route handler capability parameters must appear in DbRead, DbWrite order";
                 Add("E_ROUTE_HANDLER", orderMessage, parameter.At);
                 valid = false;
             }
@@ -1411,6 +1442,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 CheckedCapabilityKind.FsRead => 0,
                 CheckedCapabilityKind.FsWrite => 1,
+                CheckedCapabilityKind.HttpClient => 2,
                 _ => -1
             };
             if (kind is null || order < 0)
@@ -1442,6 +1474,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         LangTypeKind.FsWrite => CheckedCapabilityKind.FsWrite,
         LangTypeKind.DbRead => CheckedCapabilityKind.DbRead,
         LangTypeKind.DbWrite => CheckedCapabilityKind.DbWrite,
+        LangTypeKind.HttpClient => CheckedCapabilityKind.HttpClient,
         _ => null
     };
 
@@ -1451,6 +1484,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         CheckedCapabilityKind.FsWrite => "fs.write",
         CheckedCapabilityKind.DbRead => "db.read",
         CheckedCapabilityKind.DbWrite => "db.write",
+        CheckedCapabilityKind.HttpClient => "net.client",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
 
@@ -2537,7 +2571,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var diagnosticsBeforeOperand = diagnostics.Count;
         var value = CheckExpr(expression.Value, null, locals, depth, isAwaitOperand: true);
         if (value is TypedCallExpr { IsAsync: true } or
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync })
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync })
             return new TypedAwaitExpr(value.Type, value, expression.At);
 
         if (value.Type.IsError)
@@ -2805,12 +2839,32 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (expression.Target is NameExpr httpErrorName &&
+            !locals.ContainsKey(httpErrorName.Name) &&
+            httpErrorName.Name == "HttpError")
+        {
+            if (IsHttpErrorVariant(expression.Field))
+                Add("E_TYPE_MISMATCH", "HttpError variants can only be produced by HTTP operations", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on HttpError", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         var target = CheckExpr(expression.Target, null, locals, depth);
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
             return new TypedTextLengthExpr(target, expression.At);
         if (target.Type.IsList && expression.Field == "length")
             return new TypedListLengthExpr(target, expression.At);
+        if (target.Type.IsHttpResponse)
+        {
+            if (expression.Field == "status")
+                return new TypedFieldAccessExpr(LangType.I32, target, 0, expression.At);
+            if (expression.Field == "body")
+                return new TypedFieldAccessExpr(LangType.Text, target, 1, expression.At);
+            Add("E_FIELD_UNKNOWN", $"HttpResponse has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
         if (target.Type.Kind != LangTypeKind.Struct)
         {
             Add("E_TYPE_MISMATCH", $"Field access requires a struct value, found '{target.Type.DisplayName}'", expression.At);
@@ -3026,6 +3080,25 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "HttpError")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                if (IsHttpErrorVariant(expression.Member))
+                    Add("E_TYPE_MISMATCH", "HttpError variants can only be produced by HTTP operations", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on HttpError", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "http" && expression.Member == "get_text_async")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'http.get_text_async' requires a local or parameter of type 'HttpClient'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "fs" && expression.Member == "read_text")
             {
                 foreach (var argument in expression.Arguments)
@@ -3075,6 +3148,51 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
             return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Member == "get_text_async")
+        {
+            if (!receiver.Type.IsHttpClient)
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                var capabilityTargetDescription = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
+                    ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}'"
+                    : $"Value of type '{receiver.Type.DisplayName}'";
+                Add("E_CAPABILITY_MISSING", $"{capabilityTargetDescription} cannot provide capability member 'get_text_async' (requires 'HttpClient')", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 1;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'HttpClient.get_text_async' expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            var hasTextTarget = false;
+            if (expression.Arguments.Count > 0)
+            {
+                var target = CheckExpr(expression.Arguments[0], null, locals, depth);
+                hasTextTarget = target.Type.IsText;
+                if (!target.Type.IsError && !hasTextTarget)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'HttpClient.get_text_async' expects a Text target, found '{target.Type.DisplayName}'", expression.Arguments[0].At);
+                arguments.Add(target);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+            for (var index = 1; index < expression.Arguments.Count; index++)
+                _ = CheckExpr(expression.Arguments[index], null, locals, depth);
+
+            var callIsValid = hasCorrectArity && hasTextTarget && diagnostics.Count == diagnosticsBeforeCall;
+            if (!isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'HttpClient.get_text_async' must be called with 'await'", expression.At);
+            if (callIsValid)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("net.client", "HttpClient.get_text_async", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                LangType.Result(LangType.HttpResponse, LangType.HttpError),
+                BuiltinIntrinsic.HttpGetTextAsync,
+                ReadOnly(arguments),
+                expression.At);
         }
 
         if (receiver.Type.IsDbWrite && expression.Member == "begin")
@@ -3826,6 +3944,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("DbError.RowShape", "dberror:RowShape", null, 1, BuiltinVariant.DbErrorRowShape, [])
             ]);
         }
+        if (type.IsHttpError)
+        {
+            return ReadOnly<VariantShape>([
+                new("HttpError.InvalidTarget", "httperror:InvalidTarget", null, 0, BuiltinVariant.HttpInvalidTarget, []),
+                new("HttpError.Transport", "httperror:Transport", null, 1, BuiltinVariant.HttpTransport, []),
+                new("HttpError.Timeout", "httperror:Timeout", null, 2, BuiltinVariant.HttpTimeout, []),
+                new("HttpError.ResponseTooLarge", "httperror:ResponseTooLarge", null, 3, BuiltinVariant.HttpResponseTooLarge, []),
+                new("HttpError.InvalidText", "httperror:InvalidText", null, 4, BuiltinVariant.HttpInvalidText, [])
+            ]);
+        }
         return null;
     }
 
@@ -3852,9 +3980,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
-        else if (scrutineeType.IsFsError || scrutineeType.IsDbError)
+        else if (scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError)
         {
-            var builtinErrorName = scrutineeType.IsFsError ? "FsError" : "DbError";
+            var builtinErrorName = scrutineeType.IsFsError
+                ? "FsError"
+                : scrutineeType.IsDbError ? "DbError" : "HttpError";
             if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != builtinErrorName)
             {
                 Add("E_TYPE_MISMATCH", $"Expected pattern from '{builtinErrorName}.<variant>', found '{pattern.VariantName}'", pattern.At);
@@ -3867,7 +3997,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return null;
         }
 
-        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError
+        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError
             ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
         var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
@@ -3909,7 +4039,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsResourceHandle(LangType type) =>
-        type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.Transaction;
+        type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.HttpClient or LangTypeKind.Transaction;
 
     private bool TryGetDeclarationNode(LangType type, out int declaration)
     {
@@ -4020,6 +4150,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.FsWrite);
             case "FsError":
                 return NoTypeArguments(syntax, LangType.FsError);
+            case "HttpClient":
+                return NoTypeArguments(syntax, LangType.HttpClient);
+            case "HttpResponse":
+                return NoTypeArguments(syntax, LangType.HttpResponse);
+            case "HttpError":
+                return NoTypeArguments(syntax, LangType.HttpError);
             case "DbRead":
                 return NoTypeArguments(syntax, LangType.DbRead);
             case "DbWrite":
@@ -4105,6 +4241,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsDbErrorVariant(string name) =>
         name is "Statement" or "RowShape";
+
+    private static bool IsHttpErrorVariant(string name) =>
+        name is "InvalidTarget" or "Transport" or "Timeout" or "ResponseTooLarge" or "InvalidText";
 
 
     private void AddMismatch(LangType expected, LangType actual, Token at) =>

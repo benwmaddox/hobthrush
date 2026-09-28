@@ -7,7 +7,8 @@ internal static class Emitter
     public static string Emit(
         CheckedProgram program,
         bool executable = true,
-        WebDatabaseOptions? webDatabaseOptions = null)
+        WebDatabaseOptions? webDatabaseOptions = null,
+        string? httpOrigin = null)
     {
         var entry = program.EntryFunctionId is int entryId
             ? program.Functions.FirstOrDefault(function =>
@@ -22,7 +23,7 @@ internal static class Emitter
         if (executable && entry is null && entryCommand is null && !webHost)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
 
-        var emitter = new SourceEmitter(program, webDatabaseOptions: webDatabaseOptions);
+        var emitter = new SourceEmitter(program, webDatabaseOptions: webDatabaseOptions, httpOrigin: httpOrigin);
         return emitter.Emit(entry, executable, command: entryCommand, webHost: webHost);
     }
 
@@ -264,6 +265,7 @@ internal static class Emitter
         CheckedCapabilityKind.FsWrite => "fs.write",
         CheckedCapabilityKind.DbRead => "db.read",
         CheckedCapabilityKind.DbWrite => "db.write",
+        CheckedCapabilityKind.HttpClient => "net.client",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
 
@@ -344,7 +346,8 @@ internal static class Emitter
     private sealed class SourceEmitter(
         CheckedProgram program,
         IReadOnlySet<int>? includedTestFunctionIds = null,
-        WebDatabaseOptions? webDatabaseOptions = null)
+        WebDatabaseOptions? webDatabaseOptions = null,
+        string? httpOrigin = null)
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
@@ -353,6 +356,7 @@ internal static class Emitter
             .ToHashSet();
         private readonly IReadOnlySet<int> _includedTestFunctionIds = includedTestFunctionIds ?? new HashSet<int>();
         private readonly WebDatabaseOptions? _webDatabaseOptions = webDatabaseOptions;
+        private readonly string? _httpOrigin = httpOrigin;
 
         private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
             !_testFunctionIds.Contains(function.Id) || _includedTestFunctionIds.Contains(function.Id));
@@ -414,12 +418,16 @@ internal static class Emitter
             if (NeedsDbWriteType) EmitDbWriteType();
             if (NeedsDbTransactionType) EmitDbTransactionType();
             if (NeedsDbErrorType) EmitDbErrorType();
+            if (NeedsHttpClientType) EmitHttpClientType();
+            if (NeedsHttpResponseType) EmitHttpResponseType();
+            if (NeedsHttpErrorType) EmitHttpErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesFsReadTextAsync) EmitFsReadTextAsyncHelper();
             if (UsesFsWriteText) EmitFsWriteTextHelper();
+            if (UsesHttpGetTextAsync) EmitHttpGetTextAsyncHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesListGet) EmitListGetHelper();
             if (UsesTextSplit) EmitTextSplitHelper();
@@ -570,6 +578,51 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        public sealed record Statement() : DbError;");
             _source.AppendLine("        public sealed record RowShape() : DbError;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitHttpClientType()
+        {
+            _source.AppendLine("    public sealed class HttpClientCapability");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal HttpClientCapability(string origin, global::System.Threading.CancellationToken cancellationToken)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (!global::System.Uri.TryCreate(origin, global::System.UriKind.Absolute, out var validatedOrigin) || validatedOrigin is null ||");
+            _source.AppendLine("                (validatedOrigin.Scheme != global::System.Uri.UriSchemeHttp && validatedOrigin.Scheme != global::System.Uri.UriSchemeHttps) ||");
+            _source.AppendLine("                validatedOrigin.UserInfo.Length != 0 || validatedOrigin.AbsolutePath != \"/\" ||");
+            _source.AppendLine("                validatedOrigin.Query.Length != 0 || validatedOrigin.Fragment.Length != 0)");
+            _source.AppendLine("                throw new global::System.ArgumentException(\"Invalid configured HTTP origin\", nameof(origin));");
+            _source.AppendLine("            Origin = validatedOrigin;");
+            _source.AppendLine("            CancellationToken = cancellationToken;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        internal global::System.Uri Origin { get; }");
+            _source.AppendLine("        internal global::System.Threading.CancellationToken CancellationToken { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitHttpResponseType()
+        {
+            _source.AppendLine("    public sealed class HttpResponse");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal HttpResponse(int status, string body) { Field_0 = status; Field_1 = body; }");
+            _source.AppendLine("        public int Field_0 { get; }");
+            _source.AppendLine("        public string Field_1 { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitHttpErrorType()
+        {
+            _source.AppendLine("    public abstract record HttpError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private protected HttpError() { }");
+            _source.AppendLine("        public sealed record InvalidTarget() : HttpError;");
+            _source.AppendLine("        public sealed record Transport() : HttpError;");
+            _source.AppendLine("        public sealed record Timeout() : HttpError;");
+            _source.AppendLine("        public sealed record ResponseTooLarge() : HttpError;");
+            _source.AppendLine("        public sealed record InvalidText() : HttpError;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -729,7 +782,7 @@ internal static class Emitter
             TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
             TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
             TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedAwaitExpr awaited => EmitAwait(awaited),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
@@ -795,6 +848,8 @@ internal static class Emitter
             TypedCallExpr { IsAsync: true } call => "await " + EmitCall(call),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync } intrinsic =>
                 "await " + EmitIntrinsicCall(intrinsic),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.HttpGetTextAsync } intrinsic =>
+                "await " + EmitIntrinsicCall(intrinsic),
             _ => throw new InvalidOperationException("Await expression has no checked async target")
         };
 
@@ -808,6 +863,10 @@ internal static class Emitter
                 EmitFsReadTextAsync(expression),
             BuiltinIntrinsic.FsReadTextAsync =>
                 throw new InvalidOperationException("FsRead.read_text_async requires a receiver and a path"),
+            BuiltinIntrinsic.HttpGetTextAsync when expression.Arguments.Count == 2 =>
+                EmitHttpGetTextAsync(expression),
+            BuiltinIntrinsic.HttpGetTextAsync =>
+                throw new InvalidOperationException("HttpClient.get_text_async requires a receiver and a target"),
             BuiltinIntrinsic.FsWriteText when expression.Arguments.Count == 3 =>
                 EmitFsWriteText(expression),
             BuiltinIntrinsic.FsWriteText =>
@@ -857,6 +916,9 @@ internal static class Emitter
             return "WriteText(" + receiver + ", " + emittedPath + ", " + EmitExpr(expression.Arguments[2]) + ")";
         }
 
+        private string EmitHttpGetTextAsync(TypedIntrinsicCallExpr expression) =>
+            "HttpGetTextAsync(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")";
+
         private string EmitBinary(TypedBinaryExpr expression)
         {
             var helper = expression.Op switch
@@ -903,7 +965,12 @@ internal static class Emitter
             BuiltinVariant.FsErrorInvalidText or
             BuiltinVariant.FsErrorIo or
             BuiltinVariant.DbErrorStatement or
-            BuiltinVariant.DbErrorRowShape => throw new InvalidOperationException("Builtin error variants cannot be constructed from source"),
+            BuiltinVariant.DbErrorRowShape or
+            BuiltinVariant.HttpInvalidTarget or
+            BuiltinVariant.HttpTransport or
+            BuiltinVariant.HttpTimeout or
+            BuiltinVariant.HttpResponseTooLarge or
+            BuiltinVariant.HttpInvalidText => throw new InvalidOperationException("Builtin error variants cannot be constructed from source"),
                 _ => throw new InvalidOperationException("Unknown builtin union variant")
             };
             return "new " + EmitType(expression.Type) + "." + variant + "(" +
@@ -954,6 +1021,11 @@ internal static class Emitter
                     BuiltinVariant.FsErrorIo => "Io",
                     BuiltinVariant.DbErrorStatement => "Statement",
                     BuiltinVariant.DbErrorRowShape => "RowShape",
+                    BuiltinVariant.HttpInvalidTarget => "InvalidTarget",
+                    BuiltinVariant.HttpTransport => "Transport",
+                    BuiltinVariant.HttpTimeout => "Timeout",
+                    BuiltinVariant.HttpResponseTooLarge => "ResponseTooLarge",
+                    BuiltinVariant.HttpInvalidText => "InvalidText",
                     _ => throw new InvalidOperationException("Unknown builtin pattern")
                 };
                 variantType = EmitType(scrutineeType) + "." + variantName;
@@ -1184,6 +1256,102 @@ internal static class Emitter
             _source.AppendLine("                catch (SecurityException) { }");
             _source.AppendLine("            }");
             _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitHttpGetTextAsyncHelper()
+        {
+            _source.AppendLine("    private const int MaximumHttpResponseBytes = 1048576;");
+            _source.AppendLine("    private static readonly global::System.Net.Http.HttpClient SharedHttpClient = CreateHttpClient();");
+            _source.AppendLine("    private static global::System.Net.Http.HttpClient CreateHttpClient()");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var handler = new global::System.Net.Http.SocketsHttpHandler");
+            _source.AppendLine("        {");
+            _source.AppendLine("            AllowAutoRedirect = false,");
+            _source.AppendLine("            UseCookies = false,");
+            _source.AppendLine("            UseProxy = false,");
+            _source.AppendLine("            Credentials = null,");
+            _source.AppendLine("            DefaultProxyCredentials = null");
+            _source.AppendLine("        };");
+            _source.AppendLine("        return new global::System.Net.Http.HttpClient(handler, disposeHandler: true)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            Timeout = global::System.Threading.Timeout.InfiniteTimeSpan");
+            _source.AppendLine("        };");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    private static async global::System.Threading.Tasks.Task<Result<HttpResponse, HttpError>> HttpGetTextAsync(HttpClientCapability receiver, string target)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(receiver);");
+            _source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(target);");
+            _source.AppendLine("        receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("        if (!TryCreateHttpTarget(receiver.Origin, target, out var targetUri))");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.InvalidTarget());");
+            _source.AppendLine("        using var timeoutCancellation = global::System.Threading.CancellationTokenSource.CreateLinkedTokenSource(receiver.CancellationToken);");
+            _source.AppendLine("        timeoutCancellation.CancelAfter(global::System.TimeSpan.FromSeconds(10));");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            using var request = new global::System.Net.Http.HttpRequestMessage(global::System.Net.Http.HttpMethod.Get, targetUri);");
+            _source.AppendLine("            using var response = await SharedHttpClient.SendAsync(request, global::System.Net.Http.HttpCompletionOption.ResponseHeadersRead, timeoutCancellation.Token).ConfigureAwait(false);");
+            _source.AppendLine("            if (response.Content.Headers.ContentLength is long contentLength && contentLength > MaximumHttpResponseBytes)");
+            _source.AppendLine("                return new Result<HttpResponse, HttpError>.Err(new HttpError.ResponseTooLarge());");
+            _source.AppendLine("            using var bodyStream = await response.Content.ReadAsStreamAsync(timeoutCancellation.Token).ConfigureAwait(false);");
+            _source.AppendLine("            using var bodyBytes = new global::System.IO.MemoryStream();");
+            _source.AppendLine("            var buffer = new byte[8192];");
+            _source.AppendLine("            while (true)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                var readLimit = global::System.Math.Min(buffer.Length, MaximumHttpResponseBytes + 1 - (int)bodyBytes.Length);");
+            _source.AppendLine("                var bytesRead = await bodyStream.ReadAsync(buffer.AsMemory(0, readLimit), timeoutCancellation.Token).ConfigureAwait(false);");
+            _source.AppendLine("                if (bytesRead == 0) break;");
+            _source.AppendLine("                if (bytesRead > MaximumHttpResponseBytes - (int)bodyBytes.Length)");
+            _source.AppendLine("                    return new Result<HttpResponse, HttpError>.Err(new HttpError.ResponseTooLarge());");
+            _source.AppendLine("                bodyBytes.Write(buffer, 0, bytesRead);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            var body = new global::System.Text.UTF8Encoding(false, true).GetString(bodyBytes.ToArray());");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Ok(new HttpResponse((int)response.StatusCode, body));");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.OperationCanceledException) when (receiver.CancellationToken.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            throw;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.Timeout());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.OperationCanceledException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.Transport());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.Text.DecoderFallbackException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.InvalidText());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.Net.Http.HttpRequestException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.Transport());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (global::System.IO.IOException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<HttpResponse, HttpError>.Err(new HttpError.Transport());");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    private static bool TryCreateHttpTarget(global::System.Uri origin, string target, out global::System.Uri targetUri)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        targetUri = origin;");
+            _source.AppendLine("        if (target.Length == 0 || target[0] != '/' || target.StartsWith(\"//\", global::System.StringComparison.Ordinal) ||");
+            _source.AppendLine("            target.IndexOf('\\\\') >= 0 || target.IndexOf('#') >= 0)");
+            _source.AppendLine("            return false;");
+            _source.AppendLine("        foreach (var character in target)");
+            _source.AppendLine("            if (global::System.Char.IsControl(character)) return false;");
+            _source.AppendLine("        if (!global::System.Uri.TryCreate(origin, target, out var candidate) || candidate is null || candidate.UserInfo.Length != 0)");
+            _source.AppendLine("            return false;");
+            _source.AppendLine("        if (!global::System.String.Equals(candidate.Scheme, origin.Scheme, global::System.StringComparison.OrdinalIgnoreCase) ||");
+            _source.AppendLine("            !global::System.String.Equals(candidate.IdnHost, origin.IdnHost, global::System.StringComparison.OrdinalIgnoreCase) ||");
+            _source.AppendLine("            candidate.Port != origin.Port)");
+            _source.AppendLine("            return false;");
+            _source.AppendLine("        targetUri = candidate;");
+            _source.AppendLine("        return true;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1866,6 +2034,7 @@ internal static class Emitter
                     CheckedCapabilityKind.FsWrite => "new FsWrite()",
                     CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
                     CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
+                    CheckedCapabilityKind.HttpClient => "new HttpClientCapability(" + HttpOriginLiteral + ", context.RequestAborted)",
                     _ => throw new InvalidOperationException("Unsupported checked route capability")
                 };
             }
@@ -2225,6 +2394,9 @@ internal static class Emitter
                         ? ", new FsRead(cancellationToken)"
                         : ", new FsRead(System.Threading.CancellationToken.None)",
                     CheckedCapabilityKind.FsWrite => ", new FsWrite()",
+                    CheckedCapabilityKind.HttpClient => command.HandlerIsAsync
+                        ? ", new HttpClientCapability(" + HttpOriginLiteral + ", cancellationToken)"
+                        : ", new HttpClientCapability(" + HttpOriginLiteral + ", System.Threading.CancellationToken.None)",
                     _ => throw new InvalidOperationException("Unsupported checked command capability")
                 });
             }
@@ -2473,6 +2645,9 @@ internal static class Emitter
             LangTypeKind.DbWrite => "DbWrite",
             LangTypeKind.Transaction => "DbTransaction",
             LangTypeKind.DbError => "DbError",
+            LangTypeKind.HttpClient => "HttpClientCapability",
+            LangTypeKind.HttpResponse => "HttpResponse",
+            LangTypeKind.HttpError => "HttpError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
 
@@ -2488,6 +2663,9 @@ internal static class Emitter
 
         private static string TypeParameterName(int ordinal) =>
             "T" + ordinal.ToString(CultureInfo.InvariantCulture);
+
+        private string HttpOriginLiteral => JsonSerializer.Serialize(_httpOrigin ??
+            throw new InvalidOperationException("HTTP client capability reached emission without a manifest origin"));
 
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
 
@@ -2510,6 +2688,14 @@ internal static class Emitter
             TransactionScopes.Count != 0 || TransactionCommits.Count != 0;
 
         private bool NeedsDbErrorType => UsesTypeKind(LangTypeKind.DbError) || UsesDatabase;
+
+        private bool NeedsHttpClientType => UsesTypeKind(LangTypeKind.HttpClient) || UsesHttpGetTextAsync ||
+            program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.HttpClient)) ||
+            program.Routes.Any(route => route.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.HttpClient));
+
+        private bool NeedsHttpResponseType => UsesTypeKind(LangTypeKind.HttpResponse) || UsesHttpGetTextAsync;
+
+        private bool NeedsHttpErrorType => UsesTypeKind(LangTypeKind.HttpError) || UsesHttpGetTextAsync;
 
         private bool UsesDatabase => _webDatabaseOptions is not null || DatabaseCalls.Count != 0 ||
             TransactionScopes.Count != 0 || TransactionCommits.Count != 0;
@@ -2548,6 +2734,13 @@ internal static class Emitter
             .SelectMany(EnumerateExpressions)
             .OfType<TypedIntrinsicCallExpr>()
             .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadTextAsync);
+
+        private bool UsesHttpGetTextAsync => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.HttpGetTextAsync);
 
         private bool UsesFsWriteText => EmittedFunctions.Any(function =>
             function.InferredEffects.Contains("fs.write", StringComparer.Ordinal) ||
