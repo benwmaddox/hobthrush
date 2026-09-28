@@ -238,7 +238,7 @@ internal sealed class Parser
 
     private static readonly HashSet<string> BareExpressionKeywords = new(StringComparer.Ordinal)
     {
-        "await", "false", "if", "match", "null", "true", "with"
+        "await", "false", "if", "match", "null", "true"
     };
 
     private readonly IReadOnlyList<Token> _tokens;
@@ -839,7 +839,9 @@ internal sealed class Parser
 
         if (Is("if")) return ParseIfStatement();
 
-        if (Is("var") || Is("with") || Is("await"))
+        if (Is("with")) return ParseWithTransactionStatement();
+
+        if (Is("var") || Is("await"))
             Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
 
         Fail(Current, "E_UNSUPPORTED", $"Statement '{Current.Text}' is not implemented yet");
@@ -867,6 +869,27 @@ internal sealed class Parser
             }
 
             return new IfStmt(at, condition, then, otherwise);
+        }
+        finally
+        {
+            _statementNestingDepth--;
+        }
+    }
+
+    private WithTransactionStmt ParseWithTransactionStatement()
+    {
+        var at = Expect("with");
+        if (_statementNestingDepth >= MaximumNestingDepth)
+            Fail(at, "E_SYNTAX", "Statement nesting is too deep");
+
+        _statementNestingDepth++;
+        try
+        {
+            var begin = ParseExpr();
+            Expect("as");
+            var local = ExpectBareIdentifier();
+            var body = ParseStatementBlock("Unclosed transaction body");
+            return new WithTransactionStmt(at, begin, local.Text, local, body);
         }
         finally
         {
@@ -1137,7 +1160,7 @@ internal sealed class Parser
                 Fail(token, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
             if (Is("match"))
                 return ParsePostfix(ParseMatch(Take()));
-            if (Is("await") || Is("if") || Is("with"))
+            if (Is("await") || Is("if"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
             if (!IsBareIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");

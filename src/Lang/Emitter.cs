@@ -396,6 +396,7 @@ internal static class Emitter
             if (NeedsFsErrorType) EmitFsErrorType();
             if (NeedsDbReadType) EmitDbReadType();
             if (NeedsDbWriteType) EmitDbWriteType();
+            if (NeedsDbTransactionType) EmitDbTransactionType();
             if (NeedsDbErrorType) EmitDbErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
@@ -494,6 +495,40 @@ internal static class Emitter
             _source.AppendLine("        internal DbWrite(string connectionString, System.Threading.CancellationToken cancellationToken) { ConnectionString = connectionString; CancellationToken = cancellationToken; }");
             _source.AppendLine("        internal string ConnectionString { get; }");
             _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitDbTransactionType()
+        {
+            _source.AppendLine("    public sealed class DbTransaction : IDisposable");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private readonly SqliteConnection _connection;");
+            _source.AppendLine("        private readonly SqliteTransaction _transaction;");
+            _source.AppendLine("        private readonly System.Threading.CancellationToken _cancellationToken;");
+            _source.AppendLine("        private bool _failed;");
+            _source.AppendLine("        private bool _committed;");
+            _source.AppendLine("        private bool _disposed;");
+            _source.AppendLine("        internal DbTransaction(SqliteConnection connection, SqliteTransaction transaction, System.Threading.CancellationToken cancellationToken) { _connection = connection; _transaction = transaction; _cancellationToken = cancellationToken; }");
+            _source.AppendLine("        internal SqliteConnection Connection => _connection;");
+            _source.AppendLine("        internal SqliteTransaction Transaction => _transaction;");
+            _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken => _cancellationToken;");
+            _source.AppendLine("        internal bool CanExecute => !_failed && !_committed && !_disposed;");
+            _source.AppendLine("        internal bool CanCommit => !_failed && !_committed && !_disposed;");
+            _source.AppendLine("        internal void MarkFailed() => _failed = true;");
+            _source.AppendLine("        internal void MarkCommitted() => _committed = true;");
+            _source.AppendLine("        public void Dispose()");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (_disposed) return;");
+            _source.AppendLine("            _disposed = true;");
+            _source.AppendLine("            // Rollback ignores request cancellation so cleanup still runs after an aborted request.");
+            _source.AppendLine("            try { if (!_committed) _transaction.Rollback(); }");
+            _source.AppendLine("            finally");
+            _source.AppendLine("            {");
+            _source.AppendLine("                try { _transaction.Dispose(); }");
+            _source.AppendLine("                finally { _connection.Dispose(); }");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -605,6 +640,17 @@ internal static class Emitter
                         _source.AppendLine("}");
                     }
                     break;
+                case TypedWithTransactionStmt transaction:
+                    Indent(indent);
+                    _source.Append("using (var Local_")
+                        .Append(transaction.TransactionLocalId.ToString(CultureInfo.InvariantCulture))
+                        .Append(" = DatabaseBeginTransaction(").Append(EmitExpr(transaction.Database)).AppendLine("))");
+                    Indent(indent);
+                    _source.AppendLine("{");
+                    EmitStatements(transaction.Body, indent + 1);
+                    Indent(indent);
+                    _source.AppendLine("}");
+                    break;
                 default:
                     throw new InvalidOperationException("Unknown typed statement in emitter");
             }
@@ -620,6 +666,8 @@ internal static class Emitter
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr call => EmitCall(call),
             TypedDatabaseCallExpr databaseCall => EmitDatabaseCall(databaseCall),
+            TypedTransactionCommitExpr commit =>
+                "DatabaseTransactionCommit(Local_" + commit.TransactionLocalId.ToString(CultureInfo.InvariantCulture) + ")",
             TypedTextLengthExpr length => "TextLength(" + EmitExpr(length.Target) + ")",
             TypedTextTrimExpr trim => "(" + EmitExpr(trim.Target) + ").Trim()",
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
@@ -649,6 +697,9 @@ internal static class Emitter
 
             if (call.Operation.Kind == CheckedDatabaseOperationKind.Execute)
                 return "DatabaseExecute(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters + ", " + bindMethod + ")";
+
+            if (call.Operation.Kind == CheckedDatabaseOperationKind.TransactionExecute)
+                return "DatabaseTransactionExecute(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters + ", " + bindMethod + ")";
 
             throw new InvalidOperationException("Unknown checked database operation");
         }
@@ -1000,6 +1051,78 @@ internal static class Emitter
                 _source.AppendLine("        }");
                 _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }");
                 _source.AppendLine("        catch (SqliteException) { return new Result<int, DbError>.Err(new DbError.Statement()); }");
+                _source.AppendLine("    }");
+            }
+
+            if (TransactionScopes.Count != 0)
+            {
+                _source.AppendLine("    private static DbTransaction DatabaseBeginTransaction(DbWrite database)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+                _source.AppendLine("        var connection = new SqliteConnection(database.ConnectionString);");
+                _source.AppendLine("        SqliteTransaction? transaction = null;");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            connection.OpenAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            transaction = (SqliteTransaction)connection.BeginTransactionAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            return new DbTransaction(connection, transaction, cancellationToken);");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch");
+                _source.AppendLine("        {");
+                _source.AppendLine("            try { transaction?.Dispose(); }");
+                _source.AppendLine("            finally { connection.Dispose(); }");
+                _source.AppendLine("            throw;");
+                _source.AppendLine("        }");
+                _source.AppendLine("    }");
+
+                if (DatabaseCalls.Any(call => call.Operation.Kind == CheckedDatabaseOperationKind.TransactionExecute))
+                {
+                    _source.AppendLine("    private static Result<int, DbError> DatabaseTransactionExecute<TParameters>(DbTransaction database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters)");
+                    _source.AppendLine("    {");
+                    _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+                    _source.AppendLine("        if (!database.CanExecute) return new Result<int, DbError>.Err(new DbError.Statement());");
+                    _source.AppendLine("        try");
+                    _source.AppendLine("        {");
+                    _source.AppendLine("            using var command = database.Connection.CreateCommand();");
+                    _source.AppendLine("            command.Transaction = database.Transaction;");
+                    _source.AppendLine("            command.CommandText = sql;");
+                    _source.AppendLine("            bindParameters(command, parameters);");
+                    _source.AppendLine("            var affectedRows = command.ExecuteNonQueryAsync(cancellationToken).GetAwaiter().GetResult();");
+                    _source.AppendLine("            return new Result<int, DbError>.Ok(affectedRows);");
+                    _source.AppendLine("        }");
+                    _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)");
+                    _source.AppendLine("        {");
+                    _source.AppendLine("            database.MarkFailed();");
+                    _source.AppendLine("            throw;");
+                    _source.AppendLine("        }");
+                    _source.AppendLine("        catch (SqliteException)");
+                    _source.AppendLine("        {");
+                    _source.AppendLine("            database.MarkFailed();");
+                    _source.AppendLine("            return new Result<int, DbError>.Err(new DbError.Statement());");
+                    _source.AppendLine("        }");
+                    _source.AppendLine("    }");
+                }
+
+                _source.AppendLine("    private static Result<bool, DbError> DatabaseTransactionCommit(DbTransaction database)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+                _source.AppendLine("        if (!database.CanCommit) return new Result<bool, DbError>.Err(new DbError.Statement());");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.AppendLine("            database.Transaction.CommitAsync(cancellationToken).GetAwaiter().GetResult();");
+                _source.AppendLine("            database.MarkCommitted();");
+                _source.AppendLine("            return new Result<bool, DbError>.Ok(true);");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)");
+                _source.AppendLine("        {");
+                _source.AppendLine("            database.MarkFailed();");
+                _source.AppendLine("            throw;");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (SqliteException)");
+                _source.AppendLine("        {");
+                _source.AppendLine("            database.MarkFailed();");
+                _source.AppendLine("            return new Result<bool, DbError>.Err(new DbError.Statement());");
+                _source.AppendLine("        }");
                 _source.AppendLine("    }");
             }
             _source.AppendLine();
@@ -1990,6 +2113,7 @@ internal static class Emitter
             LangTypeKind.FsError => "FsError",
             LangTypeKind.DbRead => "DbRead",
             LangTypeKind.DbWrite => "DbWrite",
+            LangTypeKind.Transaction => "DbTransaction",
             LangTypeKind.DbError => "DbError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
@@ -2020,15 +2144,31 @@ internal static class Emitter
 
         private bool NeedsDbWriteType => UsesTypeKind(LangTypeKind.DbWrite) || UsesDatabase;
 
+        private bool NeedsDbTransactionType => UsesTypeKind(LangTypeKind.Transaction) ||
+            TransactionScopes.Count != 0 || TransactionCommits.Count != 0;
+
         private bool NeedsDbErrorType => UsesTypeKind(LangTypeKind.DbError) || UsesDatabase;
 
-        private bool UsesDatabase => _webDatabaseOptions is not null || DatabaseCalls.Count != 0;
+        private bool UsesDatabase => _webDatabaseOptions is not null || DatabaseCalls.Count != 0 ||
+            TransactionScopes.Count != 0 || TransactionCommits.Count != 0;
 
         private IReadOnlyList<TypedDatabaseCallExpr> DatabaseCalls => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))
             .SelectMany(StatementExpressions)
             .SelectMany(EnumerateExpressions)
             .OfType<TypedDatabaseCallExpr>()
+            .ToArray();
+
+        private IReadOnlyList<TypedWithTransactionStmt> TransactionScopes => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .OfType<TypedWithTransactionStmt>()
+            .ToArray();
+
+        private IReadOnlyList<TypedTransactionCommitExpr> TransactionCommits => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedTransactionCommitExpr>()
             .ToArray();
 
         private bool UsesFsReadText => EmittedFunctions.Any(function =>
@@ -2074,8 +2214,12 @@ internal static class Emitter
                 yield return function.ReturnType;
 
                 foreach (var statement in EnumerateStatements(function.Body))
+                {
                     if (statement is TypedLetStmt let)
                         yield return let.Type;
+                    if (statement is TypedWithTransactionStmt)
+                        yield return LangType.Transaction;
+                }
 
                 foreach (var statement in EnumerateStatements(function.Body))
                 foreach (var expression in StatementExpressions(statement).SelectMany(EnumerateExpressions))
@@ -2093,10 +2237,17 @@ internal static class Emitter
             foreach (var statement in statements)
             {
                 yield return statement;
-                if (statement is not TypedIfStmt conditional) continue;
-                foreach (var nested in EnumerateStatements(conditional.ThenBody)) yield return nested;
-                if (conditional.ElseBody is not null)
-                    foreach (var nested in EnumerateStatements(conditional.ElseBody)) yield return nested;
+                switch (statement)
+                {
+                    case TypedIfStmt conditional:
+                        foreach (var nested in EnumerateStatements(conditional.ThenBody)) yield return nested;
+                        if (conditional.ElseBody is not null)
+                            foreach (var nested in EnumerateStatements(conditional.ElseBody)) yield return nested;
+                        break;
+                    case TypedWithTransactionStmt transaction:
+                        foreach (var nested in EnumerateStatements(transaction.Body)) yield return nested;
+                        break;
+                }
             }
         }
 
@@ -2112,6 +2263,9 @@ internal static class Emitter
                     break;
                 case TypedIfStmt conditional:
                     yield return conditional.Condition;
+                    break;
+                case TypedWithTransactionStmt transaction:
+                    yield return transaction.Database;
                     break;
             }
         }

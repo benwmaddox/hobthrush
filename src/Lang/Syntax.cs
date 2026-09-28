@@ -131,3 +131,9 @@ internal sealed record IfStmt(
     Expr Condition,
     IReadOnlyList<Stmt> Then,
     IReadOnlyList<Stmt> Else) : Stmt(At);
+internal sealed record WithTransactionStmt(
+    Token At,
+    Expr Begin,
+    string Name,
+    Token NameAt,
+    IReadOnlyList<Stmt> Body) : Stmt(At);

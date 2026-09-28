@@ -17,6 +17,7 @@ internal enum LangTypeKind
     FsError,
     DbRead,
     DbWrite,
+    Transaction,
     DbError
 }
 
@@ -54,6 +55,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsFsError => Kind == LangTypeKind.FsError;
     public bool IsDbRead => Kind == LangTypeKind.DbRead;
     public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
+    public bool IsTransaction => Kind == LangTypeKind.Transaction;
     public bool IsDbError => Kind == LangTypeKind.DbError;
     internal int UnionId { get; }
     internal int StructId { get; }
@@ -71,6 +73,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
     internal static LangType DbRead { get; } = new(LangTypeKind.DbRead, "DbRead");
     internal static LangType DbWrite { get; } = new(LangTypeKind.DbWrite, "DbWrite");
+    internal static LangType Transaction { get; } = new(LangTypeKind.Transaction, "Transaction");
     internal static LangType DbError { get; } = new(LangTypeKind.DbError, "DbError");
 
     internal static LangType ForTypeParameter(int ownerId, int ordinal, string name) =>
@@ -281,7 +284,7 @@ internal sealed record TypedIntrinsicCallExpr(
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
 
-internal enum CheckedDatabaseOperationKind { QueryOne, Execute }
+internal enum CheckedDatabaseOperationKind { QueryOne, Execute, TransactionExecute }
 internal sealed record CheckedDatabaseOperation(
     CheckedDatabaseOperationKind Kind,
     string Effect,
@@ -294,6 +297,8 @@ internal sealed record TypedDatabaseCallExpr(
     TypedExpr Parameters,
     CheckedDatabaseOperation Operation,
     Token At) : TypedExpr(Type, At);
+internal sealed record TypedTransactionCommitExpr(int TransactionLocalId, Token At)
+    : TypedExpr(LangType.Result(LangType.Bool, LangType.DbError), At);
 
 internal enum BuiltinVariant
 {
@@ -356,6 +361,12 @@ internal sealed record TypedIfStmt(
     TypedExpr Condition,
     IReadOnlyList<TypedStmt> ThenBody,
     IReadOnlyList<TypedStmt>? ElseBody,
+    Token At) : TypedStmt(At);
+internal sealed record TypedWithTransactionStmt(
+    TypedExpr Database,
+    int TransactionLocalId,
+    string TransactionName,
+    IReadOnlyList<TypedStmt> Body,
     Token At) : TypedStmt(At);
 
 internal sealed class CheckedFunction
@@ -539,6 +550,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<CheckedTest> _tests = [];
     private readonly List<CommandSymbol> _commands = [];
     private readonly List<CheckedRoute> _routes = [];
+    private readonly HashSet<int> _activeTransactionLocals = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
@@ -1645,7 +1657,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
-            "FsRead" or "FsError" or "DbRead" or "DbWrite" or "DbError";
+            "FsRead" or "FsError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
     private void ValidatePublicSignatures()
     {
@@ -1788,6 +1800,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     guaranteesReturn = conditional.Else.Count != 0 && thenReturns && elseReturns;
                     break;
                 }
+                case WithTransactionStmt transaction:
+                    guaranteesReturn = CheckTransactionScope(transaction, typedStatements, locals);
+                    break;
                 default:
                     Add("E_UNSUPPORTED", "Statement is not implemented in this language slice", statement.At);
                     break;
@@ -1795,6 +1810,63 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         return guaranteesReturn;
+    }
+
+    private bool CheckTransactionScope(
+        WithTransactionStmt transaction,
+        List<TypedStmt> typedStatements,
+        Dictionary<string, LocalSymbol> locals)
+    {
+        TypedExpr database;
+        if (transaction.Begin is MemberCallExpr beginCall && beginCall.Member == "begin")
+        {
+            var diagnosticsBeforeReceiver = diagnostics.Count;
+            database = CheckExpr(beginCall.Target, LangType.DbWrite, locals, 0);
+            if (beginCall.Arguments.Count != 0)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'DbWrite.begin' expects 0 arguments, got {beginCall.Arguments.Count}", beginCall.MemberAt);
+            foreach (var argument in beginCall.Arguments)
+                _ = CheckExpr(argument, null, locals, 0);
+
+            if (database.Type.IsDbWrite && beginCall.Arguments.Count == 0 && diagnostics.Count == diagnosticsBeforeReceiver)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("db.write", "DbWrite.begin", beginCall.MemberAt));
+        }
+        else
+        {
+            _ = CheckExpr(transaction.Begin, null, locals, 0);
+            Add("E_TYPE_MISMATCH", "Transaction scope requires a direct DbWrite.begin() call", transaction.Begin.At);
+            database = new TypedErrorExpr(transaction.Begin.At);
+        }
+
+        var transactionLocalId = _nextLocalId++;
+        var bodyLocals = new Dictionary<string, LocalSymbol>(locals, StringComparer.Ordinal);
+        if (bodyLocals.ContainsKey(transaction.Name))
+        {
+            Add("E_NAME_DUPLICATE", $"Local '{transaction.Name}' is already declared in this scope", transaction.NameAt);
+        }
+        else
+        {
+            bodyLocals.Add(transaction.Name, new LocalSymbol(transactionLocalId, LangType.Transaction));
+        }
+
+        _activeTransactionLocals.Add(transactionLocalId);
+        var body = new List<TypedStmt>();
+        bool bodyReturns;
+        try
+        {
+            bodyReturns = CheckStatements(transaction.Body, body, bodyLocals);
+        }
+        finally
+        {
+            _activeTransactionLocals.Remove(transactionLocalId);
+        }
+
+        typedStatements.Add(new TypedWithTransactionStmt(
+            database,
+            transactionLocalId,
+            transaction.Name,
+            ReadOnly(body),
+            transaction.At));
+        return bodyReturns;
     }
 
     private void InferEffectsAndValidateBounds()
@@ -2029,7 +2101,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private TypedExpr CheckName(NameExpr expression, LangType? expected, Dictionary<string, LocalSymbol> locals)
     {
         if (locals.TryGetValue(expression.Name, out var local))
+        {
+            if (local.Type.IsTransaction)
+            {
+                Add("E_RESOURCE_ESCAPE", $"Transaction '{expression.Name}' may only be used as the direct receiver of execute() or commit() inside its with scope", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
             return new TypedLocalExpr(local.Type, local.Id, expression.At);
+        }
 
         if (expression.Name == "null")
         {
@@ -2300,6 +2379,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 depth);
         }
 
+        if (expression.Target is NameExpr transactionName &&
+            locals.TryGetValue(transactionName.Name, out var transactionLocal) &&
+            transactionLocal.Type.IsTransaction)
+        {
+            return CheckTransactionMemberCall(expression, expected, locals, depth, transactionName, transactionLocal);
+        }
+
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
             if (targetName.Name == "html" && IsHtmlBuilderMember(expression.Member))
@@ -2343,6 +2429,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 Add("E_CAPABILITY_MISSING", $"Intrinsic 'db.{expression.Member}' requires a local or parameter of type '{requiredType}'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
+
+            if (targetName.Name == "db" && expression.Member == "begin")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_RESOURCE_ESCAPE", "A transaction must be opened directly in a 'with db.begin() as tx' scope", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
         }
 
         var diagnosticsBeforeReceiver = diagnostics.Count;
@@ -2351,6 +2445,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (receiver.Type.IsDbWrite && expression.Member == "begin")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_RESOURCE_ESCAPE", "A transaction must be opened directly in a 'with db.begin() as tx' scope", expression.At);
             return new TypedErrorExpr(expression.At);
         }
 
@@ -2441,16 +2543,50 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return new TypedErrorExpr(expression.At);
     }
 
+    private TypedExpr CheckTransactionMemberCall(
+        MemberCallExpr expression,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth,
+        NameExpr transactionName,
+        LocalSymbol transactionLocal)
+    {
+        if (!_activeTransactionLocals.Contains(transactionLocal.Id) ||
+            expression.Member is not ("execute" or "commit"))
+        {
+            Add(
+                "E_RESOURCE_ESCAPE",
+                $"Transaction '{transactionName.Name}' may only be used as the direct receiver of execute() or commit() inside its with scope",
+                expression.MemberAt);
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Member == "execute")
+        {
+            var receiver = new TypedLocalExpr(LangType.Transaction, transactionLocal.Id, transactionName.At);
+            return CheckDatabaseCall(expression, expected, locals, depth, receiver, transactionExecute: true);
+        }
+
+        if (expression.Arguments.Count != 0)
+            Add("E_TYPE_MISMATCH", $"Intrinsic 'Transaction.commit' expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+        foreach (var argument in expression.Arguments)
+            _ = CheckExpr(argument, null, locals, depth);
+        return new TypedTransactionCommitExpr(transactionLocal.Id, expression.At);
+    }
+
     private TypedExpr CheckDatabaseCall(
         MemberCallExpr expression,
         LangType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth,
-        TypedExpr receiver)
+        TypedExpr receiver,
+        bool transactionExecute = false)
     {
         var diagnosticsBeforeCall = diagnostics.Count;
         var queryOne = expression.Member == "query_one";
-        var operationName = queryOne ? "DbRead.query_one" : "DbWrite.execute";
+        var operationName = queryOne ? "DbRead.query_one" : transactionExecute ? "Transaction.execute" : "DbWrite.execute";
         var effect = queryOne ? "db.read" : "db.write";
         var hasCorrectArity = expression.Arguments.Count == 2;
         if (!hasCorrectArity)
@@ -2480,6 +2616,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 Add(
                     "E_DB_READ_STATEMENT",
                     "DbRead.query_one requires a single SELECT statement beginning with a standalone SELECT token and containing no semicolon",
+                    expression.Arguments[0].At);
+            }
+
+            if (transactionExecute && hasLiteralSql && !IsSingleSqliteTransactionWrite(sql))
+            {
+                Add(
+                    "E_DB_TRANSACTION_STATEMENT",
+                    "Transaction.execute requires one INSERT, UPDATE, DELETE, or REPLACE statement with no semicolon; transaction-control and other SQL statements are not supported",
                     expression.Arguments[0].At);
             }
         }
@@ -2544,7 +2688,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         var operation = new CheckedDatabaseOperation(
-            queryOne ? CheckedDatabaseOperationKind.QueryOne : CheckedDatabaseOperationKind.Execute,
+            queryOne
+                ? CheckedDatabaseOperationKind.QueryOne
+                : transactionExecute
+                    ? CheckedDatabaseOperationKind.TransactionExecute
+                    : CheckedDatabaseOperationKind.Execute,
             effect,
             sql,
             parameterStruct?.Id ?? -1,
@@ -2608,6 +2756,53 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return !sql.Contains(';') &&
             statement.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) &&
             (statement.Length == SelectLength || char.IsWhiteSpace(statement[SelectLength]));
+    }
+
+    private static bool IsSingleSqliteTransactionWrite(string sql)
+    {
+        if (sql.Contains(';')) return false;
+        var firstKeyword = FirstSqliteKeyword(sql);
+        return firstKeyword is "INSERT" or "UPDATE" or "DELETE" or "REPLACE";
+    }
+
+    private static string? FirstSqliteKeyword(string sql)
+    {
+        var index = 0;
+        while (index < sql.Length)
+        {
+            while (index < sql.Length && char.IsWhiteSpace(sql[index]))
+                index++;
+
+            if (index + 1 < sql.Length && sql[index] == '-' && sql[index + 1] == '-')
+            {
+                index += 2;
+                while (index < sql.Length && sql[index] is not ('\r' or '\n'))
+                    index++;
+                continue;
+            }
+
+            if (index + 1 < sql.Length && sql[index] == '/' && sql[index + 1] == '*')
+            {
+                var commentEnd = sql.IndexOf("*/", index + 2, StringComparison.Ordinal);
+                if (commentEnd < 0) return null;
+                index = commentEnd + 2;
+                continue;
+            }
+
+            break;
+        }
+
+        if (index >= sql.Length || !(char.IsLetter(sql[index]) || sql[index] == '_'))
+            return null;
+
+        var start = index++;
+        while (index < sql.Length &&
+               (char.IsLetterOrDigit(sql[index]) || sql[index] is '_' or '$' || sql[index] >= '\u0080'))
+        {
+            index++;
+        }
+
+        return sql[start..index].ToUpperInvariant();
     }
 
     private static bool IsHtmlBuilderMember(string member) =>
@@ -3023,6 +3218,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.DbRead);
             case "DbWrite":
                 return NoTypeArguments(syntax, LangType.DbWrite);
+            case "Transaction":
+                Add(
+                    "E_RESOURCE_ESCAPE",
+                    "Transaction handles cannot appear in source type positions; use them only as direct receivers inside their with scope",
+                    syntax.At);
+                return LangType.Error;
             case "DbError":
                 return NoTypeArguments(syntax, LangType.DbError);
             case "Option":
