@@ -6,6 +6,7 @@ internal enum LangTypeKind
     I32,
     Bool,
     Text,
+    Html,
     FilePath,
     TypeParameter,
     Union,
@@ -44,6 +45,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsI32 => Kind == LangTypeKind.I32;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
+    public bool IsHtml => Kind == LangTypeKind.Html;
     public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
     public bool IsFsError => Kind == LangTypeKind.FsError;
@@ -57,6 +59,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType I32 { get; } = new(LangTypeKind.I32, "i32");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
+    internal static LangType Html { get; } = new(LangTypeKind.Html, "Html");
     internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
@@ -160,6 +163,73 @@ internal sealed record CheckedCommand(
     LangType ErrorType,
     bool RequiresFsRead,
     Token At);
+
+internal enum CheckedRouteContentKind { Json, Html }
+
+internal sealed record CheckedRouteResponse(
+    int VariantId,
+    string VariantName,
+    int StatusCode,
+    CheckedRouteContentKind? ContentKind,
+    LangType? PayloadType,
+    Token At,
+    Token VariantAt,
+    Token StatusAt,
+    Token? FormatAt,
+    Token? PayloadTypeAt);
+
+internal sealed class CheckedRoute
+{
+    internal CheckedRoute(
+        int id,
+        string method,
+        string path,
+        LangType? bodyType,
+        IEnumerable<CheckedStructField> bodySchema,
+        int handlerFunctionId,
+        string handlerReference,
+        Token handlerAt,
+        int replyUnionId,
+        IEnumerable<CheckedRouteResponse> responses,
+        Token at,
+        Token methodAt,
+        Token pathAt,
+        Token? bodyAt,
+        Token? bodyTypeAt)
+    {
+        Id = id;
+        Method = method;
+        Path = path;
+        BodyType = bodyType;
+        BodySchema = Array.AsReadOnly(bodySchema.ToArray());
+        HandlerFunctionId = handlerFunctionId;
+        HandlerReference = handlerReference;
+        HandlerAt = handlerAt;
+        ReplyUnionId = replyUnionId;
+        Responses = Array.AsReadOnly(responses.ToArray());
+        At = at;
+        MethodAt = methodAt;
+        PathAt = pathAt;
+        BodyAt = bodyAt;
+        BodyTypeAt = bodyTypeAt;
+    }
+
+    public int Id { get; }
+    public string Method { get; }
+    public string Path { get; }
+    public LangType? BodyType { get; }
+    public IReadOnlyList<CheckedStructField> BodySchema { get; }
+    public int HandlerFunctionId { get; }
+    public string HandlerReference { get; }
+    public Token HandlerAt { get; }
+    public int ReplyUnionId { get; }
+    public IReadOnlyList<CheckedRouteResponse> Responses { get; }
+    public Token At { get; }
+    public Token MethodAt { get; }
+    public Token PathAt { get; }
+    public Token? BodyAt { get; }
+    public Token? BodyTypeAt { get; }
+}
 
 internal abstract record TypedExpr(LangType Type, Token At);
 internal sealed record TypedNumberExpr(Token At, int Value) : TypedExpr(LangType.I32, At);
@@ -312,7 +382,8 @@ internal sealed class CheckedProgram
         IEnumerable<CheckedStruct> structs,
         IEnumerable<CheckedTest>? tests = null,
         IEnumerable<CheckedCommand>? commands = null,
-        int? entryCommandId = null)
+        int? entryCommandId = null,
+        IEnumerable<CheckedRoute>? routes = null)
     {
         Modules = Array.AsReadOnly(modules.ToArray());
         EntryModule = entryModule;
@@ -323,6 +394,7 @@ internal sealed class CheckedProgram
         Tests = Array.AsReadOnly((tests ?? []).ToArray());
         Commands = Array.AsReadOnly((commands ?? []).ToArray());
         EntryCommandId = entryCommandId;
+        Routes = Array.AsReadOnly((routes ?? []).ToArray());
     }
 
     // Retained for single-file API compatibility. For a package, this is the selected entry module.
@@ -336,6 +408,7 @@ internal sealed class CheckedProgram
     public IReadOnlyList<CheckedTest> Tests { get; }
     public IReadOnlyList<CheckedCommand> Commands { get; }
     public int? EntryCommandId { get; }
+    public IReadOnlyList<CheckedRoute> Routes { get; }
 }
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
@@ -387,7 +460,8 @@ internal static class Compiler
         string rootPackageId,
         string? entryModule,
         IReadOnlySet<string>? rootCapabilities = null,
-        bool rootIsCliPackage = false)
+        bool rootIsCliPackage = false,
+        bool rootIsWebPackage = false)
     {
         var diagnostics = new List<Diagnostic>();
         return new SemanticChecker(diagnostics).CheckPackage(
@@ -396,7 +470,8 @@ internal static class Compiler
             entryModule,
             requireEntry: entryModule is not null,
             rootCapabilities,
-            rootIsCliPackage);
+            rootIsCliPackage,
+            rootIsWebPackage);
     }
 }
 
@@ -424,19 +499,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<FunctionSymbol> _functions = [];
     private readonly List<CheckedTest> _tests = [];
     private readonly List<CommandSymbol> _commands = [];
+    private readonly List<CheckedRoute> _routes = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
+    private bool _rootIsWebPackage;
 
     public CheckResult CheckSingle(ParsedProgram program) =>
         CheckPackage(
             [new PackageModuleInput(SinglePackageId, program, new Dictionary<string, string>(StringComparer.Ordinal), "self")],
             SinglePackageId,
             program.Module,
-            requireEntry: false);
+            requireEntry: false,
+            rootIsWebPackage: true);
 
     public CheckResult CheckPackage(
         IReadOnlyList<PackageModuleInput> inputs,
@@ -444,10 +522,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         string? entryModule,
         bool requireEntry,
         IReadOnlySet<string>? rootCapabilities = null,
-        bool rootIsCliPackage = false)
+        bool rootIsCliPackage = false,
+        bool rootIsWebPackage = false)
     {
         _rootCapabilities = rootCapabilities ?? new HashSet<string>(StringComparer.Ordinal);
         _rootPackageId = rootPackageId;
+        _rootIsWebPackage = rootIsWebPackage;
         BuildPackageDisplayLabels(inputs);
         var orderedModules = new List<ModuleSymbols>(inputs.Count);
         foreach (var input in inputs)
@@ -486,6 +566,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             RegisterCommandSignatures(module);
         }
+        foreach (var module in orderedModules)
+        {
+            RegisterRoutes(module, rootPackageId, entryModule);
+        }
 
         ValidatePublicSignatures();
 
@@ -497,33 +581,71 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         FunctionSymbol? entry = null;
         CommandSymbol? entryCommand = null;
+        string? routeEntryModule = null;
         if (entryModule is not null)
         {
             var entryIdentity = new ModuleIdentity(rootPackageId, entryModule);
-            if (_modulesByIdentity.TryGetValue(entryIdentity, out var entryScope))
+            var entryHasRoutes = false;
+            if (_modulesByIdentity.TryGetValue(entryIdentity, out var selectedRootEntryScope))
             {
-                entryScope.DeclaredFunctions.TryGetValue("main", out var main);
-                if (main is not null && IsRunnableEntry(main))
+                entryHasRoutes = selectedRootEntryScope.Program.Routes.Count != 0;
+                if (entryHasRoutes)
                 {
-                    if (entryScope.Command is not null)
-                        Add("E_COMMAND_DECL", "A module cannot declare both a command and a runnable main function", entryScope.Command.Declaration.At);
-                    else
-                        entry = main;
-                }
-                else if (entryScope.Command is not null)
-                {
-                    entryCommand = entryScope.Command;
+                    selectedRootEntryScope.DeclaredFunctions.TryGetValue("main", out var selectedMain);
+                    if (selectedMain is not null && IsRunnableEntry(selectedMain))
+                        Add("E_ROUTE_DECL", "An entry module with routes cannot also declare a runnable main function", selectedMain.Declaration.At);
+                    if (selectedRootEntryScope.Command is not null)
+                        Add("E_ROUTE_DECL", "An entry module with routes cannot also declare a command", selectedRootEntryScope.Command.Declaration.At);
                 }
             }
 
-            if (entry is null && entryCommand is null && requireEntry)
+            if (_rootIsWebPackage && requireEntry)
             {
-                var at = _modulesByIdentity.TryGetValue(entryIdentity, out entryScope)
-                    ? entryScope.Program.ModuleAt
-                    : inputs.FirstOrDefault(input => input.PackageId == rootPackageId)?.Program.ModuleAt ??
-                      inputs.FirstOrDefault()?.Program.ModuleAt ??
-                      new Token("id", entryModule, 1, 1, string.Empty);
-                Add("E_ENTRYPOINT", $"Entry module '{entryModule}' must declare a zero-argument main returning i32, bool, or Text", at);
+                if (_modulesByIdentity.TryGetValue(entryIdentity, out var webEntryScope))
+                {
+                    if (webEntryScope.Program.Routes.Count == 0)
+                        Add("E_ENTRYPOINT", $"Web package entry module '{entryModule}' must declare at least one route", webEntryScope.Program.ModuleAt);
+                    else if (_routes.Count != 0)
+                        routeEntryModule = webEntryScope.Program.Module;
+                }
+                else
+                {
+                    var at = inputs.FirstOrDefault(input => input.PackageId == rootPackageId)?.Program.ModuleAt ??
+                             inputs.FirstOrDefault()?.Program.ModuleAt ??
+                             new Token("id", entryModule, 1, 1, string.Empty);
+                    Add("E_ENTRYPOINT", $"Web package entry module '{entryModule}' must exist and declare at least one route", at);
+                }
+            }
+            else
+            {
+                if (_modulesByIdentity.TryGetValue(entryIdentity, out var standardEntryScope))
+                {
+                    standardEntryScope.DeclaredFunctions.TryGetValue("main", out var main);
+                    if (main is not null && IsRunnableEntry(main))
+                    {
+                        if (standardEntryScope.Command is not null)
+                        {
+                            if (!entryHasRoutes)
+                                Add("E_COMMAND_DECL", "A module cannot declare both a command and a runnable main function", standardEntryScope.Command.Declaration.At);
+                        }
+                        else
+                            entry = main;
+                    }
+                    else if (standardEntryScope.Command is not null)
+                    {
+                        entryCommand = standardEntryScope.Command;
+                    }
+                }
+
+                if (entry is null && entryCommand is null && requireEntry && !entryHasRoutes)
+                {
+                    var at = _modulesByIdentity.TryGetValue(entryIdentity, out var entryLocationScope)
+                        ? entryLocationScope.Program.ModuleAt
+                        : inputs.FirstOrDefault(input => input.PackageId == rootPackageId)?.Program.ModuleAt ??
+                          inputs.FirstOrDefault()?.Program.ModuleAt ??
+                          new Token("id", entryModule, 1, 1, string.Empty);
+                    Add("E_ENTRYPOINT", $"Entry module '{entryModule}' must declare a zero-argument main returning i32, bool, or Text", at);
+                }
             }
         }
 
@@ -547,14 +669,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var commands = _commands.Select(command => command.ToCheckedCommand());
         return new CheckResult(new CheckedProgram(
             orderedModules.Select(module => module.Program.Module).ToArray(),
-            entry?.ModuleName ?? entryCommand?.ModuleName,
+            entry?.ModuleName ?? entryCommand?.ModuleName ?? routeEntryModule,
             entry?.Id,
             functions,
             unions,
             structs,
             _tests,
             commands,
-            entryCommand?.Id), diagnostics);
+            entryCommand?.Id,
+            _routes), diagnostics);
     }
 
     private void BuildPackageDisplayLabels(IReadOnlyList<PackageModuleInput> inputs)
@@ -901,6 +1024,293 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
     }
 
+    private void RegisterRoutes(ModuleSymbols module, string rootPackageId, string? entryModule)
+    {
+        if (module.Program.Routes.Count == 0) return;
+
+        _currentModule = module.Identity;
+        var isRouteEntry = _rootIsWebPackage &&
+            module.PackageId == rootPackageId &&
+            entryModule is not null &&
+            module.Program.Module == entryModule;
+        if (!isRouteEntry)
+        {
+            foreach (var route in module.Program.Routes)
+                Add("E_ROUTE_DECL", "Routes may be declared only in the root web package entry module", route.At);
+            return;
+        }
+
+        var routeKeys = new HashSet<(string Method, string Path)>();
+        foreach (var route in module.Program.Routes)
+        {
+            var diagnosticCount = diagnostics.Count;
+            if (!routeKeys.Add((route.Method, route.Path)))
+                Add("E_ROUTE_DECL", $"Route '{route.Method} {route.Path}' is already declared", route.At);
+
+            var checkedRoute = CheckRoute(route);
+            if (checkedRoute is not null && diagnostics.Count == diagnosticCount)
+                _routes.Add(checkedRoute);
+        }
+    }
+
+    private CheckedRoute? CheckRoute(RouteDecl route)
+    {
+        var routeDiagnosticCount = diagnostics.Count;
+        var bodies = route.Items.OfType<RouteBodySyntax>().ToArray();
+        var handlers = route.Items.OfType<RouteHandlerSyntax>().ToArray();
+        var responses = route.Items.OfType<RouteResponseSyntax>().ToArray();
+
+        var responseStarted = false;
+        foreach (var item in route.Items)
+        {
+            if (item is RouteResponseSyntax)
+            {
+                responseStarted = true;
+                continue;
+            }
+
+            if (responseStarted && item is RouteBodySyntax or RouteHandlerSyntax)
+                Add("E_ROUTE_DECL", "Route body and handler items must appear before response mappings", item.At);
+        }
+
+        for (var i = 1; i < bodies.Length; i++)
+            Add("E_ROUTE_DECL", "A route may declare at most one body type", bodies[i].At);
+        for (var i = 1; i < handlers.Length; i++)
+            Add("E_ROUTE_HANDLER", "A route may declare exactly one handler", handlers[i].At);
+        if (handlers.Length == 0)
+            Add("E_ROUTE_HANDLER", "A route must declare exactly one handler", route.At);
+
+        StructSymbol? bodyStructure = null;
+        if (route.Method == "GET")
+        {
+            foreach (var body in bodies)
+                Add("E_ROUTE_DECL", "GET routes cannot declare a request body", body.At);
+        }
+        else if (route.Method == "POST")
+        {
+            if (bodies.Length == 0)
+            {
+                Add("E_ROUTE_DECL", "POST routes must declare exactly one request body type", route.At);
+            }
+            else if (bodies[0].Type.Reference.IsQualified == false)
+            {
+                Add("E_ROUTE_DECL", "Route body types must be fully qualified declared structs", bodies[0].Type.At);
+            }
+            else if (bodies[0].Type.Args.Count != 0)
+            {
+                // Still resolve the declaration so visibility and unresolved-name diagnostics are preserved.
+                ResolveTypeDeclaration(bodies[0].Type.Reference);
+                Add("E_ROUTE_DECL", "Route body types must be non-generic declared structs", bodies[0].Type.At);
+            }
+            else
+            {
+                var bodyType = ResolveType(bodies[0].Type, 0);
+                if (!bodyType.IsError && bodyType.Kind == LangTypeKind.Struct)
+                {
+                    var structure = _structs[bodyType.StructId];
+                    if (IsSourceDeclaredStruct(structure))
+                    {
+                        bodyStructure = structure;
+                        if (!ContainsRouteTypeError(bodyType, new HashSet<int>()) &&
+                            !IsJsonRouteType(bodyType, new HashSet<int>()))
+                        {
+                            Add("E_ROUTE_CODEC_UNSUPPORTED", "POST route body structs must contain only acyclic i32, bool, Text, and supported struct fields", bodies[0].Type.At);
+                        }
+                    }
+                    else
+                        Add("E_ROUTE_DECL", "Route body types must be fully qualified declared structs", bodies[0].Type.At);
+                }
+                else if (!bodyType.IsError)
+                    Add("E_ROUTE_DECL", "Route body types must be fully qualified declared structs", bodies[0].Type.At);
+            }
+        }
+
+        FunctionSymbol? handler = null;
+        UnionSymbol? replyUnion = null;
+        var handlerValid = handlers.Length == 1;
+        if (handlers.Length == 1)
+        {
+            handler = ResolveFunctionReference(handlers[0].Reference);
+            if (handler is null)
+            {
+                handlerValid = false;
+            }
+            else
+            {
+                var validParameters = route.Method switch
+                {
+                    "GET" => handler.Parameters.Count == 0,
+                    "POST" when bodyStructure is not null =>
+                        handler.Parameters.Count == 1 && handler.Parameters[0].Type == bodyStructure.Type,
+                    "POST" => true,
+                    _ => false
+                };
+                var validReturn = handler.ReturnType.IsError || handler.ReturnType.Kind == LangTypeKind.Union;
+                var validGenericity = handler.TypeParameters.Count == 0;
+
+                if (!validParameters || !validReturn || !validGenericity)
+                {
+                    var expectation = route.Method == "GET"
+                        ? "a non-generic zero-argument function returning a declared union"
+                        : "a non-generic function taking the route body type and returning a declared union";
+                    Add("E_ROUTE_HANDLER", $"Route handler must be {expectation}", handlers[0].Reference.At);
+                    handlerValid = false;
+                }
+
+                if (handler.ReturnType.Kind == LangTypeKind.Union)
+                    replyUnion = _unions[handler.ReturnType.UnionId];
+            }
+        }
+
+        var typedResponses = new List<CheckedRouteResponse>();
+        var seenResponseNames = new HashSet<string>(StringComparer.Ordinal);
+        var coveredVariantIds = new HashSet<int>();
+        var suppressMissingResponseCascade = !handlerValid;
+        foreach (var response in responses)
+        {
+            if (!seenResponseNames.Add(response.Variant))
+                Add("E_ROUTE_RESPONSE_DUPLICATE", $"Response variant '{response.Variant}' is mapped more than once", response.VariantAt);
+
+            if (response.StatusCode is < 100 or > 599)
+                Add("E_ROUTE_DECL", "Response status must be between 100 and 599", response.StatusAt);
+
+            if (replyUnion is null)
+                continue;
+
+            var variant = replyUnion.Variants.FirstOrDefault(item => item.Name == response.Variant);
+            if (variant is null)
+            {
+                Add("E_ROUTE_DECL", $"Response variant '{response.Variant}' is not declared by '{replyUnion.Declaration.Name}'", response.VariantAt);
+                suppressMissingResponseCascade = true;
+                continue;
+            }
+
+            coveredVariantIds.Add(variant.Id);
+            var typedResponse = CheckRouteResponse(response, variant);
+            typedResponses.Add(typedResponse);
+        }
+
+        if (replyUnion is not null && !suppressMissingResponseCascade)
+        {
+            var missing = replyUnion.Variants
+                .Where(variant => !coveredVariantIds.Contains(variant.Id))
+                .Select(variant => variant.Name)
+                .ToArray();
+            if (missing.Length != 0)
+                Add("E_ROUTE_RESPONSE_MISSING", $"Route responses are missing variants: {string.Join(", ", missing)}", route.At);
+        }
+
+        if (diagnostics.Count != routeDiagnosticCount || handler is null || replyUnion is null || !handlerValid)
+            return null;
+
+        return new CheckedRoute(
+            _routes.Count,
+            route.Method,
+            route.Path,
+            bodyStructure?.Type,
+            bodyStructure?.Fields ?? [],
+            handler.Id,
+            FormatReference(handlers[0].Reference),
+            handlers[0].At,
+            replyUnion.Id,
+            typedResponses,
+            route.At,
+            route.MethodAt,
+            route.PathAt,
+            bodies.FirstOrDefault()?.At,
+            bodies.FirstOrDefault()?.Type.At);
+    }
+
+    private CheckedRouteResponse CheckRouteResponse(RouteResponseSyntax response, CheckedVariant variant)
+    {
+        var contentKind = response.Format switch
+        {
+            "json" => CheckedRouteContentKind.Json,
+            "html" => CheckedRouteContentKind.Html,
+            _ => (CheckedRouteContentKind?)null
+        };
+        LangType? payloadType = variant.Fields.Count == 1 ? variant.Fields[0].Type : null;
+        var payloadTypeAt = response.BodyType?.At;
+
+        if (variant.Fields.Count == 0)
+        {
+            if (response.Format is not null || response.BodyType is not null)
+                Add("E_ROUTE_CODEC_UNSUPPORTED", "A response variant without a payload cannot declare a content format", response.FormatAt ?? response.At);
+        }
+        else if (variant.Fields.Count > 1)
+        {
+            Add("E_ROUTE_CODEC_UNSUPPORTED", "Route responses support only zero-payload or single-payload union variants", response.VariantAt);
+        }
+        else if (response.Format == "json" && response.BodyType is not null)
+        {
+            var jsonType = ResolveType(response.BodyType, 0);
+            if (!jsonType.IsError && !payloadType!.IsError &&
+                (jsonType != payloadType || !IsJsonRouteType(payloadType!, new HashSet<int>())))
+            {
+                Add("E_ROUTE_CODEC_UNSUPPORTED", "JSON response type must exactly match a payload with a supported JSON shape", response.BodyType.At);
+            }
+        }
+        else if (response.Format == "html" && response.BodyType is null)
+        {
+            if (!payloadType!.IsHtml)
+                Add("E_ROUTE_CODEC_UNSUPPORTED", "The html response format requires an Html payload", response.FormatAt ?? response.At);
+        }
+        else
+        {
+            Add("E_ROUTE_CODEC_UNSUPPORTED", "A one-payload response requires 'json PayloadType' or 'html' for an Html payload", response.FormatAt ?? response.VariantAt);
+        }
+
+        return new CheckedRouteResponse(
+            variant.Id,
+            variant.Name,
+            response.StatusCode,
+            contentKind,
+            payloadType,
+            response.At,
+            response.VariantAt,
+            response.StatusAt,
+            response.FormatAt,
+            payloadTypeAt);
+    }
+
+    private bool IsJsonRouteType(LangType type, HashSet<int> activeStructs)
+    {
+        if (type.Kind is LangTypeKind.I32 or LangTypeKind.Bool or LangTypeKind.Text)
+            return true;
+        if (type.Kind != LangTypeKind.Struct)
+            return false;
+        var structure = _structs[type.StructId];
+        if (!IsSourceDeclaredStruct(structure))
+            return false;
+        if (!activeStructs.Add(type.StructId))
+            return false;
+
+        var result = structure.Fields.All(field => IsJsonRouteType(field.Type, activeStructs));
+        activeStructs.Remove(type.StructId);
+        return result;
+    }
+
+    private bool ContainsRouteTypeError(LangType type, HashSet<int> activeStructs)
+    {
+        if (type.IsError)
+            return true;
+        if (type.Kind == LangTypeKind.Struct)
+        {
+            if (!activeStructs.Add(type.StructId))
+                return false;
+            var containsError = _structs[type.StructId].Fields
+                .Any(field => ContainsRouteTypeError(field.Type, activeStructs));
+            activeStructs.Remove(type.StructId);
+            if (containsError)
+                return true;
+        }
+        return type.Arguments.Any(argument => ContainsRouteTypeError(argument, activeStructs));
+    }
+
+    private bool IsSourceDeclaredStruct(StructSymbol structure) =>
+        _modulesByIdentity[structure.ModuleIdentity].Program.Structs
+            .Any(declaration => ReferenceEquals(declaration, structure.Declaration));
+
     private void PopulateUnionVariants(ModuleSymbols module)
     {
         _currentModule = module.Identity;
@@ -1116,7 +1526,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsReservedTypeName(string name) =>
-        name is "i32" or "bool" or "Text" or "FilePath" or "Option" or "Result" or "FsRead" or "FsError";
+        name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or "FsRead" or "FsError";
 
     private void ValidatePublicSignatures()
     {
@@ -2211,6 +2621,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":
                 return NoTypeArguments(syntax, LangType.Text);
+            case "Html":
+                return NoTypeArguments(syntax, LangType.Html);
             case "FilePath":
                 return NoTypeArguments(syntax, LangType.FilePath);
             case "FsRead":

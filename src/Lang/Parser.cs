@@ -276,6 +276,7 @@ internal sealed class Parser
     }
 
     private bool Is(string text) => Current.Text == text;
+    private bool IsRouteKeyword(string text) => Current.Kind == "id" && Current.Text == text;
     private static bool IsLexicalIdentifier(Token token) => token.Kind == "id";
     private static bool IsBareIdentifier(Token token) =>
         IsLexicalIdentifier(token) && !BareExpressionKeywords.Contains(token.Text);
@@ -359,6 +360,7 @@ internal sealed class Parser
             var structs = new List<StructDecl>();
             var tests = new List<TestDecl>();
             var commands = new List<CommandDecl>();
+            var routes = new List<RouteDecl>();
             while (Current.Kind != "eof")
             {
                 var isPublic = false;
@@ -390,6 +392,10 @@ internal sealed class Parser
                 {
                     commands.Add(ParseCommand(isPublic));
                 }
+                else if (IsRouteKeyword("route"))
+                {
+                    routes.Add(ParseRoute(isPublic));
+                }
                 else
                 {
                     var declaration = Current;
@@ -401,7 +407,7 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests, commands);
+            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests, commands, routes);
         }
         catch (ParseFailure)
         {
@@ -489,6 +495,156 @@ internal sealed class Parser
 
         Take();
         return new CommandDecl(name.Text, entries, name);
+    }
+
+    private RouteDecl ParseRoute(bool isPublic)
+    {
+        if (isPublic)
+            Fail(Current, "E_ROUTE_DECL", "Route declarations cannot be public");
+
+        var at = ExpectRouteKeyword("route");
+        if (!IsRouteKeyword("GET") && !IsRouteKeyword("POST"))
+            Fail(Current, "E_ROUTE_DECL", "Expected route method 'GET' or 'POST'");
+        var methodAt = Take();
+
+        if (Current.Kind != "text")
+            Fail(Current, "E_ROUTE_DECL", "Expected a static route path text literal");
+        var pathAt = Take();
+        var path = DecodeText(pathAt);
+        if (!path.StartsWith("/", StringComparison.Ordinal) ||
+            path.Any(character => character is '{' or '}' or '?' or '#'))
+        {
+            Fail(pathAt, "E_ROUTE_DECL", "Static route paths must begin with '/' and cannot contain '{', '}', '?', or '#'");
+        }
+
+        if (!Is("{"))
+            Fail(Current, "E_ROUTE_DECL", "Expected '{' to begin route declaration");
+        Take();
+
+        var items = new List<RouteItemSyntax>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof")
+                Fail(Current, "E_ROUTE_DECL", "Unclosed route declaration");
+
+            if (IsRouteKeyword("body"))
+            {
+                var itemAt = Take();
+                ExpectRoutePunctuation(":");
+                var type = ParseRouteQualifiedType("route body type");
+                ExpectRoutePunctuation(";");
+                items.Add(new RouteBodySyntax(itemAt, type));
+            }
+            else if (IsRouteKeyword("handler"))
+            {
+                var itemAt = Take();
+                ExpectRoutePunctuation(":");
+                var reference = ParseRouteQualifiedReference("route handler");
+                ExpectRoutePunctuation(";");
+                items.Add(new RouteHandlerSyntax(itemAt, reference));
+            }
+            else if (IsRouteKeyword("response"))
+            {
+                var itemAt = Take();
+                var variantAt = ExpectRouteIdentifier("response variant");
+                ExpectRoutePunctuation(":");
+
+                if (Current.Kind != "number")
+                    Fail(Current, "E_ROUTE_DECL", "Expected numeric response status");
+                var statusAt = Take();
+                if (!int.TryParse(statusAt.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var statusCode))
+                    Fail(statusAt, "E_ROUTE_DECL", "Response status is outside the supported integer range");
+
+                Token? formatAt = null;
+                string? format = null;
+                TypeSyntax? bodyType = null;
+                if (IsRouteKeyword("json"))
+                {
+                    formatAt = Take();
+                    format = formatAt.Text;
+                    bodyType = ParseRouteResponseType();
+                }
+                else if (IsRouteKeyword("html"))
+                {
+                    formatAt = Take();
+                    format = formatAt.Text;
+                }
+
+                ExpectRoutePunctuation(";");
+                items.Add(new RouteResponseSyntax(
+                    itemAt,
+                    variantAt,
+                    variantAt.Text,
+                    statusAt,
+                    statusCode,
+                    formatAt,
+                    format,
+                    bodyType));
+            }
+            else
+            {
+                Fail(Current, "E_ROUTE_DECL", $"Unsupported route item '{Current.Text}'");
+            }
+        }
+
+        Take();
+        return new RouteDecl(at, methodAt, methodAt.Text, pathAt, path, items);
+    }
+
+    private TypeSyntax ParseRouteQualifiedType(string description)
+    {
+        var type = ParseType();
+        if (!type.Reference.IsQualified)
+            Fail(type.At, "E_ROUTE_DECL", $"The {description} must use a fully qualified type reference");
+        return type;
+    }
+
+    private TypeSyntax ParseRouteResponseType()
+    {
+        var type = ParseType();
+        if (type.Reference.IsQualified || IsRouteResponseBuiltin(type))
+            return type;
+
+        Fail(
+            type.At,
+            "E_ROUTE_DECL",
+            "The JSON response body type must be fully qualified or use the built-in i32, bool, or Text type");
+        throw new ParseFailure();
+    }
+
+    private static bool IsRouteResponseBuiltin(TypeSyntax type) =>
+        !type.Reference.IsQualified &&
+        type.Reference.Module.Count == 0 &&
+        type.Args.Count == 0 &&
+        type.Reference.Declaration is "i32" or "bool" or "Text";
+
+    private SourceDeclarationRefSyntax ParseRouteQualifiedReference(string description)
+    {
+        var reference = ParseSourceDeclarationRef();
+        if (!reference.IsQualified)
+            Fail(reference.At, "E_ROUTE_DECL", $"The {description} must be fully qualified");
+        return reference;
+    }
+
+    private Token ExpectRouteKeyword(string keyword)
+    {
+        if (IsRouteKeyword(keyword)) return Take();
+        Fail(Current, "E_ROUTE_DECL", $"Expected '{keyword}' in route declaration");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectRouteIdentifier(string description)
+    {
+        if (IsLexicalIdentifier(Current)) return Take();
+        Fail(Current, "E_ROUTE_DECL", $"Expected {description}");
+        throw new ParseFailure();
+    }
+
+    private Token ExpectRoutePunctuation(string punctuation)
+    {
+        if (Is(punctuation)) return Take();
+        Fail(Current, "E_ROUTE_DECL", $"Expected '{punctuation}' in route declaration");
+        throw new ParseFailure();
     }
 
     private Token ExpectCommandIdentifier(string description)

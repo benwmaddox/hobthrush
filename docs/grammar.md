@@ -9,7 +9,12 @@ qualified_ref   = namespace_root, "::", module_segment, "::", { module_segment, 
 namespace_root  = "self" | bare_identifier ;
 module_segment  = lexical_identifier ;
 declaration_identifier = lexical_identifier ;
-declaration     = [ "pub" ], ( function | union | struct ) | test_declaration ;
+declaration     = [ "pub" ], ( function | union | struct ) | test_declaration | route_decl ;
+route_decl      = "route", ( "GET" | "POST" ), text, "{", { route_item }, "}" ;
+route_item      = "body", ":", type, ";"
+                | "handler", ":", qualified_ref, ";"
+                | "response", member_identifier, ":", integer, [ "json", route_json_type | "html" ], ";" ;
+route_json_type = "i32" | "bool" | "Text" | qualified_ref ;
 
 function        = "fn", bare_identifier, [ "<", type_parameters, ">" ], "(", [ parameters ], ")",
                   "->", type, "effects", "{", [ effect, { ",", effect }, [ "," ] ], "}", block ;
@@ -23,7 +28,7 @@ parameter       = bare_identifier, ":", type ;
 
 type            = type_name, [ "<", type, { ",", type }, ">" ] ;
 type_name       = builtin_type | type_parameter | qualified_ref ;
-builtin_type    = "i32" | "bool" | "Text" | "Option" | "Result" | "FsError" | "FsRead" ;
+builtin_type    = "i32" | "bool" | "Text" | "Html" | "Option" | "Result" | "FsError" | "FsRead" ;
 type_parameter  = bare_identifier ;
 
 union           = "union", bare_identifier, "{", [ variant, { ",", variant }, [ "," ] ], "}" ;
@@ -98,6 +103,14 @@ lang lock PACKAGE_DIRECTORY
 
 Bare `lang test` with no target retains the compiler fixture mode. With a source file or package directory, it checks the program and runs its language-level tests.
 
+## Checked route declarations
+
+A single-file `lang check FILE` treats the file as a route-capable root. The checked route contract accepts static `GET` and `POST` routes, a path text beginning with `/` and containing none of `{`, `}`, `?`, or `#`, and exactly one fully qualified handler reference. `GET` handlers take no parameters and cannot declare a request body. `POST` routes declare exactly one fully qualified, non-generic struct body type, and the handler takes that body as its sole parameter. Handlers are non-generic functions returning a declared union. Route body and handler items precede response mappings. Routes with the same method and exact path are duplicates; different methods may share a path.
+
+Each union variant has exactly one response mapping. Status codes range from 100 through 599. A zero-payload variant has no content format. A single-payload variant uses `json Type` or `html`; JSON accepts `i32`, `bool`, `Text`, or a fully qualified user struct whose fields recursively use those scalar types. Recursive structs and other unsupported shapes are rejected. The stated JSON type must equal the union payload type. `html` requires an opaque `Html` payload. `Html` may be passed through typed functions but has no source constructor or builder in this slice. Handler references use normal qualified-name resolution and visibility checks.
+
+Route declarations are checked into route IR by the single-file compiler API. The package manifest and command-line driver do not yet expose a web package mode, so package route declarations outside a route-capable root entry are rejected. The checked contract does not provide a host, OpenAPI output, a `net.listen` grant, an HTML runtime or builder, or asynchronous request handling and cancellation. SQLite remains deferred as well.
+
 The root `lang.toml` has required keys `name`, `version`, `kind`, and `source_root`, plus `entry_module` for `kind = "cli"`. The optional trailing `[dependencies]` table maps package aliases to relative package paths, one per line. Its values are plain double-quoted strings, paths use forward slashes, and aliases are language identifiers unique without regard to case. The table must be the final manifest section. For example:
 
 ```toml
@@ -117,7 +130,7 @@ A union variant uses either named fields such as `TooLong(max: i32)` or position
 
 There are no explicit type arguments, generic structs or unions, traits, or constructor-driven generic inference. `Some`, `None`, `Ok`, and `Err` still need an expected built-in type. A direct call such as `require(Some("present"), "fallback")` cannot pass the unresolved `Option<T>` expectation into `Some`; it reports `E_TYPE_MISMATCH` with a constructor-specific message that an expected `Option<T>` type is required. Bind the constructor to an annotated local first, then pass that local to the generic function. `Option<T>` and `Result<T, E>` remain compiler-provided generic types; their type arguments must be supported types.
 
-Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, `await`, and `with`; those seven retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, `pub`, `test`, and `assert`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions, so an unsupported top-level `route` declaration remains unsupported.
+Identifiers are contextual. A lexical identifier is any token with identifier spelling. A bare identifier is a lexical identifier except `true`, `false`, `null`, `match`, `if`, `await`, and `with`; those seven retain special expression or pattern behavior and cannot be used as bare declaration, type-root, binding, or function names. Other words that may look keyword-like in grammar positions (including `route`, `return`, `struct`, `pub`, `test`, and `assert`) are accepted as ordinary names where the surrounding syntax expects a name. Grammar dispatch still treats declaration and statement keywords specially in their positions; top-level `route` dispatches to the contextual route grammar below.
 
 Member positions are unambiguous and accept any lexical identifier: struct field declarations and initializers, union variant and named-payload labels, and the name after `.` in field access, qualified types, variant construction, and qualified patterns. Module path segments also accept any lexical identifier. A leading/root type name, constructor name, declaration name, function name, parameter, local binding, or unqualified pattern variant uses a bare identifier. `null` remains invalid as a value; `true` and `false` remain boolean literals.
 

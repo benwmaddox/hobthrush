@@ -53,6 +53,9 @@ internal static class IntegrationTests
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
             ("duplicate and reserved struct names are rejected", TestStructDeclarationNames),
             ("contextual keywords are identifiers only in their grammar contexts", TestContextualIdentifiers),
+            ("static GET and POST routes produce checked route IR", TestStaticRouteDeclarations),
+            ("route signatures, mappings, codecs, names, and placement are checked", TestRouteContractDiagnostics),
+            ("opaque Html signatures build as managed libraries", TestHtmlManagedLibraryBuild),
             ("public APIs reject nested private struct types", TestStructVisibility),
             ("deep field chains produce a structured diagnostic", TestDeepStructFieldChain),
             ("type mismatches fail before generated code", TestTypeMismatchContexts),
@@ -629,7 +632,8 @@ internal static class IntegrationTests
 
             fn route(command: i32) -> i32 effects {} {
                 let return: i32 = command;
-                return return;
+                let route: i32 = return;
+                return route;
             }
 
             fn make_choice(value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects) -> self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice effects {} {
@@ -664,7 +668,7 @@ internal static class IntegrationTests
             module harness::standalone_route;
             route
             """;
-        await ExpectDiagnosticsAsync(harness, "standalone-route-declaration", standaloneRouteSource, "E_UNSUPPORTED");
+        await ExpectDiagnosticsAsync(harness, "malformed-route-declaration", standaloneRouteSource, "E_ROUTE_DECL");
     }
 
     private static async Task TestStructDeclarationNames(Harness harness)
@@ -3640,11 +3644,435 @@ internal static class IntegrationTests
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertTrue(result.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(result));
-        AssertTrue(result.StandardOutput.EndsWith("39 active, 3 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(result.StandardOutput.EndsWith("41 active, 1 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(result));
         AssertEqual(string.Empty, result.StandardError, Describe(result));
     }
 
+    private static async Task TestStaticRouteDeclarations(Harness harness)
+    {
+        var source = await File.ReadAllTextAsync(Path.Combine(
+            harness.RepositoryRoot, "fixtures", "18-route-mapping.lang"));
+        var check = await harness.InvokeAsync("static-route-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length,
+            "Valid static GET and POST routes should typecheck cleanly.");
+
+        var compilerAssembly = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly =>
+                string.Equals(assembly.Location, Path.GetFullPath(Path.Combine(
+                    harness.RepositoryRoot, "src", "Lang", "bin", "Release", "net10.0", "lang.dll")),
+                    StringComparison.OrdinalIgnoreCase))
+            ?? AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.GetFullPath(Path.Combine(
+                harness.RepositoryRoot, "src", "Lang", "bin", "Release", "net10.0", "lang.dll")));
+        var compilerType = compilerAssembly.GetType("Compiler", throwOnError: true)!;
+        var checkMethod = compilerType.GetMethod("Check", BindingFlags.Public | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Compiler.Check(string, string) was not found.");
+        var checkResult = checkMethod.Invoke(null, [harness.LastSourcePath, source])
+            ?? throw new InvalidOperationException("Compiler.Check returned no result.");
+        var checkedProgram = checkResult.GetType().GetProperty("Program")?.GetValue(checkResult)
+            ?? throw new InvalidOperationException("Compiler.Check did not produce a checked route program.");
+        var routeValue = checkedProgram.GetType().GetProperty("Routes")?.GetValue(checkedProgram)
+            ?? throw new InvalidOperationException("CheckedProgram does not expose route IR.");
+        var routes = ((System.Collections.IEnumerable)routeValue).Cast<object>().ToArray();
+        AssertEqual(2, routes.Length, "The checked IR should preserve both source routes.");
+
+        var get = routes[0];
+        var post = routes[1];
+        AssertEqual("GET", get.GetType().GetProperty("Method")?.GetValue(get)?.ToString(),
+            "The first route should retain its HTTP method.");
+        AssertEqual("/items", get.GetType().GetProperty("Path")?.GetValue(get)?.ToString(),
+            "The first route should retain its static path.");
+        var getResponses = ((System.Collections.IEnumerable)get.GetType().GetProperty("Responses")!.GetValue(get)!)
+            .Cast<object>().ToArray();
+        AssertEqual(2, getResponses.Length, "The checked GET route should retain both response mappings.");
+        AssertEqual(200, (int)getResponses[0].GetType().GetProperty("StatusCode")!.GetValue(getResponses[0])!,
+            "The checked JSON response should retain its status.");
+        AssertEqual("Json", getResponses[0].GetType().GetProperty("ContentKind")?.GetValue(getResponses[0])?.ToString(),
+            "The checked response should retain the JSON content kind.");
+
+        AssertEqual("POST", post.GetType().GetProperty("Method")?.GetValue(post)?.ToString(),
+            "The second route should retain its HTTP method.");
+        AssertTrue(post.GetType().GetProperty("BodyType")?.GetValue(post) is not null,
+            "The checked POST route should retain its body type.");
+        AssertEqual(1, ((System.Collections.IEnumerable)post.GetType().GetProperty("BodySchema")!.GetValue(post)!)
+            .Cast<object>().Count(), "The checked POST route should retain its body schema.");
+    }
+
+    private static async Task TestRouteContractDiagnostics(Harness harness)
+    {
+        const string header = """
+            module harness::route_contract;
+            union Reply { Found(Text), Empty }
+            fn good() -> self::harness::route_contract::Reply effects {} {
+                return self::harness::route_contract::Reply.Found("ok");
+            }
+            fn scalar() -> i32 effects {} { return 1; }
+            fn takes_value(value: i32) -> self::harness::route_contract::Reply effects {} {
+                return self::harness::route_contract::Reply.Found("ok");
+            }
+            """;
+        static string Add(string header, string tail) => header + "\n" + tail;
+        var cases = new (string Name, string Source, string Code)[]
+        {
+            ("route-invalid-method", Add(header, "route PUT \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-invalid-path", Add(header, "route GET \"/items/{id}\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-unknown-item", Add(header, "route GET \"/items\" { unknown; }"), "E_ROUTE_DECL"),
+            ("route-invalid-status", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 600 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-get-body", Add(header + "\nstruct Body { value: i32 }", "route GET \"/items\" { body: self::harness::route_contract::Body; handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-post-missing-body", Add(header, "route POST \"/items\" { handler: self::harness::route_contract::takes_value; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-duplicate-body", Add(header + "\nstruct Body { value: i32 }\nfn post(body: self::harness::route_contract::Body) -> self::harness::route_contract::Reply effects {} { return self::harness::route_contract::Reply.Empty; }", "route POST \"/items\" { body: self::harness::route_contract::Body; body: self::harness::route_contract::Body; handler: self::harness::route_contract::post; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-missing-handler", Add(header, "route GET \"/items\" { response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
+            ("route-duplicate-handler", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
+            ("route-handler-arity", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::takes_value; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
+            ("route-handler-return", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::scalar; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
+            ("route-handler-unresolved", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::missing; response Found: 200 json Text; response Empty: 204; }"), "E_NAME_UNRESOLVED"),
+            ("route-unknown-response-variant", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Other: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-duplicate-response", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Found: 201 json Text; response Empty: 204; }"), "E_ROUTE_RESPONSE_DUPLICATE"),
+            ("route-response-payload-mismatch", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json i32; response Empty: 204; }"), "E_ROUTE_CODEC_UNSUPPORTED"),
+            ("route-response-html-content-mismatch", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 html; response Empty: 204; }"), "E_ROUTE_CODEC_UNSUPPORTED"),
+            ("route-with-main", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }\npub fn main() -> i32 effects {} { return 0; }"), "E_ROUTE_DECL"),
+            ("route-with-command", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }\ncommand route {}"), "E_ROUTE_DECL"),
+            ("route-duplicate-method-path", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; } route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL")
+        };
+
+        foreach (var (name, source, code) in cases)
+            await ExpectDiagnosticsAsync(harness, name, source, code);
+
+        var routeOnlyPackage = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", """
+                module app::main;
+                union Reply { Found(Text), Empty }
+                fn get() -> self::app::main::Reply effects {} {
+                    return self::app::main::Reply.Found("ok");
+                }
+                route GET "/items" {
+                    handler: self::app::main::get;
+                    response Found: 200 json Text;
+                    response Empty: 204;
+                }
+                """)
+        });
+        AssertEqual(0, routeOnlyPackage.DiagnosticCodes.Length,
+            $"A route-only web package should check successfully. Got [{string.Join(", ", routeOnlyPackage.DiagnosticCodes)}].");
+        var checkedRouteOnlyPackage = routeOnlyPackage.Program
+            ?? throw new InvalidOperationException("A valid route-only web package should produce a CheckedProgram.");
+        AssertEqual("app::main", checkedRouteOnlyPackage.GetType().GetProperty("EntryModule")?.GetValue(checkedRouteOnlyPackage)?.ToString(),
+            "A route-only web package should retain its entry module.");
+        AssertEqual(1, ((System.Collections.IEnumerable)checkedRouteOnlyPackage.GetType().GetProperty("Routes")!.GetValue(checkedRouteOnlyPackage)!)
+            .Cast<object>().Count(), "A route-only web package should retain its route IR.");
+        AssertTrue(checkedRouteOnlyPackage.GetType().GetProperty("EntryFunctionId")!.GetValue(checkedRouteOnlyPackage) is null,
+            "A route-only web package should not select a function entry.");
+        AssertTrue(checkedRouteOnlyPackage.GetType().GetProperty("EntryCommandId")!.GetValue(checkedRouteOnlyPackage) is null,
+            "A route-only web package should not select a command entry.");
+
+        var webEntryWithoutRoutes = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", "module app::main;")
+        });
+        AssertTrue(webEntryWithoutRoutes.DiagnosticCodes.Contains("E_ENTRYPOINT", StringComparer.Ordinal),
+            "A web entry without routes must report E_ENTRYPOINT.");
+
+        const string routeEntrySource = """
+            module app::main;
+            union Reply { Found(Text), Empty }
+            fn get() -> self::app::main::Reply effects {} {
+                return self::app::main::Reply.Found("ok");
+            }
+            route GET "/items" {
+                handler: self::app::main::get;
+                response Found: 200 json Text;
+                response Empty: 204;
+            }
+            """;
+        var webRouteAndMain = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", routeEntrySource + "\npub fn main() -> i32 effects {} { return 0; }\n")
+        });
+        AssertTrue(webRouteAndMain.DiagnosticCodes.Contains("E_ROUTE_DECL", StringComparer.Ordinal),
+            "A web route entry cannot also declare a runnable main function.");
+        AssertTrue(!webRouteAndMain.DiagnosticCodes.Contains("E_ENTRYPOINT", StringComparer.Ordinal),
+            "A valid route declaration must prevent an E_ENTRYPOINT cascade when main is rejected.");
+
+        var webRouteAndCommand = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", routeEntrySource + "\ncommand route {}\n")
+        });
+        AssertTrue(webRouteAndCommand.DiagnosticCodes.Contains("E_ROUTE_DECL", StringComparer.Ordinal),
+            "A web route entry cannot also declare a command.");
+        AssertTrue(!webRouteAndCommand.DiagnosticCodes.Contains("E_ENTRYPOINT", StringComparer.Ordinal),
+            "A valid route declaration must prevent an E_ENTRYPOINT cascade when a command is rejected.");
+
+        var invalidWebRoute = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", """
+                module app::main;
+                union Reply { Found(Text), Empty }
+                fn get() -> self::app::main::Reply effects {} {
+                    return self::app::main::Reply.Found("ok");
+                }
+                route GET "/items" {
+                    handler: self::app::main::get;
+                    response Found: 600 json Text;
+                    response Empty: 204;
+                }
+                """)
+        });
+        AssertTrue(invalidWebRoute.DiagnosticCodes.Contains("E_ROUTE_DECL", StringComparer.Ordinal),
+            "An invalid declared web route must preserve its specific route diagnostic.");
+        AssertTrue(!invalidWebRoute.DiagnosticCodes.Contains("E_ENTRYPOINT", StringComparer.Ordinal),
+            "An invalid declared web route must not add an E_ENTRYPOINT cascade.");
+
+        var privateHandlerResult = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", """
+                module app::main;
+                pub union Reply { Found(Text), Empty }
+                route GET "/private" {
+                    handler: self::app::handlers::get;
+                    response Found: 200 json Text;
+                    response Empty: 404;
+                }
+                """),
+            ("app::handlers", """
+                module app::handlers;
+                fn get() -> self::app::main::Reply effects {} {
+                    return self::app::main::Reply.Found("ok");
+                }
+                """)
+        });
+        AssertTrue(privateHandlerResult.DiagnosticCodes.Contains("E_ACCESS_PRIVATE", StringComparer.Ordinal),
+            $"A route handler in another module must obey private declaration visibility. Got [{string.Join(", ", privateHandlerResult.DiagnosticCodes)}].");
+
+        var nonEntryRouteResult = CheckRoutePackageWithWebContext(harness, new[]
+        {
+            ("app::main", """
+                module app::main;
+                pub fn main() -> i32 effects {} { return 0; }
+                """),
+            ("app::other", """
+                module app::other;
+                union Reply { Found(Text), Empty }
+                fn good() -> self::app::other::Reply effects {} {
+                    return self::app::other::Reply.Found("ok");
+                }
+                route GET "/other" {
+                    handler: self::app::other::good;
+                    response Found: 200 json Text;
+                    response Empty: 404;
+                }
+                """)
+        });
+        AssertTrue(nonEntryRouteResult.DiagnosticCodes.Contains("E_ROUTE_DECL", StringComparer.Ordinal),
+            "A route in a non-entry module must be rejected even when the package has a route-capable root entry.");
+        var unsupportedJson = """
+            module harness::route_unsupported_json;
+            struct Envelope { value: Option<Text> }
+            union Reply { Value(self::harness::route_unsupported_json::Envelope), Empty }
+            fn good() -> self::harness::route_unsupported_json::Reply effects {} {
+                return self::harness::route_unsupported_json::Reply.Empty;
+            }
+            route GET "/items" {
+                handler: self::harness::route_unsupported_json::good;
+                response Value: 200 json self::harness::route_unsupported_json::Envelope;
+                response Empty: 204;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "route-unsupported-json-shape", unsupportedJson, "E_ROUTE_CODEC_UNSUPPORTED");
+
+        var recursiveJson = """
+            module harness::route_recursive_json;
+            struct Node { child: Option<self::harness::route_recursive_json::Node> }
+            union Reply { Value(self::harness::route_recursive_json::Node), Empty }
+            fn good() -> self::harness::route_recursive_json::Reply effects {} {
+                return self::harness::route_recursive_json::Reply.Empty;
+            }
+            route GET "/items" {
+                handler: self::harness::route_recursive_json::good;
+                response Value: 200 json self::harness::route_recursive_json::Node;
+                response Empty: 204;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "route-recursive-json-shape", recursiveJson, "E_ROUTE_CODEC_UNSUPPORTED");
+
+        var unsupportedRequestBody = """
+            module harness::route_unsupported_request_body;
+            union Choice { Selected(Text), Empty }
+            struct Request {
+                optional: Option<Text>,
+                choice: self::harness::route_unsupported_request_body::Choice
+            }
+            union Reply { Accepted, Empty }
+            route POST "/items" {
+                body: self::harness::route_unsupported_request_body::Request;
+                handler: self::harness::route_unsupported_request_body::post;
+                response Accepted: 200;
+                response Empty: 204;
+            }
+            fn post(request: self::harness::route_unsupported_request_body::Request) -> self::harness::route_unsupported_request_body::Reply effects {} {
+                return self::harness::route_unsupported_request_body::Reply.Accepted;
+            }
+            """;
+        var unsupportedRequestBodyDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "route-unsupported-request-body", unsupportedRequestBody, "E_ROUTE_CODEC_UNSUPPORTED");
+        AssertRangeAtToken(
+            unsupportedRequestBody,
+            unsupportedRequestBodyDiagnostics.Single(diagnostic => diagnostic.Code == "E_ROUTE_CODEC_UNSUPPORTED"),
+            "self",
+            2);
+
+        var recursiveRequestBody = """
+            module harness::route_recursive_request_body;
+            struct Node { next: Option<self::harness::route_recursive_request_body::Node> }
+            struct Wrapper { node: self::harness::route_recursive_request_body::Node }
+            union Reply { Accepted, Empty }
+            route POST "/items" {
+                body: self::harness::route_recursive_request_body::Wrapper;
+                handler: self::harness::route_recursive_request_body::post;
+                response Accepted: 200;
+                response Empty: 204;
+            }
+            fn post(request: self::harness::route_recursive_request_body::Wrapper) -> self::harness::route_recursive_request_body::Reply effects {} {
+                return self::harness::route_recursive_request_body::Reply.Accepted;
+            }
+            """;
+        var recursiveRequestBodyDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "route-recursive-request-body", recursiveRequestBody, "E_ROUTE_CODEC_UNSUPPORTED");
+        AssertRangeAtToken(
+            recursiveRequestBody,
+            recursiveRequestBodyDiagnostics.Single(diagnostic => diagnostic.Code == "E_ROUTE_CODEC_UNSUPPORTED"),
+            "self",
+            3);
+
+        var htmlRequestBody = """
+            module harness::route_html_request_body;
+            struct Request { page: Html }
+            union Reply { Accepted, Empty }
+            route POST "/page" {
+                body: self::harness::route_html_request_body::Request;
+                handler: self::harness::route_html_request_body::post;
+                response Accepted: 200;
+                response Empty: 204;
+            }
+            fn post(request: self::harness::route_html_request_body::Request) -> self::harness::route_html_request_body::Reply effects {} {
+                return self::harness::route_html_request_body::Reply.Accepted;
+            }
+            """;
+        var htmlRequestBodyDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "route-html-request-body", htmlRequestBody, "E_ROUTE_CODEC_UNSUPPORTED");
+        AssertRangeAtToken(
+            htmlRequestBody,
+            htmlRequestBodyDiagnostics.Single(diagnostic => diagnostic.Code == "E_ROUTE_CODEC_UNSUPPORTED"),
+            "self",
+            1);
+
+        var packageRoot = await harness.WritePackageAsync(
+            "route-outside-web-entry",
+            LibraryPackageManifest("route-library"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    pub union Reply { Found(Text), Empty }
+                    fn good() -> self::app::main::Reply effects {} { return self::app::main::Reply.Found("ok"); }
+                    route GET "/items" { handler: self::app::main::good; response Found: 200 json Text; response Empty: 204; }
+                    """
+            });
+        var packageCheck = await harness.InvokePackageDirectoryAsync("route-library-context", packageRoot, "check", "--json");
+        AssertEqual(1, packageCheck.ExitCode, Describe(packageCheck));
+        AssertTrue(ParseDiagnosticSnapshots(packageCheck.StandardOutput).Any(diagnostic => diagnostic.Code == "E_ROUTE_DECL"),
+            "A library package must reject route declarations outside a route-capable web entry context.");
+    }
+
+    private static async Task TestHtmlManagedLibraryBuild(Harness harness)
+    {
+        var source = """
+            module harness::opaque_html;
+            struct HtmlBox { page: Html }
+            union HtmlReply { Rendered(Html) }
+            fn identity(value: Html) -> Html effects {} { return value; }
+            fn preserve(value: self::harness::opaque_html::HtmlBox) -> self::harness::opaque_html::HtmlBox effects {} {
+                return value;
+            }
+            fn render(value: Html) -> self::harness::opaque_html::HtmlReply effects {} {
+                return self::harness::opaque_html::HtmlReply.Rendered(self::harness::opaque_html::identity(value));
+            }
+            """;
+        var check = await harness.InvokeAsync("opaque-html-library-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var build = await harness.InvokeAsync("opaque-html-library-build", "build", source);
+        AssertEqual(0, build.ExitCode, Describe(build));
+        AssertTrue(build.StandardOutput.StartsWith("Built library: ", StringComparison.Ordinal), Describe(build));
+        var artifact = build.StandardOutput["Built library: ".Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(artifact), $"Expected a full managed library path. {Describe(build)}");
+        AssertTrue(File.Exists(artifact), $"Expected managed library artifact at {artifact}. {Describe(build)}");
+    }
+    private static (object? Program, string[] DiagnosticCodes) CheckRoutePackageWithWebContext(
+        Harness harness,
+        IReadOnlyList<(string Module, string Source)> sources)
+    {
+        var compilerPath = Path.GetFullPath(Path.Combine(
+            harness.RepositoryRoot, "src", "Lang", "bin", "Release", "net10.0", "lang.dll"));
+        var assembly = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(candidate =>
+                string.Equals(candidate.Location, compilerPath, StringComparison.OrdinalIgnoreCase))
+            ?? AssemblyLoadContext.Default.LoadFromAssemblyPath(compilerPath);
+        var diagnosticType = assembly.GetType("Diagnostic", throwOnError: true)!;
+        var diagnosticsListType = typeof(List<>).MakeGenericType(diagnosticType);
+        var diagnostics = Activator.CreateInstance(diagnosticsListType)!;
+
+        var lexerType = assembly.GetType("Lexer", throwOnError: true)!;
+        var scan = lexerType.GetMethod("Scan", BindingFlags.Public | BindingFlags.Static)
+            ?? throw new InvalidOperationException("Lexer.Scan was not found.");
+        var parserType = assembly.GetType("Parser", throwOnError: true)!;
+        var parserConstructor = parserType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Single(constructor => constructor.GetParameters().Length == 3);
+        var parse = parserType.GetMethod("Parse", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Parser.Parse was not found.");
+
+        var parsedPrograms = new List<object>();
+        foreach (var (module, source) in sources)
+        {
+            var file = Path.Combine(harness.TemporaryRoot, module.Replace("::", Path.DirectorySeparatorChar.ToString()) + ".lang");
+            var tokens = scan.Invoke(null, [source, file, diagnostics])
+                ?? throw new InvalidOperationException("Lexer.Scan returned no tokens.");
+            var parser = parserConstructor.Invoke([tokens, file, diagnostics]);
+            parsedPrograms.Add(parse.Invoke(parser, null)
+                ?? throw new InvalidOperationException($"Could not parse route module '{module}'."));
+        }
+
+        var diagnosticCount = (int)diagnosticsListType.GetProperty("Count")!.GetValue(diagnostics)!;
+        if (diagnosticCount != 0)
+            throw new InvalidOperationException("Route package test input produced parser diagnostics.");
+
+        var moduleInputType = assembly.GetType("PackageModuleInput", throwOnError: true)!;
+        var moduleInputConstructor = moduleInputType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Single(constructor => constructor.GetParameters().Length == 4);
+        var moduleListType = typeof(List<>).MakeGenericType(moduleInputType);
+        var moduleInputs = Activator.CreateInstance(moduleListType)!;
+        var add = moduleListType.GetMethod("Add")!;
+        foreach (var parsed in parsedPrograms)
+        {
+            var moduleInput = moduleInputConstructor.Invoke([
+                "root",
+                parsed,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                "route-root"]);
+            add.Invoke(moduleInputs, [moduleInput]);
+        }
+
+        var compilerType = assembly.GetType("Compiler", throwOnError: true)!;
+        var checkPackage = compilerType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(method => method.Name == "CheckPackage" && method.GetParameters().Length == 6);
+        var result = checkPackage.Invoke(null, [moduleInputs, "root", "app::main", null, false, true])
+            ?? throw new InvalidOperationException("Compiler.CheckPackage returned no result.");
+        var resultDiagnostics = result.GetType().GetProperty("Diagnostics")!.GetValue(result)
+            ?? throw new InvalidOperationException("Compiler.CheckPackage returned no diagnostics list.");
+        var diagnosticCodes = ((System.Collections.IEnumerable)resultDiagnostics).Cast<object>()
+            .Select(item => item.GetType().GetProperty("Code")?.GetValue(item)?.ToString() ?? string.Empty)
+            .ToArray();
+        var program = result.GetType().GetProperty("Program")?.GetValue(result);
+        return (program, diagnosticCodes);
+    }
     private static async Task TestGenericFunctionRestrictions(Harness harness)
     {
         var librarySource = await File.ReadAllTextAsync(Path.Combine(

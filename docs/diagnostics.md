@@ -32,7 +32,11 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_CAPABILITY_MISSING | An operation requires an opaque capability that is absent, has the wrong type, or is not granted to the executable CLI command | Implemented for `FsRead.read_text` and the `fs.read` CLI manifest grant |
 | E_COMMAND_DECL | Typed CLI command declaration is malformed, duplicated, uses an unsupported type/default (including empty or NUL `FilePath` option defaults), appears in a library package, conflicts with `main`, or violates the command-count/argument requirements | Implemented for PR1 typed commands |
 | E_COMMAND_HANDLER | Command handler or error formatter is not a fully qualified function with the required generated argument/result signature | Implemented for PR1 typed commands |
-| E_ROUTE_RESPONSE_MISSING | Response variant has no mapping | Planned |
+| E_ROUTE_DECL | Invalid route placement, method/path/body/status, unknown response variant, or duplicate method/path | Implemented |
+| E_ROUTE_HANDLER | Missing, duplicate, or signature-incompatible route handler | Implemented; unresolved/private qualified references retain `E_NAME_UNRESOLVED`/`E_ACCESS_PRIVATE` |
+| E_ROUTE_RESPONSE_DUPLICATE | A response variant is mapped more than once | Implemented |
+| E_ROUTE_RESPONSE_MISSING | A declared response variant has no mapping | Implemented |
+| E_ROUTE_CODEC_UNSUPPORTED | Unsupported response payload, content format, or JSON shape | Implemented |
 | E_RESOURCE_ESCAPE | Scoped resource escapes its lexical scope | Planned |
 
 Typed CLI runtime parsing reports stable stderr codes and exits 2: `CLI_UNKNOWN_COMMAND`, `CLI_UNKNOWN_OPTION`, `CLI_MISSING_ARGUMENT`, `CLI_MISSING_VALUE`, `CLI_DUPLICATE_OPTION`, or `CLI_INVALID_VALUE`. Empty or NUL `FilePath` arguments and invalid `i32` values report `CLI_INVALID_VALUE`. Control characters in diagnostic subjects are escaped so each parse error stays on one physical stderr line. These are runtime results, not compiler diagnostics. `Ok(Text)` writes stdout and exits 0; formatted `Err(E)` writes stderr and exits 3; unexpected runtime faults exit 70. Top-level and command help exit 0.

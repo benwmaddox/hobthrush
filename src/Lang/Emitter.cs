@@ -166,6 +166,7 @@ internal static class Emitter
 
             EmitBuiltinTypes();
             if (NeedsFilePathType) EmitFilePathType();
+            if (NeedsHtmlType) EmitHtmlType();
             if (NeedsFsReadType) EmitFsReadType();
             if (NeedsFsErrorType) EmitFsErrorType();
             foreach (var union in program.Unions) EmitUnion(union);
@@ -216,6 +217,15 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        internal FilePath(string value) => Value = value;");
             _source.AppendLine("        internal string Value { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitHtmlType()
+        {
+            _source.AppendLine("    public sealed class Html");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal Html() { }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -985,6 +995,7 @@ internal static class Emitter
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.FilePath => "FilePath",
+            LangTypeKind.Html => "Html",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
@@ -1009,6 +1020,8 @@ internal static class Emitter
             "T" + ordinal.ToString(CultureInfo.InvariantCulture);
 
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
+
+        private bool NeedsHtmlType => UsesTypeKind(LangTypeKind.Html);
 
         private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText ||
             program.Commands.Any(command => command.RequiresFsRead);

@@ -1,3 +1,25 @@
 module fixture::route_example;
-pub union Reply { Found(Text), Missing }
-route GET "/items/{id}" { path id: i32; handler: get_item; response Found: 200 json Text; response Missing: 404; }
+
+union Reply { Found(Text), Missing }
+struct Payload { value: Text }
+
+fn get_item() -> self::fixture::route_example::Reply effects {} {
+    return self::fixture::route_example::Reply.Found("found");
+}
+
+fn create_item(payload: self::fixture::route_example::Payload) -> self::fixture::route_example::Reply effects {} {
+    return self::fixture::route_example::Reply.Found(payload.value);
+}
+
+route GET "/items" {
+    handler: self::fixture::route_example::get_item;
+    response Found: 200 json Text;
+    response Missing: 404;
+}
+
+route POST "/items" {
+    body: self::fixture::route_example::Payload;
+    handler: self::fixture::route_example::create_item;
+    response Found: 201 json Text;
+    response Missing: 400;
+}
