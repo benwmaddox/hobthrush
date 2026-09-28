@@ -54,7 +54,7 @@ Native AOT requires the matching .NET native toolchain and a build host whose OS
 
 ## Later gates
 
-The compiler now checks a bounded typed route contract for single-file roots, but package web-mode selection, a web host, OpenAPI output, a `net.listen` grant, an HTML runtime or builder, asynchronous request handling and cancellation, scoped resources, other application grants, Git and registry dependency sources, dependency cache/install commands, SQLite, the full `lang audit`, and the complete maintained V1 library/CLI/web example projects remain future work. `lang inspect effects` reports compiler-derived function metadata, but does not audit or prove trusted runtime code and is not a sandbox. The maintained scan CLI is functional. Handlers retain normal effect checking. This does not complete M2 or the V1 promise. Build receipts are also pending.
+The compiler now supports managed `kind = "web"` packages with static typed routes, a checked `net.listen` grant, deterministic OpenAPI output, and safe Html builders. The maintained [`examples/web`](../examples/web) package runs on the ASP.NET host and consumes the shared validation library. SQLite persistence is the next web-example milestone; source-level asynchronous handlers and cancellation, scoped resources, other application grants, Git and registry dependency sources, dependency cache/install commands, the full `lang audit`, and build receipts remain future work. `lang inspect effects` reports compiler-derived function metadata, but does not audit or prove trusted runtime code and is not a sandbox. This milestone does not complete M2 or the V1 promise.
 
 ## MS1 - memory-semantics design (not started)
 

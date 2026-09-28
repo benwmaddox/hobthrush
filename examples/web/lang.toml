@@ -1,0 +1,11 @@
+name = "web-example"
+version = "0.1.0"
+kind = "web"
+source_root = "src"
+entry_module = "app::main"
+
+[capabilities]
+net.listen = "allow"
+
+[dependencies]
+validation = "../text-validation"

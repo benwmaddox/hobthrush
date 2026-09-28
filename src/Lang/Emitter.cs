@@ -15,11 +15,212 @@ internal static class Emitter
         var entryCommand = program.EntryCommandId is int commandId
             ? program.Commands.FirstOrDefault(command => command.Id == commandId)
             : null;
-        if (executable && entry is null && entryCommand is null)
+        var webHost = executable && program.Routes.Count != 0;
+        if (executable && entry is null && entryCommand is null && !webHost)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
 
         var emitter = new SourceEmitter(program);
-        return emitter.Emit(entry, executable, command: entryCommand);
+        return emitter.Emit(entry, executable, command: entryCommand, webHost: webHost);
+    }
+
+    public static string EmitOpenApi(CheckedProgram program)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("openapi", "3.1.0");
+            writer.WriteStartObject("info");
+            writer.WriteString("title", program.EntryModule ?? "Lang API");
+            writer.WriteString("version", "1.0.0");
+            writer.WriteEndObject();
+
+            writer.WriteStartObject("paths");
+            foreach (var pathGroup in program.Routes
+                         .OrderBy(route => route.Path, StringComparer.Ordinal)
+                         .ThenBy(route => RouteMethodOrder(route.Method))
+                         .GroupBy(route => route.Path, StringComparer.Ordinal))
+            {
+                writer.WriteStartObject(pathGroup.Key);
+                foreach (var route in pathGroup.OrderBy(route => RouteMethodOrder(route.Method)))
+                    WriteOpenApiOperation(writer, program, route);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+
+            var componentStructIds = OpenApiComponentStructIds(program);
+            if (componentStructIds.Count != 0)
+            {
+                writer.WriteStartObject("components");
+                writer.WriteStartObject("schemas");
+                foreach (var structure in program.Structs.Where(item => componentStructIds.Contains(item.Id)).OrderBy(item => item.Id))
+                {
+                    writer.WriteStartObject(OpenApiStructName(structure.Id));
+                    writer.WriteString("title", structure.Name);
+                    writer.WriteString("type", "object");
+                    writer.WriteStartObject("properties");
+                    foreach (var field in structure.Fields.OrderBy(field => field.Index))
+                    {
+                        writer.WritePropertyName(field.Name);
+                        WriteOpenApiTypeSchema(writer, field.Type);
+                    }
+                    writer.WriteEndObject();
+                    writer.WriteStartArray("required");
+                    foreach (var field in structure.Fields.OrderBy(field => field.Index))
+                        writer.WriteStringValue(field.Name);
+                    writer.WriteEndArray();
+                    writer.WriteBoolean("additionalProperties", false);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndObject();
+            writer.Flush();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray()).Replace("\r\n", "\n", StringComparison.Ordinal) + "\n";
+    }
+
+    private static int RouteMethodOrder(string method) => method switch
+    {
+        "GET" => 0,
+        "POST" => 1,
+        _ => 2
+    };
+
+    private static string OpenApiStructName(int id) => "Struct_" + id.ToString(CultureInfo.InvariantCulture);
+
+    private static void WriteOpenApiOperation(Utf8JsonWriter writer, CheckedProgram program, CheckedRoute route)
+    {
+        writer.WriteStartObject(route.Method.ToLowerInvariant());
+        if (route.BodyType is not null)
+        {
+            writer.WriteStartObject("requestBody");
+            writer.WriteBoolean("required", true);
+            writer.WriteStartObject("content");
+            writer.WriteStartObject("application/json");
+            writer.WritePropertyName("schema");
+            WriteOpenApiTypeSchema(writer, route.BodyType);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        writer.WriteStartObject("responses");
+        foreach (var statusGroup in route.Responses.OrderBy(response => response.StatusCode)
+                     .ThenBy(response => response.VariantId).GroupBy(response => response.StatusCode))
+        {
+            var responses = statusGroup.OrderBy(response => response.VariantId).ToArray();
+            writer.WriteStartObject(statusGroup.Key.ToString(CultureInfo.InvariantCulture));
+            writer.WriteString("description", string.Join(", ", responses.Select(response => response.VariantName)));
+
+            if (!IsBodyForbiddenStatus(statusGroup.Key))
+            {
+                var jsonPayloads = responses
+                    .Where(response => response.ContentKind == CheckedRouteContentKind.Json && response.PayloadType is not null)
+                    .Select(response => response.PayloadType!)
+                    .Distinct()
+                    .ToArray();
+                var htmlPayloads = responses
+                    .Where(response => response.ContentKind == CheckedRouteContentKind.Html)
+                    .ToArray();
+                if (jsonPayloads.Length != 0 || htmlPayloads.Length != 0)
+                {
+                    writer.WriteStartObject("content");
+                    if (jsonPayloads.Length != 0)
+                    {
+                        writer.WriteStartObject("application/json");
+                        writer.WritePropertyName("schema");
+                        if (jsonPayloads.Length == 1)
+                            WriteOpenApiTypeSchema(writer, jsonPayloads[0]);
+                        else
+                        {
+                            writer.WriteStartObject();
+                            writer.WriteStartArray("oneOf");
+                            foreach (var payload in jsonPayloads)
+                                WriteOpenApiTypeSchema(writer, payload);
+                            writer.WriteEndArray();
+                            writer.WriteEndObject();
+                        }
+                        writer.WriteEndObject();
+                    }
+                    if (htmlPayloads.Length != 0)
+                    {
+                        writer.WriteStartObject("text/html");
+                        writer.WriteStartObject("schema");
+                        writer.WriteString("type", "string");
+                        writer.WriteEndObject();
+                        writer.WriteEndObject();
+                    }
+                    writer.WriteEndObject();
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+    }
+
+    private static bool IsBodyForbiddenStatus(int statusCode) =>
+        statusCode is >= 100 and < 200 or 204 or 205 or 304;
+
+    private static void WriteOpenApiTypeSchema(Utf8JsonWriter writer, LangType type)
+    {
+        switch (type.Kind)
+        {
+            case LangTypeKind.I32:
+                writer.WriteStartObject();
+                writer.WriteString("type", "integer");
+                writer.WriteString("format", "int32");
+                writer.WriteEndObject();
+                break;
+            case LangTypeKind.Bool:
+                writer.WriteStartObject();
+                writer.WriteString("type", "boolean");
+                writer.WriteEndObject();
+                break;
+            case LangTypeKind.Text:
+                writer.WriteStartObject();
+                writer.WriteString("type", "string");
+                writer.WriteEndObject();
+                break;
+            case LangTypeKind.Struct:
+                writer.WriteStartObject();
+                writer.WriteString("$ref", "#/components/schemas/" + OpenApiStructName(type.StructId));
+                writer.WriteEndObject();
+                break;
+            default:
+                throw new InvalidOperationException("Unsupported type in checked OpenAPI schema");
+        }
+    }
+
+    private static HashSet<int> OpenApiComponentStructIds(CheckedProgram program)
+    {
+        var result = new HashSet<int>();
+        var pending = new Stack<int>();
+        foreach (var route in program.Routes)
+        {
+            if (route.BodyType?.Kind == LangTypeKind.Struct)
+                pending.Push(route.BodyType.StructId);
+            foreach (var response in route.Responses.Where(response => response.ContentKind == CheckedRouteContentKind.Json))
+                if (response.PayloadType?.Kind == LangTypeKind.Struct)
+                    pending.Push(response.PayloadType.StructId);
+        }
+
+        while (pending.Count != 0)
+        {
+            var id = pending.Pop();
+            if (!result.Add(id)) continue;
+            var structure = program.Structs.Single(item => item.Id == id);
+            foreach (var field in structure.Fields)
+                if (field.Type.Kind == LangTypeKind.Struct)
+                    pending.Push(field.Type.StructId);
+        }
+
+        return result;
     }
 
     public static string EmitCommandSchema(CheckedProgram program)
@@ -146,17 +347,30 @@ internal static class Emitter
             CheckedFunction? entry,
             bool executable,
             IReadOnlyList<CheckedTest>? tests = null,
-            CheckedCommand? command = null)
+            CheckedCommand? command = null,
+            bool webHost = false)
         {
             _source.AppendLine("using System;");
             _source.AppendLine("using System.Globalization;");
-            if (UsesFsReadText)
+            if (webHost)
             {
                 _source.AppendLine("using System.IO;");
-                _source.AppendLine("using System.Security;");
+                _source.AppendLine("using System.Diagnostics;");
                 _source.AppendLine("using System.Text;");
+                _source.AppendLine("using System.Text.Json;");
+                _source.AppendLine("using System.Threading;");
+                _source.AppendLine("using System.Threading.Tasks;");
+                _source.AppendLine("using Microsoft.AspNetCore.Builder;");
+                _source.AppendLine("using Microsoft.AspNetCore.Http;");
+                _source.AppendLine("using Microsoft.Extensions.Logging;");
             }
-            else if (UsesTextLength || command is not null)
+            if (UsesFsReadText)
+            {
+                if (!webHost) _source.AppendLine("using System.IO;");
+                _source.AppendLine("using System.Security;");
+                if (!webHost) _source.AppendLine("using System.Text;");
+            }
+            else if (!webHost && (UsesTextLength || UsesHtmlBuilders || command is not null))
             {
                 _source.AppendLine("using System.Text;");
             }
@@ -174,11 +388,14 @@ internal static class Emitter
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesTextLength) EmitTextLengthHelper();
+            if (UsesHtmlBuilders) EmitHtmlHelpers();
             EmitArithmeticHelpers();
             if (tests is not null)
                 EmitTestEntryPoint(tests);
             else if (command is not null)
                 EmitCommandEntryPoint(command);
+            else if (webHost)
+                EmitWebHost();
             else if (executable)
                 EmitEntryPoint(entry!);
 
@@ -225,7 +442,8 @@ internal static class Emitter
         {
             _source.AppendLine("    public sealed class Html");
             _source.AppendLine("    {");
-            _source.AppendLine("        internal Html() { }");
+            _source.AppendLine("        internal Html(string value) => Value = value;");
+            _source.AppendLine("        internal string Value { get; }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -380,6 +598,16 @@ internal static class Emitter
                 EmitFsReadText(expression),
             BuiltinIntrinsic.FsReadText =>
                 throw new InvalidOperationException("FsRead.read_text requires a receiver and a path"),
+            BuiltinIntrinsic.HtmlText when expression.Arguments.Count == 1 =>
+                "HtmlText(" + EmitExpr(expression.Arguments[0]) + ")",
+            BuiltinIntrinsic.HtmlHeading when expression.Arguments.Count == 1 =>
+                "HtmlHeading(" + EmitExpr(expression.Arguments[0]) + ")",
+            BuiltinIntrinsic.HtmlParagraph when expression.Arguments.Count == 1 =>
+                "HtmlParagraph(" + EmitExpr(expression.Arguments[0]) + ")",
+            BuiltinIntrinsic.HtmlConcat when expression.Arguments.Count == 2 =>
+                "HtmlConcat(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
+            BuiltinIntrinsic.HtmlDocument when expression.Arguments.Count == 2 =>
+                "HtmlDocument(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
             _ => throw new InvalidOperationException("Unknown builtin intrinsic")
         };
 
@@ -571,6 +799,446 @@ internal static class Emitter
             _source.AppendLine("        }");
             _source.AppendLine("    }");
             _source.AppendLine();
+        }
+
+        private void EmitHtmlHelpers()
+        {
+            _source.AppendLine("    private static string EscapeHtml(string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var escaped = new StringBuilder(value.Length);");
+            _source.AppendLine("        foreach (var character in value)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            switch (character)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                case '&': escaped.Append(\"&amp;\"); break;");
+            _source.AppendLine("                case '<': escaped.Append(\"&lt;\"); break;");
+            _source.AppendLine("                case '>': escaped.Append(\"&gt;\"); break;");
+            _source.AppendLine("                case '\"': escaped.Append(\"&quot;\"); break;");
+            _source.AppendLine("                case '\\'': escaped.Append(\"&#x27;\"); break;");
+            _source.AppendLine("                default: escaped.Append(character); break;");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("        return escaped.ToString();");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static Html HtmlText(string value) => new Html(EscapeHtml(value));");
+            _source.AppendLine("    private static Html HtmlHeading(string value) => new Html(\"<h1>\" + EscapeHtml(value) + \"</h1>\");");
+            _source.AppendLine("    private static Html HtmlParagraph(string value) => new Html(\"<p>\" + EscapeHtml(value) + \"</p>\");");
+            _source.AppendLine("    private static Html HtmlConcat(Html left, Html right) => new Html(left.Value + right.Value);");
+            _source.AppendLine("    private static Html HtmlDocument(string title, Html content) => new Html(\"<!doctype html><html><head><meta charset=\\\"utf-8\\\"><title>\" + EscapeHtml(title) + \"</title></head><body>\" + content.Value + \"</body></html>\");");
+            _source.AppendLine();
+        }
+
+        private void EmitWebHost()
+        {
+            _source.AppendLine("    private const int MaxRequestBodyBytes = 1048576;");
+            _source.AppendLine("    private const int MaxTransportRequestBodyBytes = MaxRequestBodyBytes + 65536;");
+            _source.AppendLine("    public static async Task Main(string[] args)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var builder = WebApplication.CreateBuilder(args);");
+            _source.AppendLine("        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = MaxTransportRequestBodyBytes);");
+            _source.AppendLine("        var app = builder.Build();");
+            _source.AppendLine("        using var standardInputMonitorCancellation = new CancellationTokenSource();");
+            _source.AppendLine("        StartStandardInputMonitor(app, standardInputMonitorCancellation.Token);");
+            foreach (var route in program.Routes.OrderBy(route => route.Id))
+            {
+                _source.Append("        app.MapMethods(").Append(JsonSerializer.Serialize(route.Path))
+                    .Append(", new[] { ").Append(JsonSerializer.Serialize(route.Method)).Append(" }, ")
+                    .Append("(HttpContext context) => HandleRoute_")
+                    .Append(route.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(context, app.Logger));");
+            }
+            _source.AppendLine("        using var parentMonitorCancellation = new CancellationTokenSource();");
+            _source.AppendLine("        var parentMonitor = MonitorParentProcessAsync(app, parentMonitorCancellation.Token);");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await app.RunAsync();");
+            _source.AppendLine("        }");
+            _source.AppendLine("        finally");
+            _source.AppendLine("        {");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await app.DisposeAsync();");
+            _source.AppendLine("            }");
+            _source.AppendLine("            finally");
+            _source.AppendLine("            {");
+            _source.AppendLine("                try");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    standardInputMonitorCancellation.Cancel();");
+            _source.AppendLine("                }");
+            _source.AppendLine("                finally");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    try");
+            _source.AppendLine("                    {");
+            _source.AppendLine("                        parentMonitorCancellation.Cancel();");
+            _source.AppendLine("                    }");
+            _source.AppendLine("                    finally");
+            _source.AppendLine("                    {");
+            _source.AppendLine("                        await parentMonitor;");
+            _source.AppendLine("                    }");
+            _source.AppendLine("                }");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            EmitParentProcessMonitor();
+            EmitStandardInputMonitor();
+            EmitRequestRuntime();
+            foreach (var route in program.Routes.OrderBy(route => route.Id))
+                EmitRouteHandler(route);
+            EmitJsonResponseRuntime();
+        }
+
+        private void EmitParentProcessMonitor()
+        {
+            _source.AppendLine("    private static async Task MonitorParentProcessAsync(WebApplication app, CancellationToken cancellationToken)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var parentIdText = Environment.GetEnvironmentVariable(\"LANG_PARENT_PROCESS_ID\");");
+            _source.AppendLine("        if (!int.TryParse(parentIdText, NumberStyles.None, CultureInfo.InvariantCulture, out var parentId) || parentId <= 0) return;");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            using var parent = Process.GetProcessById(parentId);");
+            _source.AppendLine("            await parent.WaitForExitAsync(cancellationToken);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }");
+            _source.AppendLine("        catch (ArgumentException) { }");
+            _source.AppendLine("        catch (InvalidOperationException) { }");
+            _source.AppendLine("        catch (System.ComponentModel.Win32Exception) { }");
+            _source.AppendLine("        if (cancellationToken.IsCancellationRequested) return;");
+            _source.AppendLine("        app.Lifetime.StopApplication();");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }");
+            _source.AppendLine("        if (!cancellationToken.IsCancellationRequested) Environment.Exit(0);");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitStandardInputMonitor()
+        {
+            _source.AppendLine("    private static void StartStandardInputMonitor(WebApplication app, CancellationToken cancellationToken)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (!Console.IsInputRedirected) return;");
+            _source.AppendLine("        _ = Task.Run(async () =>");
+            _source.AppendLine("        {");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                _ = Console.In.ReadLine();");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (IOException) { }");
+            _source.AppendLine("            catch (ObjectDisposedException) { }");
+            _source.AppendLine("            app.Lifetime.StopApplication();");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }");
+            _source.AppendLine("            if (!cancellationToken.IsCancellationRequested) Environment.Exit(0);");
+            _source.AppendLine("        });");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitRequestRuntime()
+        {
+            _source.AppendLine("    private sealed class RequestTooLargeException : Exception { }");
+            _source.AppendLine("    private static async Task<byte[]> ReadLimitedRequestBodyAsync(HttpRequest request)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var exceedsLimit = request.ContentLength is long contentLength && contentLength > MaxRequestBodyBytes;");
+            _source.AppendLine("        using var output = new MemoryStream();");
+            _source.AppendLine("        var buffer = new byte[8192];");
+            _source.AppendLine("        var total = 0;");
+            _source.AppendLine("        while (true)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var read = await request.Body.ReadAsync(buffer.AsMemory(), request.HttpContext.RequestAborted);");
+            _source.AppendLine("            if (read == 0) break;");
+            _source.AppendLine("            var remainingBufferCapacity = Math.Max(0, MaxRequestBodyBytes - total);");
+            _source.AppendLine("            var buffered = Math.Min(read, remainingBufferCapacity);");
+            _source.AppendLine("            if (buffered != 0) output.Write(buffer, 0, buffered);");
+            _source.AppendLine("            total += read;");
+            _source.AppendLine("            if (total > MaxRequestBodyBytes) exceedsLimit = true;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        if (exceedsLimit) throw new RequestTooLargeException();");
+            _source.AppendLine("        return output.ToArray();");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            var requestStructIds = RequestBodyStructIds();
+            foreach (var id in requestStructIds.OrderBy(id => id))
+                EmitRequestStructDecoder(program.Structs.Single(structure => structure.Id == id));
+            if (requestStructIds.Count != 0)
+            {
+                _source.AppendLine("    private static int DecodeJsonI32(JsonElement value)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var result)) throw new JsonException();");
+                _source.AppendLine("        return result;");
+                _source.AppendLine("    }");
+                _source.AppendLine("    private static bool DecodeJsonBool(JsonElement value)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new JsonException();");
+                _source.AppendLine("        return value.GetBoolean();");
+                _source.AppendLine("    }");
+                _source.AppendLine("    private static string DecodeJsonText(JsonElement value)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        if (value.ValueKind != JsonValueKind.String) throw new JsonException();");
+                _source.AppendLine("        return value.GetString() ?? throw new JsonException();");
+                _source.AppendLine("    }");
+                _source.AppendLine();
+            }
+        }
+
+        private HashSet<int> RequestBodyStructIds()
+        {
+            var result = new HashSet<int>();
+            var pending = new Stack<int>(program.Routes
+                .Where(route => route.Method == "POST" && route.BodyType?.Kind == LangTypeKind.Struct)
+                .Select(route => route.BodyType!.StructId));
+            while (pending.Count != 0)
+            {
+                var id = pending.Pop();
+                if (!result.Add(id)) continue;
+                var structure = program.Structs.Single(item => item.Id == id);
+                foreach (var field in structure.Fields)
+                    if (field.Type.Kind == LangTypeKind.Struct)
+                        pending.Push(field.Type.StructId);
+            }
+            return result;
+        }
+
+        private void EmitRequestStructDecoder(CheckedStruct structure)
+        {
+            var id = structure.Id.ToString(CultureInfo.InvariantCulture);
+            _source.Append("    private static Struct_").Append(id).Append(" DecodeJsonStruct_").Append(id).AppendLine("(JsonElement element)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (element.ValueKind != JsonValueKind.Object) throw new JsonException();");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                var index = field.Index.ToString(CultureInfo.InvariantCulture);
+                var defaultValue = field.Type.Kind switch
+                {
+                    LangTypeKind.I32 => "0",
+                    LangTypeKind.Bool => "false",
+                    LangTypeKind.Text => "string.Empty",
+                    LangTypeKind.Struct => "default!",
+                    _ => throw new InvalidOperationException("Unsupported checked JSON request field")
+                };
+                _source.Append("        ").Append(EmitType(field.Type)).Append(" field_").Append(index)
+                    .Append(" = ").Append(defaultValue).AppendLine(";");
+                _source.Append("        var seen_").Append(index).AppendLine(" = false;");
+            }
+            _source.AppendLine("        foreach (var property in element.EnumerateObject())");
+            _source.AppendLine("        {");
+            _source.AppendLine("            switch (property.Name)");
+            _source.AppendLine("            {");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                var index = field.Index.ToString(CultureInfo.InvariantCulture);
+                _source.Append("                case ").Append(JsonSerializer.Serialize(field.Name)).AppendLine(":");
+                _source.Append("                    if (seen_").Append(index).AppendLine(") throw new JsonException();");
+                _source.Append("                    seen_").Append(index).AppendLine(" = true;");
+                _source.Append("                    field_").Append(index).Append(" = ").Append(DecodeJsonValue(field.Type, "property.Value")).AppendLine(";");
+                _source.AppendLine("                    break;");
+            }
+            _source.AppendLine("                default: throw new JsonException();");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+                _source.Append("        if (!seen_").Append(field.Index.ToString(CultureInfo.InvariantCulture)).AppendLine(") throw new JsonException();");
+            _source.Append("        return new Struct_").Append(id).Append('(')
+                .Append(string.Join(", ", structure.Fields.OrderBy(field => field.Index).Select(field =>
+                    "Field_" + field.Index.ToString(CultureInfo.InvariantCulture) + ": field_" +
+                    field.Index.ToString(CultureInfo.InvariantCulture))))
+                .AppendLine(");");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private static string DecodeJsonValue(LangType type, string value) => type.Kind switch
+        {
+            LangTypeKind.I32 => "DecodeJsonI32(" + value + ")",
+            LangTypeKind.Bool => "DecodeJsonBool(" + value + ")",
+            LangTypeKind.Text => "DecodeJsonText(" + value + ")",
+            LangTypeKind.Struct => "DecodeJsonStruct_" + type.StructId.ToString(CultureInfo.InvariantCulture) + "(" + value + ")",
+            _ => throw new InvalidOperationException("Unsupported checked JSON request field")
+        };
+
+        private void EmitRouteHandler(CheckedRoute route)
+        {
+            var routeId = route.Id.ToString(CultureInfo.InvariantCulture);
+            var handler = program.Functions.Single(function => function.Id == route.HandlerFunctionId);
+            var union = program.Unions.Single(item => item.Id == route.ReplyUnionId);
+            _source.Append("    private static async Task HandleRoute_").Append(routeId)
+                .AppendLine("(HttpContext context, ILogger logger)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            if (route.Method == "POST")
+            {
+                var bodyType = route.BodyType ?? throw new InvalidOperationException("Checked POST route has no body type");
+                if (bodyType.Kind != LangTypeKind.Struct)
+                    throw new InvalidOperationException("Checked POST route body is not a struct");
+                _source.AppendLine("            var requestBytes = await ReadLimitedRequestBodyAsync(context.Request);");
+                _source.AppendLine("            using var requestJson = JsonDocument.Parse(requestBytes, new JsonDocumentOptions { MaxDepth = 64, CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false });");
+                _source.Append("            var requestValue = DecodeJsonStruct_").Append(bodyType.StructId.ToString(CultureInfo.InvariantCulture))
+                    .AppendLine("(requestJson.RootElement);");
+                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(requestValue);");
+            }
+            else
+            {
+                _source.Append("            var reply = Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("();");
+            }
+
+            _source.AppendLine("            switch (reply)");
+            _source.AppendLine("            {");
+            foreach (var response in route.Responses.OrderBy(response => response.VariantId))
+            {
+                var variant = union.Variants.Single(item => item.Id == response.VariantId);
+                var unionId = union.Id.ToString(CultureInfo.InvariantCulture);
+                var variantType = "Union_" + unionId + ".Variant_" + unionId + "_" +
+                                  variant.Id.ToString(CultureInfo.InvariantCulture);
+                if (variant.Fields.Count == 0)
+                {
+                    _source.Append("                case ").Append(variantType).AppendLine(":");
+                    _source.Append("                    await WriteNoContentAsync(context, ")
+                        .Append(response.StatusCode.ToString(CultureInfo.InvariantCulture)).AppendLine(");");
+                }
+                else
+                {
+                    var payloadType = response.PayloadType ?? throw new InvalidOperationException("Checked response payload type is missing");
+                    var valueName = "responseValue_" + response.VariantId.ToString(CultureInfo.InvariantCulture);
+                    _source.Append("                case ").Append(variantType).Append("(var ").Append(valueName).AppendLine("):");
+                    if (response.ContentKind == CheckedRouteContentKind.Html)
+                    {
+                        _source.Append("                    await WriteHtmlResponseAsync(context, ")
+                            .Append(response.StatusCode.ToString(CultureInfo.InvariantCulture)).Append(", ").Append(valueName).AppendLine(");");
+                    }
+                    else if (response.ContentKind == CheckedRouteContentKind.Json)
+                    {
+                        _source.Append("                    await WriteJsonResponseAsync(context, ")
+                            .Append(response.StatusCode.ToString(CultureInfo.InvariantCulture)).Append(", ").Append(valueName)
+                            .Append(", (Action<Utf8JsonWriter, ").Append(EmitType(payloadType)).Append(">)WriteJson);").AppendLine();
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Checked payload response has no content kind");
+                    }
+                }
+                _source.AppendLine("                    return;");
+            }
+            _source.AppendLine("                default:");
+            _source.AppendLine("                    await WriteErrorAsync(context, 500, \"{\\\"error\\\":\\\"internal_server_error\\\"}\", includeRequestId: true);");
+            _source.AppendLine("                    return;");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (RequestTooLargeException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteErrorAsync(context, 413, \"{\\\"error\\\":\\\"payload_too_large\\\"}\");");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (BadHttpRequestException error) when (error.StatusCode == 413)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteErrorAsync(context, 413, \"{\\\"error\\\":\\\"payload_too_large\\\"}\");");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (JsonException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteErrorAsync(context, 400, \"{\\\"error\\\":\\\"invalid_request\\\"}\");");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (BadHttpRequestException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteErrorAsync(context, 400, \"{\\\"error\\\":\\\"invalid_request\\\"}\");");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (Exception error)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            logger.LogError(error, \"Unhandled request fault {RequestId}\", context.TraceIdentifier);");
+            _source.AppendLine("            await WriteErrorAsync(context, 500, \"{\\\"error\\\":\\\"internal_server_error\\\"}\", includeRequestId: true);");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitJsonResponseRuntime()
+        {
+            _source.AppendLine("    private static bool IsBodyForbidden(int statusCode) => statusCode is >= 100 and < 200 or 204 or 205 or 304;");
+            _source.AppendLine("    private static Task WriteNoContentAsync(HttpContext context, int statusCode)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        context.Response.StatusCode = statusCode;");
+            _source.AppendLine("        return Task.CompletedTask;");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static async Task WriteJsonResponseAsync<T>(HttpContext context, int statusCode, T value, Action<Utf8JsonWriter, T> writeValue)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        context.Response.StatusCode = statusCode;");
+            _source.AppendLine("        if (IsBodyForbidden(statusCode)) return;");
+            _source.AppendLine("        context.Response.ContentType = \"application/json; charset=utf-8\";");
+            _source.AppendLine("        var bodyWriter = context.Response.BodyWriter;");
+            _source.AppendLine("        using (var writer = new Utf8JsonWriter(bodyWriter))");
+            _source.AppendLine("        {");
+            _source.AppendLine("            writeValue(writer, value);");
+            _source.AppendLine("            writer.Flush();");
+            _source.AppendLine("        }");
+            _source.AppendLine("        await bodyWriter.FlushAsync(context.RequestAborted);");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static async Task WriteHtmlResponseAsync(HttpContext context, int statusCode, Html value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        context.Response.StatusCode = statusCode;");
+            _source.AppendLine("        if (IsBodyForbidden(statusCode)) return;");
+            _source.AppendLine("        context.Response.ContentType = \"text/html; charset=utf-8\";");
+            _source.AppendLine("        await context.Response.WriteAsync(value.Value, Encoding.UTF8, context.RequestAborted);");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static async Task WriteErrorAsync(HttpContext context, int statusCode, string body, bool includeRequestId = false)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (context.Response.HasStarted) { context.Abort(); return; }");
+            _source.AppendLine("        context.Response.Clear();");
+            _source.AppendLine("        context.Response.StatusCode = statusCode;");
+            _source.AppendLine("        context.Response.ContentType = \"application/json; charset=utf-8\";");
+            _source.AppendLine("        if (includeRequestId) context.Response.Headers[\"X-Request-Id\"] = context.TraceIdentifier;");
+            _source.AppendLine("        await context.Response.WriteAsync(body, Encoding.UTF8, context.RequestAborted);");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            _source.AppendLine("    private static void WriteJson(Utf8JsonWriter writer, int value) => writer.WriteNumberValue(value);");
+            _source.AppendLine("    private static void WriteJson(Utf8JsonWriter writer, bool value) => writer.WriteBooleanValue(value);");
+            _source.AppendLine("    private static void WriteJson(Utf8JsonWriter writer, string value) => writer.WriteStringValue(value);");
+            foreach (var id in JsonResponseStructIds().OrderBy(id => id))
+                EmitJsonStructWriter(program.Structs.Single(structure => structure.Id == id));
+            _source.AppendLine();
+        }
+
+        private HashSet<int> JsonResponseStructIds()
+        {
+            var result = new HashSet<int>();
+            var pending = new Stack<int>(program.Routes
+                .SelectMany(route => route.Responses)
+                .Where(response => response.ContentKind == CheckedRouteContentKind.Json && response.PayloadType?.Kind == LangTypeKind.Struct)
+                .Select(response => response.PayloadType!.StructId));
+            while (pending.Count != 0)
+            {
+                var id = pending.Pop();
+                if (!result.Add(id)) continue;
+                var structure = program.Structs.Single(item => item.Id == id);
+                foreach (var field in structure.Fields)
+                    if (field.Type.Kind == LangTypeKind.Struct)
+                        pending.Push(field.Type.StructId);
+            }
+            return result;
+        }
+
+        private void EmitJsonStructWriter(CheckedStruct structure)
+        {
+            var id = structure.Id.ToString(CultureInfo.InvariantCulture);
+            _source.Append("    private static void WriteJson(Utf8JsonWriter writer, Struct_").Append(id).AppendLine(" value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        writer.WriteStartObject();");
+            foreach (var field in structure.Fields.OrderBy(field => field.Index))
+            {
+                _source.Append("        writer.WritePropertyName(").Append(JsonSerializer.Serialize(field.Name)).AppendLine(");");
+                _source.Append("        WriteJson(writer, value.Field_").Append(field.Index.ToString(CultureInfo.InvariantCulture)).AppendLine(");");
+            }
+            _source.AppendLine("        writer.WriteEndObject();");
+            _source.AppendLine("    }");
         }
 
         private void EmitEntryPoint(CheckedFunction entry)
@@ -1041,6 +1709,14 @@ internal static class Emitter
             .SelectMany(StatementExpressions)
             .SelectMany(EnumerateExpressions)
             .Any(expression => expression is TypedTextLengthExpr);
+
+        private bool UsesHtmlBuilders => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(expression => expression.Intrinsic is BuiltinIntrinsic.HtmlText or BuiltinIntrinsic.HtmlHeading or
+                BuiltinIntrinsic.HtmlParagraph or BuiltinIntrinsic.HtmlConcat or BuiltinIntrinsic.HtmlDocument);
 
         private bool UsesTypeKind(LangTypeKind kind) => EnumerateDeclaredTypes()
             .Any(type => ContainsTypeKind(type, kind));

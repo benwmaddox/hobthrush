@@ -249,7 +249,12 @@ internal sealed record TypedCallExpr(
 
 internal enum BuiltinIntrinsic
 {
-    FsReadText
+    FsReadText,
+    HtmlText,
+    HtmlHeading,
+    HtmlParagraph,
+    HtmlConcat,
+    HtmlDocument
 }
 
 internal sealed record TypedIntrinsicCallExpr(
@@ -1040,7 +1045,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return;
         }
 
-        var routeKeys = new HashSet<(string Method, string Path)>();
+        var routeKeys = new HashSet<(string Method, string Path)>(RouteKeyComparer.Instance);
         foreach (var route in module.Program.Routes)
         {
             var diagnosticCount = diagnostics.Count;
@@ -1232,7 +1237,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         LangType? payloadType = variant.Fields.Count == 1 ? variant.Fields[0].Type : null;
         var payloadTypeAt = response.BodyType?.At;
 
-        if (variant.Fields.Count == 0)
+        if (ForbidsResponseBody(response.StatusCode) && variant.Fields.Count != 0)
+        {
+            Add(
+                "E_ROUTE_CODEC_UNSUPPORTED",
+                $"HTTP status {response.StatusCode} does not allow a response body; map a zero-payload union variant instead",
+                response.At);
+        }
+        else if (variant.Fields.Count == 0)
         {
             if (response.Format is not null || response.BodyType is not null)
                 Add("E_ROUTE_CODEC_UNSUPPORTED", "A response variant without a payload cannot declare a content format", response.FormatAt ?? response.At);
@@ -1273,6 +1285,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             payloadTypeAt);
     }
 
+    private static bool ForbidsResponseBody(int statusCode) =>
+        statusCode is >= 100 and < 200 or 204 or 205 or 304;
+
     private bool IsJsonRouteType(LangType type, HashSet<int> activeStructs)
     {
         if (type.Kind is LangTypeKind.I32 or LangTypeKind.Bool or LangTypeKind.Text)
@@ -1310,6 +1325,20 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool IsSourceDeclaredStruct(StructSymbol structure) =>
         _modulesByIdentity[structure.ModuleIdentity].Program.Structs
             .Any(declaration => ReferenceEquals(declaration, structure.Declaration));
+
+    private sealed class RouteKeyComparer : IEqualityComparer<(string Method, string Path)>
+    {
+        public static RouteKeyComparer Instance { get; } = new();
+
+        public bool Equals((string Method, string Path) left, (string Method, string Path) right) =>
+            StringComparer.Ordinal.Equals(left.Method, right.Method) &&
+            StringComparer.OrdinalIgnoreCase.Equals(left.Path, right.Path);
+
+        public int GetHashCode((string Method, string Path) route) =>
+            HashCode.Combine(
+                StringComparer.Ordinal.GetHashCode(route.Method),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(route.Path));
+    }
 
     private void PopulateUnionVariants(ModuleSymbols module)
     {
@@ -2171,6 +2200,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
+            if (targetName.Name == "html" && IsHtmlBuilderMember(expression.Member))
+                return CheckHtmlBuilderIntrinsic(expression, locals, depth);
+
             if (targetName.Name == "FsError")
             {
                 foreach (var argument in expression.Arguments)
@@ -2267,6 +2299,47 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             : $"Member calls on values are not implemented for '{targetDescription}.{expression.Member}'";
         Add("E_UNSUPPORTED", unsupportedMessage, expression.MemberAt);
         return new TypedErrorExpr(expression.At);
+    }
+
+    private static bool IsHtmlBuilderMember(string member) =>
+        member is "text" or "heading" or "paragraph" or "concat" or "document";
+
+    private TypedExpr CheckHtmlBuilderIntrinsic(
+        MemberCallExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var (intrinsic, parameterTypes) = expression.Member switch
+        {
+            "text" => (BuiltinIntrinsic.HtmlText, new[] { LangType.Text }),
+            "heading" => (BuiltinIntrinsic.HtmlHeading, new[] { LangType.Text }),
+            "paragraph" => (BuiltinIntrinsic.HtmlParagraph, new[] { LangType.Text }),
+            "concat" => (BuiltinIntrinsic.HtmlConcat, new[] { LangType.Html, LangType.Html }),
+            "document" => (BuiltinIntrinsic.HtmlDocument, new[] { LangType.Text, LangType.Html }),
+            _ => throw new InvalidOperationException("Unknown Html builder intrinsic")
+        };
+
+        var hasCorrectArity = expression.Arguments.Count == parameterTypes.Length;
+        if (!hasCorrectArity)
+        {
+            var argumentWord = parameterTypes.Length == 1 ? "argument" : "arguments";
+            Add("E_TYPE_MISMATCH", $"Intrinsic 'html.{expression.Member}' expects {parameterTypes.Length} {argumentWord}, got {expression.Arguments.Count}", expression.MemberAt);
+        }
+
+        var arguments = new List<TypedExpr>(expression.Arguments.Count);
+        for (var i = 0; i < expression.Arguments.Count; i++)
+        {
+            var argument = CheckExpr(expression.Arguments[i], null, locals, depth);
+            arguments.Add(argument);
+            if (i < parameterTypes.Length && !argument.Type.IsError && argument.Type != parameterTypes[i])
+                AddMismatch(parameterTypes[i], argument.Type, expression.Arguments[i].At);
+        }
+
+        return new TypedIntrinsicCallExpr(
+            LangType.Html,
+            intrinsic,
+            ReadOnly(arguments),
+            expression.At);
     }
 
     private TypedExpr CheckBuiltinCall(
