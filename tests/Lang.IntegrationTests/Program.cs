@@ -76,6 +76,8 @@ internal static class IntegrationTests
             ("direct, transitive, recursive effects use deterministic shortest paths", TestEffectInferencePaths),
             ("inspect effects reports deterministic compiler-derived paths and trusted boundaries", TestInspectEffects),
             ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
+            ("inspect api exports a deterministic source-facing package graph", TestInspectApi),
+            ("inspect api projects checked web routes and database capabilities", TestInspectApiWebRoutes),
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
@@ -1871,6 +1873,438 @@ internal static class IntegrationTests
             AssertTrue(!result.StandardOutput.Contains("declared_effects", StringComparison.Ordinal),
                 message + " A report must not be emitted for a stale or missing lock.");
         }
+    }
+
+    private static async Task TestInspectApi(Harness harness)
+    {
+        var usage = await harness.InvokeCompilerCommandAsync();
+        var wrongArguments = await harness.InvokeCompilerCommandAsync("inspect", "api");
+        AssertEqual(2, wrongArguments.ExitCode, Describe(wrongArguments));
+        AssertEqual(string.Empty, wrongArguments.StandardOutput, Describe(wrongArguments));
+        AssertEqual(usage.StandardError, wrongArguments.StandardError, Describe(wrongArguments));
+        AssertTrue(wrongArguments.StandardError.Contains("inspect api PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
+            "Malformed inspect-api arguments should print the API command form.");
+
+        static string WithLineEnding(string text, string lineEnding) =>
+            text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", lineEnding, StringComparison.Ordinal);
+
+        Dictionary<string, PackageFixture> ApiGraph(string lineEnding)
+        {
+            const string rootSource = """
+                module app::main;
+                pub struct Envelope {
+                    records: List<Option<direct::records::Record>>,
+                    result: Result<direct::records::Record, direct::records::Status>
+                }
+                pub union ApiReply { Found(direct::records::Record), Empty }
+                struct HiddenRoot { note: Text }
+                fn hidden_root() -> i32 effects {} { return 1; }
+
+                pub fn generic_root<T>(items: List<Option<T>>) -> Result<Option<T>, direct::records::Status> effects {} {
+                    return Err(direct::records::Status.Empty);
+                }
+
+                command scan {
+                    help "Scan records.";
+                    argument path: FilePath help "Path to scan.";
+                    option limit: i32 = 3 help "Maximum records.";
+                    flag recursive help "Scan recursively.";
+                    handler: self::handlers::run;
+                    error: self::handlers::describe;
+                }
+                """;
+            const string handlersSource = """
+                module handlers;
+                pub fn run(args: self::app::main::ScanArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                    let loaded: Result<direct::records::Record, FsError> = direct::service::read_record(fs);
+                    return Ok("scan complete");
+                }
+                pub fn describe(error: FsError) -> Text effects {} {
+                    return match error {
+                        FsError.NotFound => "not found",
+                        FsError.PermissionDenied => "permission denied",
+                        FsError.InvalidPath => "invalid path",
+                        FsError.InvalidText => "invalid text",
+                        FsError.Io => "I/O error"
+                    };
+                }
+                """;
+            const string recordsSource = """
+                module records;
+                pub struct Record {
+                    id: i32,
+                    origin: Option<foundation::models::Origin>,
+                    revisions: List<Result<i32, foundation::models::Issue>>
+                }
+                pub union Status { Empty, Failed(foundation::models::Issue), Record(self::records::Record) }
+                struct HiddenDirect { secret: Text }
+                fn hidden_direct() -> i32 effects {} { return 2; }
+                pub fn wrap<T>(items: List<Option<T>>, outcome: Result<T, foundation::models::Issue>) -> Option<List<Result<T, self::records::Record>>> effects {} {
+                    return None;
+                }
+                """;
+            const string serviceSource = """
+                module service;
+                pub fn read_record(fs: FsRead) -> Result<self::records::Record, FsError> effects { fs.read } {
+                    let loaded: Result<Text, FsError> = foundation::service::read(fs);
+                    return match loaded {
+                        Ok(text) => Ok(self::records::Record {
+                            id: text.length,
+                            origin: Some(foundation::models::Origin { value: text.length }),
+                            revisions: []
+                        }),
+                        Err(error) => Err(error)
+                    };
+                }
+                """;
+            const string foundationSource = """
+                module models;
+                pub struct Origin { value: i32 }
+                pub union Issue { Missing, Failed(i32) }
+                """;
+            const string foundationService = """
+                module service;
+                pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                    return fs.read_text("record.txt");
+                }
+                """;
+
+            var rootManifest = "name = \"api-root\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "\n[capabilities]\nfs.read = \"allow\"\n"
+                + "\n[dependencies]\nzeta = \"../direct\"\ndirect = \"../direct\"\n";
+            var directManifest = LibraryPackageManifest("api-direct")
+                + "\n[dependencies]\nfoundation = \"../foundation\"\n";
+
+            return new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(WithLineEnding(rootManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = WithLineEnding(rootSource, lineEnding),
+                    ["src/handlers.lang"] = WithLineEnding(handlersSource, lineEnding)
+                }),
+                ["direct"] = new PackageFixture(WithLineEnding(directManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/records.lang"] = WithLineEnding(recordsSource, lineEnding),
+                    ["src/service.lang"] = WithLineEnding(serviceSource, lineEnding)
+                }),
+                ["foundation"] = new PackageFixture(
+                    WithLineEnding(LibraryPackageManifest("api-foundation"), lineEnding),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/models.lang"] = WithLineEnding(foundationSource, lineEnding),
+                        ["src/service.lang"] = WithLineEnding(foundationService, lineEnding)
+                    })
+            };
+        }
+
+        var packageRoot = await harness.WritePackageGraphAsync("inspect-api-lf", ApiGraph("\n"));
+        var missingLock = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertInspectApiDiagnostic(missingLock, "E_LOCK", "A missing dependency lock must be returned as JSON diagnostics.");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("inspect-api-lock", packageRoot, "lock"));
+
+        var first = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, first.ExitCode, Describe(first));
+        AssertEqual(string.Empty, first.StandardError, Describe(first));
+        using var json = JsonDocument.Parse(first.StandardOutput);
+        var api = json.RootElement;
+        AssertInspectApiPropertyOrder(api);
+        AssertEqual(1, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 1.");
+        AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
+            "The root package must have a source-facing self alias.");
+        var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
+        AssertEqual(2, dependencies.Length, "Both direct aliases must remain in the dependency list.");
+        AssertEqual("direct", dependencies[0].GetProperty("alias").GetString(), "Dependency aliases must be sorted.");
+        AssertEqual("zeta", dependencies[1].GetProperty("alias").GetString(), "Dependency aliases must be sorted.");
+        AssertJsonStringArray(api.GetProperty("manifest_grants"), ["fs.read"]);
+
+        var functions = api.GetProperty("functions").EnumerateArray().ToArray();
+        var functionIds = functions.Select(function => function.GetProperty("id").GetString() ?? string.Empty).ToArray();
+        var expectedFunctionIds = new[]
+        {
+            "direct::records::wrap",
+            "direct::service::read_record",
+            "self::app::main::generic_root",
+            "self::handlers::describe",
+            "self::handlers::run"
+        };
+        AssertTrue(expectedFunctionIds.SequenceEqual(functionIds, StringComparer.Ordinal),
+            $"Only public root and direct dependency functions should be exposed, got [{string.Join(", ", functionIds)}].");
+        AssertTrue(functionIds.All(id => !id.Contains("hidden", StringComparison.Ordinal)),
+            "Private declarations must not appear in the API function list.");
+        var structIds = api.GetProperty("structs").EnumerateArray()
+            .Select(structure => structure.GetProperty("id").GetString() ?? string.Empty).ToArray();
+        AssertTrue(new[] { "direct::records::Record", "self::app::main::Envelope", "self::app::main::ScanArgs" }
+                .SequenceEqual(structIds, StringComparer.Ordinal),
+            $"Private root and dependency structs must be filtered, got [{string.Join(", ", structIds)}].");
+        var unionIds = api.GetProperty("unions").EnumerateArray()
+            .Select(union => union.GetProperty("id").GetString() ?? string.Empty).ToArray();
+        AssertTrue(new[] { "direct::records::Status", "self::app::main::ApiReply" }
+                .SequenceEqual(unionIds, StringComparer.Ordinal),
+            $"Private and transitive unions must be filtered, got [{string.Join(", ", unionIds)}].");
+        var wrap = functions.Single(function => function.GetProperty("id").GetString() == "direct::records::wrap");
+        AssertJsonStringArray(wrap.GetProperty("source_ids"), ["direct::records::wrap", "zeta::records::wrap"]);
+        AssertEqual(0, wrap.GetProperty("type_parameters")[0].GetProperty("ordinal").GetInt32(),
+            "Generic type parameter ordinals should be stable and source-facing.");
+        var wrapResult = wrap.GetProperty("return_type");
+        AssertEqual("option", wrapResult.GetProperty("kind").GetString(), "Generic return types should preserve wrappers.");
+        AssertEqual("list", wrapResult.GetProperty("item").GetProperty("kind").GetString(),
+            "Nested generic return types should preserve List.");
+        AssertEqual("result", wrapResult.GetProperty("item").GetProperty("item").GetProperty("kind").GetString(),
+            "Nested generic return types should preserve Result.");
+        var origin = api.GetProperty("structs").EnumerateArray()
+            .Single(structure => structure.GetProperty("id").GetString() == "direct::records::Record")
+            .GetProperty("fields")[1].GetProperty("type").GetProperty("item");
+        AssertEqual("nominal", origin.GetProperty("kind").GetString(), "Transitive nominal types must remain structured.");
+        AssertEqual(JsonValueKind.Null, origin.GetProperty("source_id").ValueKind,
+            "Transitive-only nominal references must not invent a root source id.");
+        AssertEqual(0, origin.GetProperty("source_ids").GetArrayLength(),
+            "Transitive-only nominal references must have no usable root aliases.");
+        AssertEqual("api-foundation", origin.GetProperty("package").GetProperty("name").GetString(),
+            "Transitive nominal references should retain package identity.");
+        var directRecord = api.GetProperty("structs").EnumerateArray()
+            .Single(structure => structure.GetProperty("id").GetString() == "direct::records::Record");
+        AssertJsonStringArray(directRecord.GetProperty("source_ids"),
+            ["direct::records::Record", "zeta::records::Record"]);
+        AssertTrue(!functions.Any(function => function.GetProperty("id").GetString() == "foundation::service::read"),
+            "Transitive-only functions must not be exported as direct API declarations.");
+        AssertTrue(!api.GetProperty("structs").EnumerateArray().Any(structure =>
+                structure.GetProperty("id").GetString() == "foundation::models::Origin"),
+            "Transitive-only types must remain references rather than exported package declarations.");
+
+        var run = functions.Single(function => function.GetProperty("id").GetString() == "self::handlers::run");
+        AssertJsonStringArray(run.GetProperty("required_capabilities"), ["fs.read"]);
+        var directCall = run.GetProperty("calls")[0];
+        AssertEqual("direct::service::read_record", directCall.GetProperty("source_id").GetString(),
+            "A direct call should use its first sorted source alias.");
+        AssertJsonStringArray(directCall.GetProperty("source_ids"),
+            ["direct::service::read_record", "zeta::service::read_record"]);
+        var effectSteps = run.GetProperty("effect_paths")[0].GetProperty("steps").EnumerateArray().ToArray();
+        AssertEqual(4, effectSteps.Length, "The inferred effect path should cross both direct and transitive functions.");
+        AssertEqual("self::handlers::run", effectSteps[0].GetProperty("source_id").GetString(),
+            "The effect path should identify its root function.");
+        AssertEqual("direct::service::read_record", effectSteps[1].GetProperty("source_id").GetString(),
+            "The effect path should identify its direct dependency function.");
+        AssertEqual(JsonValueKind.Null, effectSteps[2].GetProperty("source_id").ValueKind,
+            "Transitive effect steps must not invent a source id.");
+        AssertEqual(0, effectSteps[2].GetProperty("source_ids").GetArrayLength(),
+            "Transitive effect steps must have no usable aliases.");
+        AssertEqual("api-foundation", effectSteps[2].GetProperty("package").GetProperty("name").GetString(),
+            "Transitive effect steps should retain package identity.");
+        AssertEqual("operation", effectSteps[3].GetProperty("kind").GetString(),
+            "The effect path should end at the compiler operation.");
+        var transitiveCall = functions.Single(function =>
+                function.GetProperty("id").GetString() == "direct::service::read_record")
+            .GetProperty("calls").EnumerateArray().Single();
+        AssertEqual(JsonValueKind.Null, transitiveCall.GetProperty("source_id").ValueKind,
+            "Transitive direct-call targets must not invent a root source id.");
+        AssertEqual(0, transitiveCall.GetProperty("source_ids").GetArrayLength(),
+            "Transitive direct-call targets must have no usable root aliases.");
+
+        var command = api.GetProperty("commands").EnumerateArray().Single();
+        AssertEqual("self::app::main::scan", command.GetProperty("id").GetString(), "Command IDs must use source names.");
+        AssertEqual("self::handlers::run", command.GetProperty("handler").GetString(), "The command handler should retain its source ID.");
+        AssertJsonStringArray(command.GetProperty("handler_source_ids"), ["self::handlers::run"]);
+        AssertEqual("self::handlers::describe", command.GetProperty("error_formatter").GetString(),
+            "The command error formatter should retain its source ID.");
+        AssertJsonStringArray(command.GetProperty("required_capabilities"), ["fs.read"]);
+        var inputNames = command.GetProperty("inputs").EnumerateArray()
+            .Select(input => input.GetProperty("name").GetString() ?? string.Empty).ToArray();
+        AssertTrue(new[] { "path", "limit", "recursive" }.SequenceEqual(inputNames, StringComparer.Ordinal),
+            "Typed command inputs should retain declaration order and source names.");
+        AssertApiPortable(first.StandardOutput, api, harness.TemporaryRoot);
+
+        var repeated = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(first.StandardOutput, repeated.StandardOutput,
+            "Repeated inspect-api calls must produce byte-identical JSON.");
+
+        var relocatedRoot = await harness.WritePackageGraphAsync("inspect-api-crlf", ApiGraph("\r\n"));
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("inspect-api-relocated-lock", relocatedRoot, "lock"));
+        var relocated = await harness.InvokeCompilerCommandAsync("inspect", "api", relocatedRoot, "--json");
+        AssertEqual(0, relocated.ExitCode, Describe(relocated));
+        AssertEqual(first.StandardOutput, relocated.StandardOutput,
+            "Equivalent relocated CRLF and LF dependency graphs must emit identical API JSON.");
+
+        var invalidPackage = await harness.WritePackageAsync(
+            "inspect-api-compiler-error",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return true; }"
+            });
+        var compilerError = await harness.InvokeCompilerCommandAsync("inspect", "api", invalidPackage, "--json");
+        AssertInspectApiDiagnostic(compilerError, "E_TYPE_MISMATCH",
+            "Compiler errors must return structured diagnostics without a partial API report.");
+    }
+
+    private static async Task TestInspectApiWebRoutes(Harness harness)
+    {
+        const string source = """
+            module app::main;
+            pub struct Request { id: i32, name: Text }
+            pub struct Record { id: i32, name: Text }
+            pub union Reply { Created(self::app::main::Record), Invalid(Text), Failed(Text), Empty }
+            fn create(request: self::app::main::Request, db: DbRead, writer: DbWrite) -> self::app::main::Reply effects {} {
+                return self::app::main::Reply.Empty;
+            }
+            route POST "/records" {
+                body: self::app::main::Request;
+                handler: self::app::main::create;
+                response Created: 201 json self::app::main::Record;
+                response Invalid: 400 json Text;
+                response Failed: 500 json Text;
+                response Empty: 204;
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "inspect-api-web",
+            "name = \"inspect-api-web\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "sqlite_path = \"data/api.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+                + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source,
+                ["db/schema.sql"] = "CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n"
+            });
+        var result = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, result.ExitCode, Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var api = document.RootElement;
+        AssertInspectApiPropertyOrder(api);
+        AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
+        AssertEqual(0, api.GetProperty("commands").GetArrayLength(), "Web packages should not invent CLI commands.");
+        var route = api.GetProperty("routes").EnumerateArray().Single();
+        AssertEqual("POST", route.GetProperty("method").GetString(), "Route methods should retain checked source values.");
+        AssertEqual("/records", route.GetProperty("path").GetString(), "Route paths should retain checked source values.");
+        AssertEqual("nominal", route.GetProperty("body_type").GetProperty("kind").GetString(),
+            "POST routes should expose their checked body type.");
+        AssertEqual("self::app::main::Request", route.GetProperty("body_type").GetProperty("source_id").GetString(),
+            "POST route bodies should use source-facing type IDs.");
+        AssertEqual("self::app::main::create", route.GetProperty("handler").GetString(),
+            "Route handler references should use source-facing IDs.");
+        AssertJsonStringArray(route.GetProperty("handler_source_ids"), ["self::app::main::create"]);
+        var responseType = route.GetProperty("response_type");
+        AssertEqual("nominal", responseType.GetProperty("kind").GetString(),
+            "Route response unions should use the structured nominal type shape.");
+        AssertEqual("union", responseType.GetProperty("declaration_kind").GetString(),
+            "Route response type should retain its declaration kind.");
+        AssertEqual("self::app::main::Reply", responseType.GetProperty("source_id").GetString(),
+            "Route response unions should use source-facing IDs.");
+        AssertJsonStringArray(responseType.GetProperty("source_ids"), ["self::app::main::Reply"]);
+        AssertJsonStringArray(route.GetProperty("required_capabilities"), ["db.read", "db.write"]);
+        var parameters = route.GetProperty("capability_parameters").EnumerateArray().ToArray();
+        AssertEqual(2, parameters.Length, "Route capability parameters should preserve their checked order.");
+        AssertEqual("db", parameters[0].GetProperty("name").GetString(), "DbRead capability parameter name mismatch.");
+        AssertEqual("db.read", parameters[0].GetProperty("capability").GetString(), "DbRead capability mapping mismatch.");
+        AssertEqual("writer", parameters[1].GetProperty("name").GetString(), "DbWrite capability parameter name mismatch.");
+        AssertEqual("db.write", parameters[1].GetProperty("capability").GetString(), "DbWrite capability mapping mismatch.");
+        var responses = route.GetProperty("responses").EnumerateArray().ToArray();
+        AssertEqual(4, responses.Length, "All response mappings should be projected.");
+        AssertEqual("Created,Invalid,Failed,Empty",
+            string.Join(",", responses.Select(response => response.GetProperty("variant").GetString())),
+            "Response mappings should preserve declaration order.");
+        AssertEqual(201, responses[0].GetProperty("status").GetInt32(), "Created status mismatch.");
+        AssertEqual("json", responses[0].GetProperty("content_type").GetString(), "Created content type mismatch.");
+        AssertEqual("self::app::main::Record", responses[0].GetProperty("payload_type").GetProperty("source_id").GetString(),
+            "Nominal route payloads should preserve source IDs.");
+        AssertEqual(204, responses[3].GetProperty("status").GetInt32(), "Empty response status mismatch.");
+        AssertEqual(JsonValueKind.Null, responses[3].GetProperty("payload_type").ValueKind,
+            "A bodyless response should project a null payload type.");
+        AssertApiPortable(result.StandardOutput, api, harness.TemporaryRoot);
+    }
+
+    private static void AssertInspectApiDiagnostic(ProcessResult result, string code, string message)
+    {
+        AssertEqual(1, result.ExitCode, message + " " + Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        using var diagnostics = JsonDocument.Parse(result.StandardOutput);
+        AssertEqual(1, diagnostics.RootElement.GetProperty("schemaVersion").GetInt32(),
+            "Inspect-api failures should use the compiler diagnostics JSON schema.");
+        AssertTrue(ParseDiagnosticSnapshots(result.StandardOutput).Any(diagnostic => diagnostic.Code == code),
+            $"Expected {code} in inspect-api diagnostics. {result.StandardOutput}");
+        AssertTrue(!diagnostics.RootElement.TryGetProperty("schema_version", out _),
+            "An inspection failure must not emit a partial API schema.");
+    }
+
+    private static void AssertInspectApiPropertyOrder(JsonElement root)
+    {
+        var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "schema_version,package,dependencies,manifest_grants,functions,structs,unions,commands,routes",
+            "alias,name,version",
+            "name,version",
+            "id,source_ids,package,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
+            "name,ordinal",
+            "name,type",
+            "kind,source_id,source_ids,package,module,name",
+            "kind,name",
+            "effect,steps",
+            "source_id,source_ids,package,module,name",
+            "id,source_ids,package,fields",
+            "id,source_ids,package,variants",
+            "name,payload",
+            "id,package,help,inputs,handler,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
+            "name,kind,type,help,default_value",
+            "kind,value",
+            "kind,name,ordinal",
+            "kind,item",
+            "kind,ok,error",
+            "kind,declaration_kind,source_id,source_ids,package,module,name",
+            "method,path,body_type,handler,response_type,handler_source_ids,responses,required_capabilities,capability_parameters",
+            "variant,status,content_type,payload_type",
+            "name,capability"
+        };
+
+        static void Walk(JsonElement element, HashSet<string> allowedOrders)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                var names = element.EnumerateObject().Select(property => property.Name).ToArray();
+                var order = string.Join(",", names);
+                AssertTrue(allowedOrders.Contains(order),
+                    $"Unexpected inspect-api JSON object property order: [{order}].");
+                foreach (var property in element.EnumerateObject()) Walk(property.Value, allowedOrders);
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var child in element.EnumerateArray()) Walk(child, allowedOrders);
+            }
+        }
+
+        Walk(root, allowedOrders);
+    }
+    private static void AssertApiPortable(string json, JsonElement api, string temporaryRoot)
+    {
+        AssertTrue(!json.Contains(temporaryRoot, StringComparison.OrdinalIgnoreCase)
+            && !Regex.IsMatch(json, @"[A-Za-z]:\\") && !json.Contains('\\'),
+            "The source-facing API must not contain absolute filesystem paths.");
+
+        static void Walk(JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (property.Name == "id")
+                        AssertEqual(JsonValueKind.String, property.Value.ValueKind,
+                            "Declaration ids must be source strings, never compiler numeric ids.");
+                    else if (property.Name.EndsWith("_id", StringComparison.Ordinal))
+                        AssertTrue(property.Value.ValueKind is JsonValueKind.String or JsonValueKind.Null,
+                            $"{property.Name} must be a source string or null, never a compiler numeric id.");
+                    else if (property.Name.EndsWith("_ids", StringComparison.Ordinal))
+                        AssertTrue(property.Value.ValueKind == JsonValueKind.Array
+                            && property.Value.EnumerateArray().All(value => value.ValueKind == JsonValueKind.String),
+                            $"{property.Name} must contain only source string ids.");
+                    Walk(property.Value);
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var child in element.EnumerateArray()) Walk(child);
+            }
+        }
+
+        Walk(api);
     }
 
     private static async Task TestQualifiedEffects(Harness harness)
@@ -5444,6 +5878,7 @@ internal static class IntegrationTests
             "run FILE_OR_PACKAGE [-- APP_ARGS]",
             "lock PACKAGE_DIRECTORY",
             "inspect effects PACKAGE_DIRECTORY SYMBOL --json",
+            "inspect api PACKAGE_DIRECTORY --json",
             "test [FILE_OR_PACKAGE]"
         };
         var reportedForms = usageLine[usagePrefix.Length..].Split(" | lang ", StringSplitOptions.None);
@@ -5454,6 +5889,8 @@ internal static class IntegrationTests
 
         static string CommandName(string form) => form.StartsWith("inspect effects ", StringComparison.Ordinal)
             ? "inspect effects"
+            : form.StartsWith("inspect api ", StringComparison.Ordinal)
+                ? "inspect api"
             : form.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
 
         var currentCommandNames = currentForms.Select(CommandName).ToHashSet(StringComparer.Ordinal);
@@ -5479,6 +5916,8 @@ internal static class IntegrationTests
             + $"received [{string.Join(", ", packageCommands.Order(StringComparer.Ordinal))}].");
         AssertTrue(packageCommandBlock.Contains("lang inspect effects PACKAGE_DIRECTORY SYMBOL --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the inspect effects form.");
+        AssertTrue(packageCommandBlock.Contains("lang inspect api PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
+            "docs/grammar.md package command list must show the inspect api form.");
 
         foreach (var unsupportedCommand in new[] { "fmt", "new", "add", "audit" })
         {
@@ -6680,6 +7119,13 @@ internal static class IntegrationTests
     private static void AssertTrue(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static void AssertJsonStringArray(JsonElement element, string[] expected)
+    {
+        var actual = element.EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray();
+        AssertTrue(expected.SequenceEqual(actual, StringComparer.Ordinal),
+            $"Expected JSON string array [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
     }
 
     private sealed class Harness(string repositoryRoot, string compilerDll, string dotnet, string temporaryRoot)
