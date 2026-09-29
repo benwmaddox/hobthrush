@@ -43,7 +43,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -100,6 +100,7 @@ internal static class AuditReport
             }).ToArray(),
             compiler = new { functions },
             manifest_grants = grants,
+            config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
             trusted_claims = claims.Select(claim => new
             {
@@ -148,6 +149,7 @@ internal static class AuditReport
             },
             compiler = new { functions = CreateFunctionFacts(program, identities) },
             manifest_grants = Array.Empty<string>(),
+            config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = (string?)null,
             trusted_claims = claims.Select(claim => new
             {

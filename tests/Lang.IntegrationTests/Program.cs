@@ -97,6 +97,9 @@ internal static class IntegrationTests
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
             ("async CLI handlers await FsRead results and format typed failures", TestAsyncCliCommandRuntime),
             ("FsWrite CLI grants, reports, receipts, and web route projections are checked", TestFsWritePackageContracts),
+            ("typed startup config manifests, effects, reports, and redaction are checked", TestConfigManifestAndReports),
+            ("CLI config defaults, empty values, explicit secret reveal, logging, and NativeAOT are checked", TestConfigCliRuntime),
+            ("web config and logger injection work in an async route handler", TestConfigWebAsyncRuntime),
             ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
             ("typed CLI declarations validate entries, signatures, and parser spans", TestTypedCliCommandDiagnostics),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
@@ -2193,7 +2196,7 @@ internal static class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(3, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 3.");
+        AssertEqual(4, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2363,7 +2366,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(3, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 3.");
+        AssertEqual(4, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -2493,7 +2496,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(3, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 3.");
+        AssertEqual(4, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 4.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2632,7 +2635,9 @@ internal static class IntegrationTests
             AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
                 "Audit JSON property order is part of the deterministic report contract.");
 
-        Order(root, "schema_version,packages,compiler,manifest_grants,http_origin,trusted_claims,foreign_dependencies");
+        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,trusted_claims,foreign_dependencies");
+        foreach (var field in root.GetProperty("config").EnumerateArray())
+            Order(field, "name,source_type,required,has_default");
         foreach (var package in root.GetProperty("packages").EnumerateArray())
         {
             Order(package, "identity,role,content_sha256,dependencies,inputs");
@@ -2723,7 +2728,8 @@ internal static class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,http_origin,functions,structs,unions,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,config,http_origin,functions,structs,unions,commands,routes",
+            "name,source_type,required,has_default",
             "alias,name,version",
             "name,version",
             "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
@@ -2768,9 +2774,10 @@ internal static class IntegrationTests
     }
     private static void AssertApiPortable(string json, JsonElement api, string temporaryRoot)
     {
-        AssertTrue(!json.Contains(temporaryRoot, StringComparison.OrdinalIgnoreCase)
-            && !Regex.IsMatch(json, @"[A-Za-z]:\\") && !json.Contains('\\'),
-            "The source-facing API must not contain absolute filesystem paths.");
+        AssertTrue(!json.Contains(temporaryRoot, StringComparison.OrdinalIgnoreCase),
+            "The source-facing API must not contain the temporary workspace path.");
+        AssertTrue(!Regex.IsMatch(json, @"[A-Za-z]:\\"),
+            "The source-facing API must not contain an absolute drive path.");
 
         static void Walk(JsonElement element)
         {
@@ -3179,8 +3186,8 @@ internal static class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(3, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 3.");
+            AssertEqual(4, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 4.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3245,8 +3252,8 @@ internal static class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(3, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 3.");
+            AssertEqual(4, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 4.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -3297,8 +3304,8 @@ internal static class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(3, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 3.");
+            AssertEqual(4, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 4.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -3699,8 +3706,8 @@ internal static class IntegrationTests
         var unusedGrantSchemaPath = Path.Combine(Path.GetDirectoryName(unusedGrantArtifact)!, "command-schema.json");
         using (var unusedGrantSchema = JsonDocument.Parse(await File.ReadAllBytesAsync(unusedGrantSchemaPath)))
         {
-            AssertEqual(2, unusedGrantSchema.RootElement.GetProperty("schema_version").GetInt32(),
-                "Command schemas with the capabilities field must use version 2.");
+            AssertEqual(3, unusedGrantSchema.RootElement.GetProperty("schema_version").GetInt32(),
+                "Command schemas with the capabilities field must use version 3.");
             AssertEqual(0, unusedGrantSchema.RootElement.GetProperty("commands")[0]
                     .GetProperty("capabilities").GetArrayLength(),
                 "Unused fs.read and fs.write grants must not appear as injected capabilities for an args-only handler.");
@@ -4117,7 +4124,7 @@ internal static class IntegrationTests
         using (var schemaDocument = JsonDocument.Parse(firstSchemaBytes))
         {
             var root = schemaDocument.RootElement;
-            AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 2 after adding capabilities.");
+            AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 3 after adding capabilities.");
             var commands = root.GetProperty("commands");
             AssertEqual(1, commands.GetArrayLength(), "The entry module should define one command.");
             var command = commands[0];
@@ -4280,8 +4287,8 @@ internal static class IntegrationTests
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
             var root = schema.RootElement;
-            AssertEqual(2, root.GetProperty("schema_version").GetInt32(),
-                "Async handlers must preserve command schema version 2.");
+            AssertEqual(3, root.GetProperty("schema_version").GetInt32(),
+                "Async handlers must preserve command schema version 3.");
             var command = root.GetProperty("commands").EnumerateArray().Single();
             AssertEqual("read", command.GetProperty("name").GetString(),
                 "The async command schema should retain its declared name.");
@@ -4378,8 +4385,8 @@ internal static class IntegrationTests
         {
             var schema = schemaDocument.RootElement;
             AssertJsonPropertyOrder(schema, "schema_version,commands");
-            AssertEqual(2, schema.GetProperty("schema_version").GetInt32(),
-                "Adding FsWrite must preserve command schema version 2.");
+            AssertEqual(3, schema.GetProperty("schema_version").GetInt32(),
+                "Adding FsWrite must preserve command schema version 3.");
             var command = schema.GetProperty("commands").EnumerateArray().Single();
             AssertJsonPropertyOrder(command, "name,help,handler,error_formatter,capabilities,arguments,options,flags");
             AssertEqual("save", command.GetProperty("name").GetString(), "The command schema should retain its declared name.");
@@ -4583,6 +4590,608 @@ internal static class IntegrationTests
             AssertEqual(function, reachable.GetProperty("name").GetString(),
                 "The FsWrite claim should be reachable from the checked handler function.");
         }
+    }
+
+    private static async Task TestConfigManifestAndReports(Harness harness)
+    {
+        var invalidManifests = new (string Name, string Manifest)[]
+        {
+            ("config-invalid-syntax", CliPackageManifest()
+                + "\n[config\nname = \"Text|required\"\n"),
+            ("config-after-capabilities", CliPackageManifest()
+                + "\n[capabilities]\nenv.read = \"allow\"\n[config]\nname = \"Text|required\"\n"),
+            ("config-unknown-subsection", CliPackageManifest()
+                + "\n[config.name]\nvalue = \"Text|required\"\n"),
+            ("config-duplicate-field", CliPackageManifest()
+                + "\n[config]\nname = \"Text|required\"\nname = \"Text|default:other\"\n"),
+            ("config-invalid-name", CliPackageManifest()
+                + "\n[config]\n\"api-token\" = \"Secret<Text>|required\"\n"),
+            ("config-invalid-descriptor", CliPackageManifest()
+                + "\n[config]\nname = \"Text|optional\"\n"),
+            ("config-secret-default", CliPackageManifest()
+                + "\n[config]\ntoken = \"Secret<Text>|default:unsafe\"\n"),
+            ("config-library-section", LibraryPackageManifest("config-library")
+                + "\n[config]\nname = \"Text|required\"\n")
+        };
+        foreach (var (name, manifest) in invalidManifests)
+        {
+            await ExpectPackageJsonDiagnosticAsync(
+                harness,
+                name,
+                manifest,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                "E_MANIFEST",
+                "lang.toml");
+        }
+
+        var configSourceHeader = "module app::main;\n"
+            + "pub fn main() -> i32 effects {} { return 0; }\n"
+            + "fn probe(config: Config, key: Text) -> Text effects { env.read } { return ";
+        var configKeyCases = new (string Name, string Expression, string Code)[]
+        {
+            ("config-unknown-key", "config.get_text(\"missing\")", "E_CONFIG_KEY"),
+            ("config-wrong-field-kind", "config.get_text(\"token\")", "E_CONFIG_TYPE"),
+            ("config-wrong-secret-field-kind", "config.get_secret_text(\"name\")", "E_CONFIG_TYPE"),
+            ("config-nonliteral-key", "config.get_text(key)", "E_CONFIG_KEY")
+        };
+        foreach (var (name, expression, code) in configKeyCases)
+        {
+            var packageRoot = await harness.WritePackageAsync(
+                name,
+                ConfigCliManifest(),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = configSourceHeader + expression + "; }\n"
+                });
+            var result = await harness.InvokePackageDirectoryAsync(name, packageRoot, "check", "--json");
+            AssertTrue(result.ExitCode != 0, $"Invalid config lookup unexpectedly succeeded. {Describe(result)}");
+            AssertTrue(ParseDiagnosticSnapshots(result.StandardOutput).Any(diagnostic => diagnostic.Code == code),
+                $"Expected {code} for config lookup {expression}. {Describe(result)}");
+        }
+
+        const string secretCanary = "secret-canary-config-diagnostic-8f31d4";
+        var diagnosticPackage = await harness.WritePackageAsync(
+            "config-diagnostic-redaction",
+            ConfigCliManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = configSourceHeader + "config.get_text(\"missing\"); }\n"
+            });
+        var diagnostic = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-diagnostic-redaction",
+            diagnosticPackage,
+            "check",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["LANG_CONFIG_TOKEN"] = secretCanary
+            },
+            "--json");
+        AssertTrue(!diagnostic.StandardOutput.Contains(secretCanary, StringComparison.Ordinal)
+            && !diagnostic.StandardError.Contains(secretCanary, StringComparison.Ordinal),
+            "Compile diagnostics must not include a runtime secret value from LANG_CONFIG_TOKEN.");
+
+        var wrongOrderSource = Regex.Replace(
+            ConfigCliSource,
+            @"config: Config,\s+secrets: Secrets,\s+logger: Logger",
+            "logger: Logger,\n            config: Config,\n            secrets: Secrets",
+            RegexOptions.CultureInvariant);
+        AssertTrue(wrongOrderSource != ConfigCliSource,
+            "The wrong-order fixture must actually change the command handler signature.");
+        var wrongOrderPackage = await harness.WritePackageAsync(
+            "config-cli-wrong-capability-order",
+            ConfigCliManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = wrongOrderSource
+            });
+        var wrongOrder = await harness.InvokePackageDirectoryAsync(
+            "config-cli-wrong-capability-order",
+            wrongOrderPackage,
+            "check",
+            "--json");
+        AssertTrue(wrongOrder.ExitCode != 0, Describe(wrongOrder));
+        AssertTrue(ParseDiagnosticSnapshots(wrongOrder.StandardOutput)
+                .Any(diagnostic => diagnostic.Code == "E_COMMAND_HANDLER"),
+            $"CLI capability parameters must place Config, Secrets, and Logger in declaration order. {Describe(wrongOrder)}");
+
+        foreach (var grant in new[] { "env.read", "secret.reveal", "log.write" })
+        {
+            var manifest = ConfigCliManifest().Replace($"{grant} = \"allow\"\n", string.Empty, StringComparison.Ordinal);
+            var packageRoot = await harness.WritePackageAsync(
+                $"config-cli-missing-{grant.Replace('.', '-')}",
+                manifest,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = ConfigCliSource
+                });
+            var result = await harness.InvokePackageDirectoryAsync(
+                $"config-cli-missing-{grant.Replace('.', '-')}", packageRoot, "check", "--json");
+            AssertTrue(result.ExitCode != 0, Describe(result));
+            AssertTrue(ParseDiagnosticSnapshots(result.StandardOutput)
+                    .Any(diagnostic => diagnostic.Code == "E_CAPABILITY_MISSING"),
+                $"Config feature use without the {grant} grant should fail capability checking. {Describe(result)}");
+        }
+
+        var libraryPackage = await harness.WritePackageGraphAsync(
+            "config-library-type-scope",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\nconfig_library = \"../config-library\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+                    }),
+                ["config-library"] = new PackageFixture(
+                    LibraryPackageManifest("config-library-type-scope"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/config.lang"] = "module config;\n"
+                            + "pub fn read(config: Config) -> Text effects { env.read } { return \"hidden\"; }\n"
+                            + "pub fn expose(secret: Secret<Text>) -> Secret<Text> effects {} { return secret; }\n"
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "config-library-type-scope-lock", libraryPackage, "lock"));
+        var libraryCheck = await harness.InvokePackageDirectoryAsync(
+            "config-library-type-scope", libraryPackage, "check", "--json");
+        AssertTrue(libraryCheck.ExitCode != 0, Describe(libraryCheck));
+        AssertTrue(ParseDiagnosticSnapshots(libraryCheck.StandardOutput)
+                .Any(diagnostic => diagnostic.Code == "E_CAPABILITY_SCOPE"),
+            $"Libraries must not use or expose the config and secret types. {Describe(libraryCheck)}");
+
+        static Dictionary<string, PackageFixture> MakeGraph()
+        {
+            var rootManifest = ConfigCliManifest().Replace(
+                    "name = \"config-harness\"",
+                    "name = \"config-report-root\"",
+                    StringComparison.Ordinal)
+                + "\n[dependencies]\nsupport = \"../support\"\n";
+            return new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(rootManifest, new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = ConfigCliSource
+                }),
+                ["support"] = new PackageFixture(
+                    LibraryPackageManifest("config-report-support"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/support.lang"] = "module support; pub fn value() -> i32 effects {} { return 1; }\n"
+                    })
+            };
+        }
+
+        var firstRoot = await harness.WritePackageGraphAsync("config-report-first", MakeGraph());
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("config-report-first-lock", firstRoot, "lock"));
+        var firstCheck = await harness.InvokePackageDirectoryAsync("config-report-first-check", firstRoot, "check", "--json");
+        AssertEqual(0, firstCheck.ExitCode, Describe(firstCheck));
+
+        const string reportCanary = "secret-canary-config-report-2d7ce5";
+        var reportEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_TOKEN"] = reportCanary
+        };
+        var api = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "inspect", "api", firstRoot, "--json");
+        AssertEqual(0, api.ExitCode, Describe(api));
+        using (var apiDocument = ParseConfigJson(api.StandardOutput, "inspect api"))
+        {
+            var root = apiDocument.RootElement;
+            AssertInspectApiPropertyOrder(root);
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
+            AssertConfigFieldProjection(root.GetProperty("config"));
+            AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
+            AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
+        }
+
+        var audit = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "audit", firstRoot, "--json");
+        AssertEqual(0, audit.ExitCode, Describe(audit));
+        using (var auditDocument = ParseConfigJson(audit.StandardOutput, "audit"))
+        {
+            var root = auditDocument.RootElement;
+            AssertAuditPropertyOrder(root);
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 4.");
+            AssertConfigFieldProjection(root.GetProperty("config"));
+            AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
+        }
+
+        var effects = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "inspect", "effects", firstRoot, "self::app::main::run", "--json");
+        AssertEqual(0, effects.ExitCode, Describe(effects));
+        using (var effectsDocument = ParseConfigJson(effects.StandardOutput, "inspect effects"))
+        {
+            var root = effectsDocument.RootElement;
+            AssertEqual(1, root.GetProperty("schema_version").GetInt32(),
+                "Config and logger effects should preserve inspect-effects schema version 1.");
+            AssertJsonStringArray(root.GetProperty("inferred_effects"), ["env.read", "log.write", "secret.reveal"]);
+            AssertJsonStringArray(root.GetProperty("required_capabilities"), ["env.read", "log.write", "secret.reveal"]);
+            AssertTrue(root.GetProperty("effect_paths").EnumerateArray()
+                    .Any(path => path.GetProperty("effect").GetString() == "env.read"
+                        && path.GetProperty("steps").EnumerateArray()
+                            .Any(step => (step.GetString() ?? string.Empty).Contains("read_values", StringComparison.Ordinal))),
+                "The command's env.read effect should retain its transitive path through read_values.");
+            AssertTrue(root.GetProperty("effect_paths").EnumerateArray()
+                    .Any(path => path.GetProperty("effect").GetString() == "secret.reveal"
+                        && path.GetProperty("steps").EnumerateArray()
+                            .Any(step => (step.GetString() ?? string.Empty).Contains("reveal_token", StringComparison.Ordinal))),
+                "The command's secret.reveal effect should retain its transitive path through reveal_token.");
+        }
+
+        var build = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "build", firstRoot);
+        var executable = ParseBuiltArtifact(build, "Built executable: ");
+        var outputDirectory = Path.GetDirectoryName(executable)!;
+        var schemaPath = Path.Combine(outputDirectory, "command-schema.json");
+        using (var receipt = await AssertBuildReceiptAsync(
+                   outputDirectory,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+                   firstRoot))
+        {
+            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Config fields should preserve build receipt schema version 1.");
+            AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
+        }
+        var commandSchema = await File.ReadAllTextAsync(schemaPath);
+        using (var schemaDocument = ParseConfigJson(commandSchema, "command schema"))
+        {
+            var root = schemaDocument.RootElement;
+            AssertEqual(3, root.GetProperty("schema_version").GetInt32(),
+                "Command schema must use version 3 for config and secret capability metadata.");
+            AssertJsonStringArray(root.GetProperty("commands")[0].GetProperty("capabilities"),
+                ["env.read", "secret.reveal", "log.write"]);
+        }
+
+        foreach (var report in new[] { api.StandardOutput, audit.StandardOutput, effects.StandardOutput, commandSchema })
+            AssertTrue(!report.Contains(reportCanary, StringComparison.Ordinal),
+                "Inspect and command schema output must not contain runtime secret values.");
+        AssertTrue(!api.StandardOutput.Contains("Text|default:normal", StringComparison.Ordinal)
+            && !audit.StandardOutput.Contains("Text|default:normal", StringComparison.Ordinal)
+            && !api.StandardOutput.Contains("\"normal\"", StringComparison.Ordinal)
+            && !audit.StandardOutput.Contains("\"normal\"", StringComparison.Ordinal),
+            "API and audit config metadata must omit descriptor strings and default literals.");
+        await AssertNoTextInFilesAsync(outputDirectory, reportCanary);
+
+        var relocatedRoot = await harness.WritePackageGraphAsync("config-report-relocated", MakeGraph());
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("config-report-relocated-lock", relocatedRoot, "lock"));
+        var relocatedApi = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "inspect", "api", relocatedRoot, "--json");
+        var relocatedAudit = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            reportEnvironment, "audit", relocatedRoot, "--json");
+        AssertEqual(0, relocatedApi.ExitCode, Describe(relocatedApi));
+        AssertEqual(0, relocatedAudit.ExitCode, Describe(relocatedAudit));
+        AssertEqual(api.StandardOutput, relocatedApi.StandardOutput,
+            "Equivalent config package graphs at different roots must produce identical API JSON.");
+        AssertEqual(audit.StandardOutput, relocatedAudit.StandardOutput,
+            "Equivalent config package graphs at different roots must produce identical audit JSON.");
+
+        var changedManifestPath = Path.Combine(firstRoot, "lang.toml");
+        var changedManifest = (await File.ReadAllTextAsync(changedManifestPath))
+            .Replace("mode = \"Text|default:normal\"", "mode = \"Text|default:changed\"", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(changedManifestPath, changedManifest);
+        var staleLock = await harness.InvokePackageDirectoryAsync("config-report-stale-lock", firstRoot, "check", "--json");
+        AssertTrue(staleLock.ExitCode != 0, Describe(staleLock));
+        AssertTrue(ParseDiagnosticSnapshots(staleLock.StandardOutput)
+                .Any(diagnostic => diagnostic.Code == "E_LOCK"),
+            $"Changing a config descriptor must make the existing package lock stale. {Describe(staleLock)}");
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("config-report-refresh-lock", firstRoot, "lock"));
+        var refreshedCheck = await harness.InvokePackageDirectoryAsync("config-report-refreshed-check", firstRoot, "check", "--json");
+        AssertEqual(0, refreshedCheck.ExitCode, Describe(refreshedCheck));
+    }
+
+    private static async Task TestConfigCliRuntime(Harness harness)
+    {
+        var unusedSecretsPackage = await harness.WritePackageAsync(
+            "config-unused-secrets-injection",
+            CliPackageManifest().Replace("harness-package", "config-unused-secrets-injection", StringComparison.Ordinal)
+                + "\n[capabilities]\nsecret.reveal = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = """
+                    module app::main;
+                    pub union ShowError { Failed }
+                    command show {
+                        help "Show a value without reading a secret.";
+                        argument label: Text help "Value to return.";
+                        handler: self::app::main::run;
+                        error: self::app::main::describe;
+                    }
+                    pub fn run(args: self::app::main::ShowArgs, secrets: Secrets) -> Result<Text, self::app::main::ShowError> effects {} {
+                        return Ok(args.label);
+                    }
+                    pub fn describe(error: self::app::main::ShowError) -> Text effects {} {
+                        return match error {
+                            self::app::main::ShowError.Failed => "failed"
+                        };
+                    }
+                    """
+            });
+        var unusedSecretsCheck = await harness.InvokePackageDirectoryAsync(
+            "config-unused-secrets-injection-check", unusedSecretsPackage, "check", "--json");
+        AssertEqual(0, unusedSecretsCheck.ExitCode, Describe(unusedSecretsCheck));
+        var unusedSecretsBuild = await harness.InvokePackageDirectoryAsync(
+            "config-unused-secrets-injection-build", unusedSecretsPackage, "build");
+        var unusedSecretsExecutable = ParseBuiltArtifact(unusedSecretsBuild, "Built executable: ");
+        AssertTrue(File.Exists(unusedSecretsExecutable), Describe(unusedSecretsBuild));
+
+        var packageRoot = await harness.WritePackageAsync(
+            "config-cli-runtime",
+            ConfigCliManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = ConfigCliSource
+            });
+        var check = await harness.InvokePackageDirectoryAsync("config-cli-runtime-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("config-cli-runtime-build", packageRoot, "build");
+        var managedExecutable = ParseBuiltArtifact(build, "Built executable: ");
+        var managedOutputDirectory = Path.GetDirectoryName(managedExecutable)!;
+        var managedSchemaBytes = await File.ReadAllBytesAsync(Path.Combine(managedOutputDirectory, "command-schema.json"));
+        using (var receipt = await AssertBuildReceiptAsync(
+                   managedOutputDirectory,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(managedOutputDirectory, managedExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+                   packageRoot))
+            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed config CLI receipts should use schema version 1.");
+
+        const string secretCanary = "secret-canary-runtime-0a91e6";
+        var defaultEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_NAME"] = "Ada",
+            ["LANG_CONFIG_TOKEN"] = secretCanary
+        };
+        var defaultRun = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-default-runtime", packageRoot, "run", defaultEnvironment, "--", "inspect", "startup");
+        AssertEqual(0, defaultRun.ExitCode, Describe(defaultRun));
+        AssertEqual("Ada" + Environment.NewLine, defaultRun.StandardOutput, Describe(defaultRun));
+        AssertConfigCliLog(defaultRun.StandardError, "Default managed run");
+        AssertTrue(!defaultRun.StandardOutput.Contains(secretCanary, StringComparison.Ordinal)
+            && !defaultRun.StandardError.Contains(secretCanary, StringComparison.Ordinal),
+            "A config secret must remain absent from ordinary CLI output and logs.");
+
+        var emptyEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_NAME"] = string.Empty,
+            ["LANG_CONFIG_MODE"] = "normal",
+            ["LANG_CONFIG_TOKEN"] = secretCanary
+        };
+        var emptyRun = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-empty-required-runtime", packageRoot, "run", emptyEnvironment, "--", "inspect", "startup");
+        AssertEqual(0, emptyRun.ExitCode, Describe(emptyRun));
+        AssertEqual(Environment.NewLine, emptyRun.StandardOutput,
+            "An empty required environment value must be retained as empty text instead of treated as missing.");
+        AssertConfigCliLog(emptyRun.StandardError, Describe(emptyRun));
+        AssertEqual(defaultRun.StandardError, emptyRun.StandardError,
+            "Repeated managed invocations with identical logger inputs must produce byte-identical JSON.");
+
+        var emptyDefaultEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_NAME"] = "Ada",
+            ["LANG_CONFIG_MODE"] = string.Empty,
+            ["LANG_CONFIG_TOKEN"] = secretCanary
+        };
+        var emptyDefaultRun = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-empty-default-runtime", packageRoot, "run", emptyDefaultEnvironment, "--", "inspect", "startup");
+        AssertEqual(0, emptyDefaultRun.ExitCode, Describe(emptyDefaultRun));
+        AssertEqual("unexpected-mode" + Environment.NewLine, emptyDefaultRun.StandardOutput,
+            "An explicitly empty optional value must override its nonempty default.");
+        AssertConfigCliLog(emptyDefaultRun.StandardError, Describe(emptyDefaultRun));
+
+        var revealRun = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-explicit-reveal", packageRoot, "run", defaultEnvironment, "--", "inspect", "startup", "--reveal");
+        AssertEqual(0, revealRun.ExitCode, Describe(revealRun));
+        AssertEqual(secretCanary + Environment.NewLine, revealRun.StandardOutput,
+            "Secrets.reveal_text should expose a secret only on the explicit reveal command path.");
+        AssertConfigCliLog(revealRun.StandardError, Describe(revealRun));
+
+        var missingEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_TOKEN"] = secretCanary
+        };
+        var missing = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-required-missing", packageRoot, "run", missingEnvironment, "--", "inspect", "startup");
+        AssertEqual(78, missing.ExitCode, Describe(missing));
+        AssertEqual(string.Empty, missing.StandardOutput, Describe(missing));
+        AssertTrue(missing.StandardError.Contains("Missing required configuration field: name (LANG_CONFIG_NAME)", StringComparison.Ordinal),
+            $"Missing required config should fail with exit 78 and identify only the declared field/environment name. {Describe(missing)}");
+        AssertTrue(!missing.StandardError.Contains(secretCanary, StringComparison.Ordinal),
+            "Missing-config diagnostics must not reveal any supplied secret value.");
+
+        var missingSecretEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_CONFIG_NAME"] = "Ada",
+            ["LANG_CONFIG_MODE"] = "normal"
+        };
+        var missingSecret = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "config-cli-required-secret-missing", packageRoot, "run", missingSecretEnvironment,
+            "--", "inspect", "startup");
+        AssertEqual(78, missingSecret.ExitCode, Describe(missingSecret));
+        AssertEqual(string.Empty, missingSecret.StandardOutput, Describe(missingSecret));
+        AssertTrue(missingSecret.StandardError.Contains(
+                "Missing required configuration field: token (LANG_CONFIG_TOKEN)", StringComparison.Ordinal),
+            $"A missing required secret should fail with exit 78 and identify only its declared field and environment name. {Describe(missingSecret)}");
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The config NativeAOT smoke test targets x64 hosts only.");
+
+        var aotBuild = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "config-cli-aot-build",
+            packageRoot,
+            "build",
+            AotPublishTimeout,
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+        AssertEqual(0, aotBuild.ExitCode, Describe(aotBuild));
+        const string nativePrefix = "Built native executable: ";
+        AssertTrue(aotBuild.StandardOutput.StartsWith(nativePrefix, StringComparison.Ordinal), Describe(aotBuild));
+        var nativeExecutable = aotBuild.StandardOutput[nativePrefix.Length..].Trim();
+        AssertTrue(Path.IsPathFullyQualified(nativeExecutable) && File.Exists(nativeExecutable),
+            $"Expected a NativeAOT config CLI executable at {nativeExecutable}.");
+        var nativeOutputDirectory = Path.GetDirectoryName(nativeExecutable)!;
+        var nativeSchemaBytes = await File.ReadAllBytesAsync(Path.Combine(nativeOutputDirectory, "command-schema.json"));
+        AssertTrue(managedSchemaBytes.SequenceEqual(nativeSchemaBytes),
+            "Managed and NativeAOT command schemas must remain byte-for-byte identical.");
+        using (var receipt = await AssertBuildReceiptAsync(
+                   nativeOutputDirectory,
+                   "native_aot",
+                   CurrentHostAotRid(),
+                   [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+                   packageRoot))
+            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT config CLI receipts should use schema version 1.");
+
+        var nativeRun = await ExecuteNativeWithEnvironmentAsync(
+            nativeExecutable,
+            TimeSpan.FromSeconds(30),
+            defaultEnvironment,
+            "inspect",
+            "startup",
+            "--reveal");
+        AssertEqual(0, nativeRun.ExitCode, Describe(nativeRun));
+        AssertEqual(secretCanary + Environment.NewLine, nativeRun.StandardOutput, Describe(nativeRun));
+        AssertConfigCliLog(nativeRun.StandardError, "NativeAOT run");
+        await AssertNoTextInFilesAsync(Path.Combine(packageRoot, "out"), secretCanary);
+    }
+
+    private static async Task TestConfigWebAsyncRuntime(Harness harness)
+    {
+        const string source = """
+            module app::main;
+            pub union Reply { Ready(Text) }
+
+            async fn home(config: Config, secrets: Secrets, logger: Logger) -> self::app::main::Reply effects { env.read, log.write } {
+                let greeting: Text = config.get_text("greeting");
+                let token: Secret<Text> = config.get_secret_text("token");
+                let logged: bool = logger.info("web\nstart", "ready");
+                return self::app::main::Reply.Ready(greeting);
+            }
+
+            route GET "/" {
+                handler: self::app::main::home;
+                response Ready: 200 json Text;
+            }
+            """;
+        const string manifest = "name = \"config-web-runtime\"\n"
+            + "version = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+            + "\n[config]\ngreeting = \"Text|required\"\ntoken = \"Secret<Text>|required\"\n"
+            + "\n[capabilities]\nnet.listen = \"allow\"\nenv.read = \"allow\"\nsecret.reveal = \"allow\"\nlog.write = \"allow\"\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "config-web-runtime",
+            manifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = source
+            });
+        var check = await harness.InvokePackageDirectoryAsync("config-web-runtime-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+
+        var wrongOrderSource = Regex.Replace(
+            source,
+            @"config: Config,\s*secrets: Secrets,\s*logger: Logger",
+            "logger: Logger, config: Config, secrets: Secrets",
+            RegexOptions.CultureInvariant);
+        AssertTrue(wrongOrderSource != source,
+            "The wrong-order web fixture must actually change the route handler signature.");
+        var wrongOrderPackage = await harness.WritePackageAsync(
+            "config-web-wrong-capability-order",
+            manifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = wrongOrderSource
+            });
+        var wrongOrder = await harness.InvokePackageDirectoryAsync(
+            "config-web-wrong-capability-order-check", wrongOrderPackage, "check", "--json");
+        AssertTrue(wrongOrder.ExitCode != 0, Describe(wrongOrder));
+        AssertTrue(ParseDiagnosticSnapshots(wrongOrder.StandardOutput).Any(diagnostic =>
+                diagnostic.Code == "E_ROUTE_HANDLER"
+                && diagnostic.Message == "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger order"),
+            $"Web config injection must follow the route capability parameter order. {Describe(wrongOrder)}");
+
+        const string secretCanary = "secret-canary-web-injection-48ca20";
+        var port = GetUnusedLoopbackPort();
+        var baseAddress = new Uri($"http://127.0.0.1:{port}");
+        using var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(4) };
+        using var process = harness.StartWebPackageProcessWithEnvironment(
+            "config-web-runtime-run",
+            packageRoot,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["LANG_CONFIG_GREETING"] = "web greeting",
+                ["LANG_CONFIG_TOKEN"] = secretCanary
+            },
+            "--urls",
+            baseAddress.ToString().TrimEnd('/'));
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var assertionsCompleted = false;
+        string stdout = string.Empty;
+        string stderr = string.Empty;
+        try
+        {
+            await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
+            using var response = await client.GetAsync("/");
+            AssertEqual(HttpStatusCode.OK, response.StatusCode, "The async config route should return its declared status.");
+            AssertEqual("application/json", response.Content.Headers.ContentType?.MediaType,
+                "The async config route should serialize its typed Text payload as JSON.");
+            using (var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+                AssertEqual("web greeting", body.RootElement.GetString(),
+                    "The generated web host should inject the startup Config value into its async route handler.");
+            assertionsCompleted = true;
+        }
+        finally
+        {
+            client.Dispose();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: !assertionsCompleted);
+                using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await process.WaitForExitAsync(termination.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("The config web process did not stop within 10 seconds.");
+                }
+            }
+
+            stdout = await stdoutTask;
+            stderr = await stderrTask;
+            await AssertLoopbackPortReleasedAsync(port);
+        }
+
+        AssertTrue(!stdout.Contains(secretCanary, StringComparison.Ordinal)
+            && !stderr.Contains(secretCanary, StringComparison.Ordinal),
+            "Web startup, route output, and non-reveal logger lines must not expose the supplied secret.");
+        var structuredLog = stderr.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => line.Contains("\"event\":\"web\\nstart\"", StringComparison.Ordinal));
+        AssertTrue(structuredLog is not null, $"Expected a structured web log line. stderr=<{stderr}>");
+        using var logDocument = JsonDocument.Parse(structuredLog!);
+        AssertJsonPropertyOrder(logDocument.RootElement, "level,event,detail,request_id");
+        AssertEqual("info", logDocument.RootElement.GetProperty("level").GetString(), "Web logger level mismatch.");
+        AssertEqual("web\nstart", logDocument.RootElement.GetProperty("event").GetString(), "Web logger event mismatch.");
+        AssertEqual("ready", logDocument.RootElement.GetProperty("detail").GetString(), "Web logger detail mismatch.");
+        AssertTrue(!string.IsNullOrWhiteSpace(logDocument.RootElement.GetProperty("request_id").GetString()),
+            "Web Logger.info lines must include the trusted request identifier last.");
+    }
+
+    private static void AssertConfigCliLog(string stderr, string context)
+    {
+        var lines = stderr.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+        AssertEqual(1, lines.Length, $"{context}: Logger.info should emit exactly one JSON line.");
+        using var document = JsonDocument.Parse(lines[0]);
+        AssertJsonPropertyOrder(document.RootElement, "level,event,detail");
+        AssertEqual("info", document.RootElement.GetProperty("level").GetString(), $"{context}: logger level mismatch.");
+        AssertEqual("boot\nready", document.RootElement.GetProperty("event").GetString(), $"{context}: logger event escaping mismatch.");
+        AssertEqual("quote: \" tab:\t slash:\\", document.RootElement.GetProperty("detail").GetString(),
+            $"{context}: logger detail escaping mismatch.");
     }
 
     private static async Task TestCommandContextualIdentifiers(Harness harness)
@@ -7248,7 +7857,7 @@ internal static class IntegrationTests
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
             var root = schema.RootElement;
-            AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "Scan CLI schema version mismatch.");
+            AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "Scan CLI schema version mismatch.");
             var command = root.GetProperty("commands")[0];
             AssertEqual("scan", command.GetProperty("name").GetString(), "Scan CLI command schema name mismatch.");
             var capabilities = command.GetProperty("capabilities");
@@ -8321,8 +8930,8 @@ internal static class IntegrationTests
 
         var compilerType = assembly.GetType("Compiler", throwOnError: true)!;
         var checkPackage = compilerType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(method => method.Name == "CheckPackage" && method.GetParameters().Length == 6);
-        var result = checkPackage.Invoke(null, [moduleInputs, "root", "app::main", null, false, true])
+            .Single(method => method.Name == "CheckPackage" && method.GetParameters().Length == 7);
+        var result = checkPackage.Invoke(null, [moduleInputs, "root", "app::main", null, false, true, null])
             ?? throw new InvalidOperationException("Compiler.CheckPackage returned no result.");
         var resultDiagnostics = result.GetType().GetProperty("Diagnostics")!.GetValue(result)
             ?? throw new InvalidOperationException("Compiler.CheckPackage returned no diagnostics list.");
@@ -8466,6 +9075,112 @@ internal static class IntegrationTests
         "kind = \"cli\"\n" +
         "source_root = \"src\"\n" +
         $"entry_module = \"{entryModule}\"\n";
+
+    private static string ConfigCliManifest() =>
+        CliPackageManifest().Replace("name = \"harness-package\"", "name = \"config-harness\"", StringComparison.Ordinal)
+        + "\n[config]\n"
+        + "name = \"Text|required\"\n"
+        + "mode = \"Text|default:normal\"\n"
+        + "token = \"Secret<Text>|required\"\n"
+        + "\n[capabilities]\n"
+        + "env.read = \"allow\"\n"
+        + "log.write = \"allow\"\n"
+        + "secret.reveal = \"allow\"\n";
+
+    private const string ConfigCliSource = """
+        module app::main;
+
+        pub union InspectError { Failed }
+
+        command inspect {
+            help "Read configured text and optionally reveal a secret.";
+            argument label: Text help "Label for this invocation.";
+            flag reveal help "Reveal the configured secret explicitly.";
+            handler: self::app::main::run;
+            error: self::app::main::describe;
+        }
+
+        fn read_values(config: Config) -> Text effects { env.read } {
+            let name: Text = config.get_text("name");
+            let mode: Text = config.get_text("mode");
+            if mode == "normal" {
+                return name;
+            } else {
+                return "unexpected-mode";
+            }
+        }
+
+        fn reveal_token(config: Config, secrets: Secrets) -> Text effects { env.read, secret.reveal } {
+            let token: Secret<Text> = config.get_secret_text("token");
+            return secrets.reveal_text(token);
+        }
+
+        pub fn run(
+            args: self::app::main::InspectArgs,
+            config: Config,
+            secrets: Secrets,
+            logger: Logger
+        ) -> Result<Text, self::app::main::InspectError> effects { env.read, log.write, secret.reveal } {
+            let logged: bool = logger.info("boot\nready", "quote: \" tab:\t slash:\\");
+            if args.reveal {
+                return Ok(self::app::main::reveal_token(config, secrets));
+            } else {
+                return Ok(self::app::main::read_values(config));
+            }
+        }
+
+        pub fn describe(error: self::app::main::InspectError) -> Text effects {} {
+            return match error {
+                self::app::main::InspectError.Failed => "failed"
+            };
+        }
+        """;
+
+    private static void AssertConfigFieldProjection(JsonElement config)
+    {
+        var fields = config.EnumerateArray().ToArray();
+        AssertEqual(3, fields.Length, "Config reports should describe each declared config field exactly once.");
+        var byName = fields.ToDictionary(field => field.GetProperty("name").GetString() ?? string.Empty, StringComparer.Ordinal);
+        AssertTrue(byName.Keys.SequenceEqual(["mode", "name", "token"], StringComparer.Ordinal),
+            "Config report fields must be sorted by source name.");
+        foreach (var field in fields)
+            AssertJsonPropertyOrder(field, "name,source_type,required,has_default");
+
+        AssertEqual("Text", byName["mode"].GetProperty("source_type").GetString(), "Defaulted config fields must project as Text.");
+        AssertEqual(false, byName["mode"].GetProperty("required").GetBoolean(), "A defaulted config field is not required.");
+        AssertEqual(true, byName["mode"].GetProperty("has_default").GetBoolean(), "A defaulted config field must set has_default.");
+        AssertEqual("Text", byName["name"].GetProperty("source_type").GetString(), "Required config fields must project as Text.");
+        AssertEqual(true, byName["name"].GetProperty("required").GetBoolean(), "A required text field must set required.");
+        AssertEqual(false, byName["name"].GetProperty("has_default").GetBoolean(), "A required text field has no default.");
+        AssertEqual("Secret<Text>", byName["token"].GetProperty("source_type").GetString(), "Secret config fields must retain their source type.");
+        AssertEqual(true, byName["token"].GetProperty("required").GetBoolean(), "A required secret field must set required.");
+        AssertEqual(false, byName["token"].GetProperty("has_default").GetBoolean(), "A required secret field has no default.");
+    }
+
+    private static JsonDocument ParseConfigJson(string json, string artifact)
+    {
+        try
+        {
+            return JsonDocument.Parse(json);
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"The config {artifact} output was not valid JSON: <{json}>", exception);
+        }
+    }
+
+    private static async Task AssertNoTextInFilesAsync(string directory, string text)
+    {
+        if (!Directory.Exists(directory))
+            return;
+
+        foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            var contents = Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path));
+            AssertTrue(!contents.Contains(text, StringComparison.Ordinal),
+                $"Machine artifact {Path.GetFileName(path)} must not contain a runtime secret value.");
+        }
+    }
 
     private static string LibraryPackageManifest(string name = "harness-library") =>
         $"name = \"{name}\"\n" +
@@ -8782,8 +9497,8 @@ internal static class IntegrationTests
             "A typed-command NativeAOT receipt should identify its root package.");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
-            AssertEqual(2, schema.RootElement.GetProperty("schema_version").GetInt32(),
-                "The AOT command schema version must be 2.");
+            AssertEqual(3, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "The AOT command schema version must be 3.");
             AssertEqual("scan", schema.RootElement.GetProperty("commands")[0].GetProperty("name").GetString(),
                 "The AOT command schema should retain its command declaration.");
             AssertJsonStringArray(schema.RootElement.GetProperty("commands")[0].GetProperty("capabilities"), ["net.client"]);
@@ -8835,7 +9550,7 @@ internal static class IntegrationTests
         AssertTrue(File.Exists(schemaPath), $"Expected scan CLI AOT schema beside the executable: {schemaPath}");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
-            AssertEqual(2, schema.RootElement.GetProperty("schema_version").GetInt32(),
+            AssertEqual(3, schema.RootElement.GetProperty("schema_version").GetInt32(),
                 "AOT scan command schema version mismatch.");
             var command = schema.RootElement.GetProperty("commands")[0];
             AssertEqual("scan", command.GetProperty("name").GetString(), "AOT scan schema command mismatch.");
@@ -8871,7 +9586,14 @@ internal static class IntegrationTests
             $"The compiler should report a diagnostic instead of a backend stack trace. {Describe(result)}");
     }
 
-    private static async Task<ProcessResult> ExecuteNativeAsync(string executablePath, TimeSpan timeout, params string[] arguments)
+    private static Task<ProcessResult> ExecuteNativeAsync(string executablePath, TimeSpan timeout, params string[] arguments) =>
+        ExecuteNativeWithEnvironmentAsync(executablePath, timeout, null, arguments);
+
+    private static async Task<ProcessResult> ExecuteNativeWithEnvironmentAsync(
+        string executablePath,
+        TimeSpan timeout,
+        IReadOnlyDictionary<string, string>? environment,
+        params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -8886,6 +9608,15 @@ internal static class IntegrationTests
         };
         foreach (var argument in arguments)
             startInfo.ArgumentList.Add(argument);
+        foreach (var name in startInfo.Environment.Keys
+                     .Where(name => name.StartsWith("LANG_CONFIG_", StringComparison.OrdinalIgnoreCase))
+                     .ToArray())
+            startInfo.Environment.Remove(name);
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+                startInfo.Environment[name] = value;
+        }
 
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start())
@@ -9328,7 +10059,12 @@ internal static class IntegrationTests
         public Task<ProcessResult> InvokeAsync(string caseName, string command, string source, params string[] additionalArguments) =>
             InvokeWithTimeoutAsync(caseName, command, source, ProcessTimeout, additionalArguments);
 
-        public async Task<ProcessResult> InvokeCompilerCommandAsync(params string[] arguments)
+        public Task<ProcessResult> InvokeCompilerCommandAsync(params string[] arguments) =>
+            InvokeCompilerCommandWithEnvironmentAsync(null, arguments);
+
+        public async Task<ProcessResult> InvokeCompilerCommandWithEnvironmentAsync(
+            IReadOnlyDictionary<string, string>? environment,
+            params string[] arguments)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -9344,6 +10080,12 @@ internal static class IntegrationTests
             startInfo.ArgumentList.Add(compilerDll);
             foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
             startInfo.Environment["LANG_DOTNET"] = dotnet;
+            RemoveConfigEnvironment(startInfo);
+            if (environment is not null)
+            {
+                foreach (var (name, value) in environment)
+                    startInfo.Environment[name] = value;
+            }
 
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start())
@@ -9416,6 +10158,23 @@ internal static class IntegrationTests
                 command,
                 ProcessTimeout,
                 null,
+                null,
+                additionalArguments);
+
+        public Task<ProcessResult> InvokePackageDirectoryWithEnvironmentAsync(
+            string caseName,
+            string packageRoot,
+            string command,
+            IReadOnlyDictionary<string, string> environment,
+            params string[] additionalArguments) =>
+            InvokeTargetWithTimeoutAsync(
+                caseName,
+                packageRoot,
+                packageRoot,
+                command,
+                ProcessTimeout,
+                null,
+                environment,
                 additionalArguments);
 
         public Process StartWebPackageProcess(string caseName, string packageRoot, params string[] applicationArguments)
@@ -9447,6 +10206,7 @@ internal static class IntegrationTests
             foreach (var argument in applicationArguments)
                 startInfo.ArgumentList.Add(argument);
             startInfo.Environment["LANG_DOTNET"] = dotnet;
+            RemoveConfigEnvironment(startInfo);
             if (environment is not null)
             {
                 foreach (var (name, value) in environment)
@@ -9511,6 +10271,7 @@ internal static class IntegrationTests
                 command,
                 timeout,
                 null,
+                null,
                 additionalArguments);
 
         public async Task<ProcessResult> InvokeFileWithTimeoutAsync(string caseName, string sourcePath, string command, TimeSpan timeout, string? dotnetHostOverride, params string[] additionalArguments)
@@ -9524,6 +10285,7 @@ internal static class IntegrationTests
                 command,
                 timeout,
                 dotnetHostOverride,
+                null,
                 additionalArguments);
         }
 
@@ -9534,6 +10296,7 @@ internal static class IntegrationTests
             string command,
             TimeSpan timeout,
             string? dotnetHostOverride,
+            IReadOnlyDictionary<string, string>? environment,
             params string[] additionalArguments)
         {
             var startInfo = new ProcessStartInfo
@@ -9552,6 +10315,12 @@ internal static class IntegrationTests
             startInfo.ArgumentList.Add(target);
             foreach (var argument in additionalArguments) startInfo.ArgumentList.Add(argument);
             startInfo.Environment["LANG_DOTNET"] = dotnetHostOverride ?? dotnet;
+            RemoveConfigEnvironment(startInfo);
+            if (environment is not null)
+            {
+                foreach (var (name, value) in environment)
+                    startInfo.Environment[name] = value;
+            }
 
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start()) throw new InvalidOperationException($"Could not start the lang compiler process for {caseName}.");
@@ -9580,6 +10349,14 @@ internal static class IntegrationTests
             }
 
             return new ProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
+        }
+
+        private static void RemoveConfigEnvironment(ProcessStartInfo startInfo)
+        {
+            foreach (var name in startInfo.Environment.Keys
+                         .Where(name => name.StartsWith("LANG_CONFIG_", StringComparison.OrdinalIgnoreCase))
+                         .ToArray())
+                startInfo.Environment.Remove(name);
         }
     }
 

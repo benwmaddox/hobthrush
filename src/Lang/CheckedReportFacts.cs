@@ -3,9 +3,21 @@ internal sealed record TrustedOperation(string Operation, string Trust, IReadOnl
 internal static class CheckedReportFacts
 {
     public static string[] RequiredCapabilities(IEnumerable<string> effects) => effects
-        .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write" or "net.client")
+        .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write" or "net.client" or
+            "env.read" or "secret.reveal" or "log.write")
         .Distinct(StringComparer.Ordinal)
         .OrderBy(effect => effect, StringComparer.Ordinal)
+        .ToArray();
+
+    public static object[] ConfigMetadata(IEnumerable<CheckedConfigField> fields) => fields
+        .OrderBy(field => field.Name, StringComparer.Ordinal)
+        .Select(field => (object)new
+        {
+            name = field.Name,
+            source_type = field.Kind == ConfigFieldKind.Text ? "Text" : "Secret<Text>",
+            required = field.Required,
+            has_default = field.HasDefault
+        })
         .ToArray();
 
     public static IReadOnlyList<TrustedOperation> FindTrustedAdapterOperations(
@@ -28,6 +40,9 @@ internal static class CheckedReportFacts
                 "DbRead.query_one" => "db.read",
                 "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => "db.write",
                 "HttpClient.get_text_async" => "net.client",
+                "Config.get_text" or "Config.get_secret_text" => "env.read",
+                "Secrets.reveal_text" => "secret.reveal",
+                "Logger.info" => "log.write",
                 _ => throw new InvalidOperationException($"Unknown trusted adapter operation '{operation}'")
             }])).ToArray();
 
@@ -128,6 +143,14 @@ internal static class CheckedReportFacts
                         operationNames.Add("FsWrite.write_text");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.HttpGetTextAsync)
                         operationNames.Add("HttpClient.get_text_async");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.ConfigGetText)
+                        operationNames.Add("Config.get_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.ConfigGetSecretText)
+                        operationNames.Add("Config.get_secret_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.SecretsRevealText)
+                        operationNames.Add("Secrets.reveal_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.LoggerInfo)
+                        operationNames.Add("Logger.info");
                     foreach (var argument in intrinsic.Arguments)
                         VisitExpression(argument);
                     break;

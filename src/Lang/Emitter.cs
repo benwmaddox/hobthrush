@@ -233,7 +233,7 @@ internal static class Emitter
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
         {
             writer.WriteStartObject();
-            writer.WriteNumber("schema_version", 2);
+            writer.WriteNumber("schema_version", 3);
             writer.WriteStartArray("commands");
             foreach (var command in program.Commands.OrderBy(command => command.Id))
             {
@@ -266,6 +266,9 @@ internal static class Emitter
         CheckedCapabilityKind.DbRead => "db.read",
         CheckedCapabilityKind.DbWrite => "db.write",
         CheckedCapabilityKind.HttpClient => "net.client",
+        CheckedCapabilityKind.Config => "env.read",
+        CheckedCapabilityKind.Secrets => "secret.reveal",
+        CheckedCapabilityKind.Logger => "log.write",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
 
@@ -409,6 +412,11 @@ internal static class Emitter
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
+            if (NeedsConfigSnapshot) EmitConfigSnapshotRuntime();
+            if (NeedsSecretTextType) EmitSecretTextType();
+            if (NeedsConfigType) EmitConfigType();
+            if (NeedsSecretsType) EmitSecretsType();
+            if (NeedsLoggerType) EmitLoggerType();
             if (NeedsFilePathType) EmitFilePathType();
             if (NeedsHtmlType || webHost) EmitHtmlType();
             if (NeedsFsReadType) EmitFsReadType();
@@ -462,6 +470,189 @@ internal static class Emitter
             _source.AppendLine("    }");
             _source.AppendLine();
         }
+
+        private void EmitConfigSnapshotRuntime()
+        {
+            _source.AppendLine("    internal sealed class ConfigSnapshot");
+            _source.AppendLine("    {");
+            foreach (var (field, index) in program.ConfigFields.Select((field, index) => (field, index)))
+                _source.Append("        internal ").Append(ConfigFieldRuntimeType(field)).Append(" Field_")
+                    .Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(" { get; }");
+
+            var constructorParameters = program.ConfigFields.Select((field, index) =>
+                ConfigFieldRuntimeType(field) + " field_" + index.ToString(CultureInfo.InvariantCulture));
+            _source.Append("        internal ConfigSnapshot(").Append(string.Join(", ", constructorParameters)).AppendLine(")");
+            _source.AppendLine("        {");
+            foreach (var (_, index) in program.ConfigFields.Select((field, index) => (field, index)))
+                _source.Append("            Field_").Append(index.ToString(CultureInfo.InvariantCulture)).Append(" = field_")
+                    .Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(";");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            _source.AppendLine("    private static bool TryCreateConfigSnapshot(out ConfigSnapshot snapshot, out string missingConfiguration)");
+            _source.AppendLine("    {");
+            foreach (var (field, index) in program.ConfigFields.Select((field, index) => (field, index)))
+            {
+                var suffix = index.ToString(CultureInfo.InvariantCulture);
+                var rawName = "rawConfig_" + suffix;
+                _source.Append("        var ").Append(rawName).Append(" = Environment.GetEnvironmentVariable(")
+                    .Append(JsonSerializer.Serialize(field.EnvironmentName)).AppendLine(");");
+            }
+
+            foreach (var (field, index) in program.ConfigFields.Select((field, index) => (field, index)))
+            {
+                var suffix = index.ToString(CultureInfo.InvariantCulture);
+                var rawName = "rawConfig_" + suffix;
+                var valueName = "configField_" + suffix;
+                if (field.Required)
+                {
+                    _source.Append("        if (").Append(rawName).AppendLine(" is null)");
+                    _source.AppendLine("        {");
+                    _source.Append("            missingConfiguration = ")
+                        .Append(JsonSerializer.Serialize(field.Name + " (" + field.EnvironmentName + ")")).AppendLine(";");
+                    _source.AppendLine("            snapshot = null!;");
+                    _source.AppendLine("            return false;");
+                    _source.AppendLine("        }");
+                    if (field.Kind == ConfigFieldKind.SecretText)
+                    {
+                        if (field.HasDefault)
+                            throw new InvalidOperationException("Secret config fields cannot have defaults");
+                        _source.Append("        var ").Append(valueName).Append(" = CreateSecretText(").Append(rawName).AppendLine("!);");
+                    }
+                    else
+                    {
+                        if (field.HasDefault)
+                            throw new InvalidOperationException("Required config fields cannot also have defaults");
+                        _source.Append("        var ").Append(valueName).Append(" = ").Append(rawName).AppendLine("!;");
+                    }
+                }
+                else if (field.HasDefault && field.Kind == ConfigFieldKind.Text)
+                {
+                    _source.Append("        var ").Append(valueName).Append(" = ").Append(rawName).Append(" ?? ")
+                        .Append(JsonSerializer.Serialize(field.DefaultValue ??
+                            throw new InvalidOperationException("Text config default is missing its literal"))).AppendLine(";");
+                }
+                else
+                {
+                    throw new InvalidOperationException("Checked config fields must be required or have a text default");
+                }
+            }
+
+            _source.Append("        snapshot = new ConfigSnapshot(")
+                .Append(string.Join(", ", program.ConfigFields.Select((_, index) =>
+                    "configField_" + index.ToString(CultureInfo.InvariantCulture))))
+                .AppendLine(");");
+            _source.AppendLine("        missingConfiguration = string.Empty;");
+            _source.AppendLine("        return true;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitSecretTextType()
+        {
+            _source.AppendLine("    private sealed class SecretTextContents");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal SecretTextContents(string value) => Value = value;");
+            _source.AppendLine("        internal string Value { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static readonly global::System.Runtime.CompilerServices.ConditionalWeakTable<SecretText, SecretTextContents> SecretTextValues = new();");
+            _source.AppendLine("    public sealed class SecretText : IFormattable");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal SecretText() { }");
+            _source.AppendLine("        public override string ToString() => \"[REDACTED]\";");
+            _source.AppendLine("        string IFormattable.ToString(string? format, IFormatProvider? formatProvider) => \"[REDACTED]\";");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static SecretText CreateSecretText(string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(value);");
+            _source.AppendLine("        var secret = new SecretText();");
+            _source.AppendLine("        SecretTextValues.Add(secret, new SecretTextContents(value));");
+            _source.AppendLine("        return secret;");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static string RevealSecretText(SecretText value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(value);");
+            _source.AppendLine("        if (!SecretTextValues.TryGetValue(value, out var contents)) throw new InvalidOperationException(\"Unknown secret value\");");
+            _source.AppendLine("        return contents.Value;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitConfigType()
+        {
+            _source.AppendLine("    public sealed class Config");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private readonly ConfigSnapshot _snapshot;");
+            _source.AppendLine("        internal Config(ConfigSnapshot snapshot) => _snapshot = snapshot;");
+            foreach (var (field, index) in program.ConfigFields.Select((field, index) => (field, index)))
+            {
+                var suffix = index.ToString(CultureInfo.InvariantCulture);
+                var resultType = ConfigFieldRuntimeType(field);
+                var methodName = field.Kind == ConfigFieldKind.SecretText ? "ReadSecretText_" : "ReadText_";
+                _source.Append("        internal ").Append(resultType).Append(' ').Append(methodName).Append(suffix)
+                    .Append("() => _snapshot.Field_").Append(suffix).AppendLine(";");
+            }
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitSecretsType()
+        {
+            _source.AppendLine("    public sealed class Secrets");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal Secrets() { }");
+            _source.AppendLine("        internal string RevealText(SecretText value) => RevealSecretText(value);");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitLoggerType()
+        {
+            _source.AppendLine("    public sealed class Logger");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private readonly string? _requestId;");
+            _source.AppendLine("        internal Logger(string? requestId) => _requestId = requestId;");
+            _source.AppendLine("        internal bool Info(string eventName, string detail)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            ArgumentNullException.ThrowIfNull(eventName);");
+            _source.AppendLine("            ArgumentNullException.ThrowIfNull(detail);");
+            _source.AppendLine("            WriteInfoLog(eventName, detail, _requestId);");
+            _source.AppendLine("            return true;");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static readonly object LogWriteLock = new();");
+            _source.AppendLine("    private static readonly global::System.IO.Stream LogErrorStream = Console.OpenStandardError();");
+            _source.AppendLine("    private static void WriteInfoLog(string eventName, string detail, string? requestId)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        using var buffer = new global::System.IO.MemoryStream();");
+            _source.AppendLine("        using (var writer = new global::System.Text.Json.Utf8JsonWriter(buffer))");
+            _source.AppendLine("        {");
+            _source.AppendLine("            writer.WriteStartObject();");
+            _source.AppendLine("            writer.WriteString(\"level\", \"info\");");
+            _source.AppendLine("            writer.WriteString(\"event\", eventName);");
+            _source.AppendLine("            writer.WriteString(\"detail\", detail);");
+            _source.AppendLine("            if (!string.IsNullOrEmpty(requestId)) writer.WriteString(\"request_id\", requestId);");
+            _source.AppendLine("            writer.WriteEndObject();");
+            _source.AppendLine("            writer.Flush();");
+            _source.AppendLine("        }");
+            _source.AppendLine("        buffer.WriteByte((byte)'\\n');");
+            _source.AppendLine("        var record = buffer.ToArray();");
+            _source.AppendLine("        lock (LogWriteLock)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            LogErrorStream.Write(record);");
+            _source.AppendLine("            LogErrorStream.Flush();");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private static string ConfigFieldRuntimeType(CheckedConfigField field) => field.Kind switch
+        {
+            ConfigFieldKind.Text => "string",
+            ConfigFieldKind.SecretText => "SecretText",
+            _ => throw new InvalidOperationException("Unknown checked config field kind")
+        };
 
         private void EmitFsReadType()
         {
@@ -871,6 +1062,17 @@ internal static class Emitter
                 EmitFsWriteText(expression),
             BuiltinIntrinsic.FsWriteText =>
                 throw new InvalidOperationException("FsWrite.write_text requires a receiver, path, and value"),
+            BuiltinIntrinsic.ConfigGetText => EmitConfigRead(expression, ConfigFieldKind.Text),
+            BuiltinIntrinsic.ConfigGetSecretText => EmitConfigRead(expression, ConfigFieldKind.SecretText),
+            BuiltinIntrinsic.SecretsRevealText when expression.Arguments.Count == 2 =>
+                "(" + EmitExpr(expression.Arguments[0]) + ").RevealText(" + EmitExpr(expression.Arguments[1]) + ")",
+            BuiltinIntrinsic.SecretsRevealText =>
+                throw new InvalidOperationException("Secrets.reveal_text requires a receiver and a Secret<Text> value"),
+            BuiltinIntrinsic.LoggerInfo when expression.Arguments.Count == 3 =>
+                "(" + EmitExpr(expression.Arguments[0]) + ").Info(" + EmitExpr(expression.Arguments[1]) + ", " +
+                EmitExpr(expression.Arguments[2]) + ")",
+            BuiltinIntrinsic.LoggerInfo =>
+                throw new InvalidOperationException("Logger.info requires a receiver, event, and detail"),
             BuiltinIntrinsic.HtmlText when expression.Arguments.Count == 1 =>
                 "HtmlText(" + EmitExpr(expression.Arguments[0]) + ")",
             BuiltinIntrinsic.HtmlHeading when expression.Arguments.Count == 1 =>
@@ -885,6 +1087,30 @@ internal static class Emitter
                 "TextSplit(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")",
             _ => throw new InvalidOperationException("Unknown builtin intrinsic")
         };
+
+        private string EmitConfigRead(TypedIntrinsicCallExpr expression, ConfigFieldKind expectedKind)
+        {
+            if (expression.Arguments.Count != 2 || expression.Arguments[1] is not TypedTextExpr fieldName)
+                throw new InvalidOperationException("Config lookup must retain its checked literal field name");
+
+            var fieldIndex = -1;
+            for (var index = 0; index < program.ConfigFields.Count; index++)
+            {
+                var field = program.ConfigFields[index];
+                if (!string.Equals(field.Name, fieldName.Value, StringComparison.Ordinal)) continue;
+                if (field.Kind != expectedKind)
+                    throw new InvalidOperationException("Checked config lookup field kind does not match its runtime accessor");
+                fieldIndex = index;
+                break;
+            }
+
+            if (fieldIndex < 0)
+                throw new InvalidOperationException("Checked config lookup refers to an unknown field");
+
+            var suffix = fieldIndex.ToString(CultureInfo.InvariantCulture);
+            var method = expectedKind == ConfigFieldKind.SecretText ? "ReadSecretText_" : "ReadText_";
+            return "(" + EmitExpr(expression.Arguments[0]) + ")." + method + suffix + "()";
+        }
 
         private string EmitFsReadText(TypedIntrinsicCallExpr expression)
         {
@@ -1668,6 +1894,15 @@ internal static class Emitter
             _source.AppendLine("    private const int MaxTransportRequestBodyBytes = MaxRequestBodyBytes + 65536;");
             _source.AppendLine("    public static async Task Main(string[] args)");
             _source.AppendLine("    {");
+            if (NeedsConfigSnapshot)
+            {
+                _source.AppendLine("        if (!TryCreateConfigSnapshot(out var configSnapshot, out var missingConfiguration))");
+                _source.AppendLine("        {");
+                _source.AppendLine("            Console.Error.WriteLine(\"Missing required configuration field: \" + missingConfiguration);");
+                _source.AppendLine("            Environment.ExitCode = 78;");
+                _source.AppendLine("            return;");
+                _source.AppendLine("        }");
+            }
             _source.AppendLine("        var builder = WebApplication.CreateBuilder(args);");
             _source.AppendLine("        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = MaxTransportRequestBodyBytes);");
             _source.AppendLine("        var app = builder.Build();");
@@ -1692,7 +1927,9 @@ internal static class Emitter
                 _source.Append("        app.MapMethods(").Append(JsonSerializer.Serialize(route.Path))
                     .Append(", new[] { ").Append(JsonSerializer.Serialize(route.Method)).Append(" }, ")
                     .Append("(HttpContext context) => HandleRoute_")
-                    .Append(route.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("(context, app.Logger));");
+                    .Append(route.Id.ToString(CultureInfo.InvariantCulture)).Append("(context, app.Logger");
+                if (NeedsConfigSnapshot) _source.Append(", configSnapshot");
+                _source.AppendLine("));");
             }
             _source.AppendLine("        using var parentMonitorCancellation = new CancellationTokenSource();");
             _source.AppendLine("        var parentMonitor = hasWrapperParent");
@@ -1919,7 +2156,9 @@ internal static class Emitter
             var handler = program.Functions.Single(function => function.Id == route.HandlerFunctionId);
             var union = program.Unions.Single(item => item.Id == route.ReplyUnionId);
             _source.Append("    private static async Task HandleRoute_").Append(routeId)
-                .AppendLine("(HttpContext context, ILogger logger)");
+                .Append("(HttpContext context, ILogger logger");
+            if (NeedsConfigSnapshot) _source.Append(", ConfigSnapshot configSnapshot");
+            _source.AppendLine(")");
             _source.AppendLine("    {");
             _source.AppendLine("        try");
             _source.AppendLine("        {");
@@ -2035,6 +2274,9 @@ internal static class Emitter
                     CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
                     CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
                     CheckedCapabilityKind.HttpClient => "new HttpClientCapability(" + HttpOriginLiteral + ", context.RequestAborted)",
+                    CheckedCapabilityKind.Config => "new Config(configSnapshot)",
+                    CheckedCapabilityKind.Secrets => "new Secrets()",
+                    CheckedCapabilityKind.Logger => "new Logger(context.TraceIdentifier)",
                     _ => throw new InvalidOperationException("Unsupported checked route capability")
                 };
             }
@@ -2135,6 +2377,14 @@ internal static class Emitter
                 _source.AppendLine("            try");
                 _source.AppendLine("            {");
                 _source.AppendLine("                Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+                if (NeedsConfigSnapshot)
+                {
+                    _source.AppendLine("                if (!TryCreateConfigSnapshot(out _, out var missingConfiguration))");
+                    _source.AppendLine("                {");
+                    _source.AppendLine("                    Console.Error.WriteLine(\"Missing required configuration field: \" + missingConfiguration);");
+                    _source.AppendLine("                    return 78;");
+                    _source.AppendLine("                }");
+                }
 
                 var asyncCall = "(await Function_" + entry.Id.ToString(CultureInfo.InvariantCulture) + "(cancellation.Token))";
                 if (entry.ReturnType.IsI32)
@@ -2168,6 +2418,14 @@ internal static class Emitter
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+            if (NeedsConfigSnapshot)
+            {
+                _source.AppendLine("            if (!TryCreateConfigSnapshot(out _, out var missingConfiguration))");
+                _source.AppendLine("            {");
+                _source.AppendLine("                Console.Error.WriteLine(\"Missing required configuration field: \" + missingConfiguration);");
+                _source.AppendLine("                return 78;");
+                _source.AppendLine("            }");
+            }
 
             var call = "Function_" + entry.Id.ToString(CultureInfo.InvariantCulture) + "()";
             if (entry.ReturnType.IsI32)
@@ -2202,6 +2460,14 @@ internal static class Emitter
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             _source.AppendLine("            Console.OutputEncoding = new System.Text.UTF8Encoding(false);");
+            if (NeedsConfigSnapshot)
+            {
+                _source.AppendLine("            if (!TryCreateConfigSnapshot(out var configSnapshot, out var missingConfiguration))");
+                _source.AppendLine("            {");
+                _source.AppendLine("                Console.Error.WriteLine(\"Missing required configuration field: \" + missingConfiguration);");
+                _source.AppendLine("                return 78;");
+                _source.AppendLine("            }");
+            }
             _source.AppendLine("            if (args.Length == 1 && args[0] == \"--help\")");
             _source.AppendLine("            {");
             _source.Append("                Console.WriteLine(").Append(JsonSerializer.Serialize(TopLevelHelp())).AppendLine(");");
@@ -2223,10 +2489,10 @@ internal static class Emitter
                 _source.AppendLine("                    }");
                 _source.Append("                    return ");
                 if (command.HandlerIsAsync) _source.Append("await ");
-                _source.Append("RunCommand_").Append(command.Id.ToString(CultureInfo.InvariantCulture))
-                    .AppendLine(command.HandlerIsAsync
-                        ? "(args[1..], cancellation.Token);"
-                        : "(args[1..]);");
+                _source.Append("RunCommand_").Append(command.Id.ToString(CultureInfo.InvariantCulture)).Append("(args[1..]");
+                if (command.HandlerIsAsync) _source.Append(", cancellation.Token");
+                if (NeedsConfigSnapshot) _source.Append(", configSnapshot");
+                _source.AppendLine(");");
             }
             _source.AppendLine("                default:");
             _source.AppendLine("                    return CliUsageError(\"CLI_UNKNOWN_COMMAND\", args[0]);");
@@ -2267,9 +2533,10 @@ internal static class Emitter
                     ? "    private static async Task<int> RunCommand_"
                     : "    private static int RunCommand_")
                 .Append(command.Id.ToString(CultureInfo.InvariantCulture))
-                .AppendLine(command.HandlerIsAsync
-                    ? "(string[] args, CancellationToken cancellationToken)"
-                    : "(string[] args)");
+                .Append("(string[] args");
+            if (command.HandlerIsAsync) _source.Append(", CancellationToken cancellationToken");
+            if (NeedsConfigSnapshot) _source.Append(", ConfigSnapshot configSnapshot");
+            _source.AppendLine(")");
             _source.AppendLine("    {");
             foreach (var input in inputs)
             {
@@ -2397,6 +2664,9 @@ internal static class Emitter
                     CheckedCapabilityKind.HttpClient => command.HandlerIsAsync
                         ? ", new HttpClientCapability(" + HttpOriginLiteral + ", cancellationToken)"
                         : ", new HttpClientCapability(" + HttpOriginLiteral + ", System.Threading.CancellationToken.None)",
+                    CheckedCapabilityKind.Config => ", new Config(configSnapshot)",
+                    CheckedCapabilityKind.Secrets => ", new Secrets()",
+                    CheckedCapabilityKind.Logger => ", new Logger(null)",
                     _ => throw new InvalidOperationException("Unsupported checked command capability")
                 });
             }
@@ -2640,6 +2910,10 @@ internal static class Emitter
             LangTypeKind.TypeParameter => EmitTypeParameter(type),
             LangTypeKind.FsRead => "FsRead",
             LangTypeKind.FsWrite => "FsWrite",
+            LangTypeKind.Config => "Config",
+            LangTypeKind.Secrets => "Secrets",
+            LangTypeKind.Logger => "Logger",
+            LangTypeKind.SecretText => "SecretText",
             LangTypeKind.FsError => "FsError",
             LangTypeKind.DbRead => "DbRead",
             LangTypeKind.DbWrite => "DbWrite",
@@ -2670,6 +2944,25 @@ internal static class Emitter
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
 
         private bool NeedsHtmlType => UsesTypeKind(LangTypeKind.Html);
+
+        private bool NeedsConfigSnapshot => program.ConfigFields.Count != 0 || UsesTypeKind(LangTypeKind.Config) ||
+            HasCapabilityKind(CheckedCapabilityKind.Config);
+
+        private bool NeedsConfigType => program.ConfigFields.Count != 0 || UsesTypeKind(LangTypeKind.Config) ||
+            HasCapabilityKind(CheckedCapabilityKind.Config);
+
+        private bool NeedsSecretsType => UsesTypeKind(LangTypeKind.Secrets) ||
+            HasCapabilityKind(CheckedCapabilityKind.Secrets);
+
+        private bool NeedsLoggerType => UsesTypeKind(LangTypeKind.Logger) ||
+            HasCapabilityKind(CheckedCapabilityKind.Logger);
+
+        private bool NeedsSecretTextType => program.ConfigFields.Any(configField => configField.Kind == ConfigFieldKind.SecretText) ||
+            UsesTypeKind(LangTypeKind.SecretText) || NeedsSecretsType;
+
+        private bool HasCapabilityKind(CheckedCapabilityKind kind) =>
+            program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == kind)) ||
+            program.Routes.Any(route => route.Capabilities.Any(capability => capability.Kind == kind));
 
         private bool NeedsFsReadType => UsesTypeKind(LangTypeKind.FsRead) || UsesFsReadText ||
             program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsRead));

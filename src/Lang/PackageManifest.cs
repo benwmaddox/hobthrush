@@ -13,10 +13,20 @@ internal sealed record PackageManifest(
     string? SqliteSchema,
     string? HttpOrigin,
     IReadOnlySet<string> Capabilities,
+    IReadOnlyList<ConfigField> ConfigFields,
     IReadOnlyList<PackageDependency> Dependencies)
 {
     public bool IsLibrary => Kind == "lib";
 }
+
+internal enum ConfigFieldKind { Text, SecretText }
+
+internal sealed record ConfigField(
+    string Name,
+    ConfigFieldKind Kind,
+    bool Required,
+    bool HasDefault,
+    string? DefaultValue);
 
 internal sealed record PackageDependency(string Alias, string Path);
 
@@ -152,7 +162,12 @@ internal static class PackageLoader
         }
 
         var parsedManifest = ParseManifest(manifestText, manifestFile, diagnostics);
-        ValidateManifest(parsedManifest.Values, parsedManifest.Capabilities, manifestFile, diagnostics);
+        ValidateManifest(
+            parsedManifest.Values,
+            parsedManifest.Capabilities,
+            parsedManifest.ConfigSectionSeen,
+            manifestFile,
+            diagnostics);
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
@@ -169,6 +184,7 @@ internal static class PackageLoader
                     ? stableHttpOrigin
                     : null,
             parsedManifest.Capabilities,
+            parsedManifest.ConfigFields,
             parsedManifest.Dependencies);
 
         string sourceDirectory;
@@ -435,7 +451,9 @@ internal static class PackageLoader
     private sealed record ParsedManifest(
         Dictionary<string, string> Values,
         IReadOnlyList<PackageDependency> Dependencies,
-        IReadOnlySet<string> Capabilities);
+        IReadOnlySet<string> Capabilities,
+        IReadOnlyList<ConfigField> ConfigFields,
+        bool ConfigSectionSeen);
 
     private static ParsedManifest ParseManifest(
         string text,
@@ -445,9 +463,13 @@ internal static class PackageLoader
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var dependencies = new List<PackageDependency>();
         var capabilities = new HashSet<string>(StringComparer.Ordinal);
+        var configFields = new List<ConfigField>();
+        var configNames = new HashSet<string>(StringComparer.Ordinal);
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inConfig = false;
         var inCapabilities = false;
         var inDependencies = false;
+        var configSeen = false;
         var capabilitiesSeen = false;
         var dependenciesSeen = false;
         using var reader = new StringReader(text);
@@ -461,8 +483,36 @@ internal static class PackageLoader
 
             if (trimmed.StartsWith('['))
             {
+                if (trimmed == "[config]")
+                {
+                    if (configSeen)
+                    {
+                        diagnostics.Add(AtLine("E_MANIFEST", "The [config] section may appear only once", file, lineNumber));
+                        inConfig = true;
+                        inCapabilities = false;
+                        inDependencies = false;
+                        continue;
+                    }
+                    if (capabilitiesSeen || dependenciesSeen)
+                    {
+                        diagnostics.Add(AtLine("E_MANIFEST", "The [config] section must appear before [capabilities] and [dependencies]", file, lineNumber));
+                        configSeen = true;
+                        inConfig = true;
+                        inCapabilities = false;
+                        inDependencies = false;
+                        continue;
+                    }
+
+                    inConfig = true;
+                    inCapabilities = false;
+                    inDependencies = false;
+                    configSeen = true;
+                    continue;
+                }
+
                 if (trimmed == "[capabilities]" && !capabilitiesSeen && !dependenciesSeen)
                 {
+                    inConfig = false;
                     inCapabilities = true;
                     inDependencies = false;
                     capabilitiesSeen = true;
@@ -471,6 +521,7 @@ internal static class PackageLoader
 
                 if (trimmed == "[dependencies]" && !dependenciesSeen)
                 {
+                    inConfig = false;
                     inCapabilities = false;
                     inDependencies = true;
                     dependenciesSeen = true;
@@ -483,6 +534,9 @@ internal static class PackageLoader
                         ? "The [capabilities] section may appear once before [dependencies]"
                     : $"Unknown manifest section '{trimmed}'";
                 diagnostics.Add(AtLine("E_MANIFEST", sectionMessage, file, lineNumber));
+                inConfig = false;
+                inCapabilities = false;
+                inDependencies = false;
                 continue;
             }
 
@@ -499,7 +553,9 @@ internal static class PackageLoader
                     "E_MANIFEST",
                     inDependencies
                         ? "Expected a dependency alias = \"relative/path\" assignment"
-                        : "Expected a simple key = \"value\" assignment",
+                        : inConfig
+                            ? "Expected a config field name = \"descriptor\" assignment"
+                            : "Expected a simple key = \"value\" assignment",
                     file,
                     lineNumber));
                 continue;
@@ -507,9 +563,40 @@ internal static class PackageLoader
 
             var key = trimmed[..equals].Trim();
             var rawValue = trimmed[(equals + 1)..].Trim();
+            if (inConfig)
+            {
+                if (!IsConfigFieldName(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", "Config field names must be lower_snake language identifiers", file, lineNumber));
+                    continue;
+                }
+
+                if (!configNames.Add(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Duplicate config field '{key}'", file, lineNumber));
+                    continue;
+                }
+
+                if (!TryReadStringValue(rawValue, out var descriptor))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", "Config field descriptors must be simple double-quoted strings", file, lineNumber));
+                    continue;
+                }
+
+                if (!TryParseConfigField(key, descriptor, out var configField, out var error))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", error, file, lineNumber));
+                    continue;
+                }
+
+                configFields.Add(configField!);
+                continue;
+            }
+
             if (inCapabilities)
             {
-                if (key is not ("fs.read" or "fs.write" or "net.listen" or "net.client" or "db.read" or "db.write"))
+                if (key is not ("fs.read" or "fs.write" or "net.listen" or "net.client" or "db.read" or "db.write" or
+                    "env.read" or "secret.reveal" or "log.write"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
@@ -603,12 +690,18 @@ internal static class PackageLoader
             values.Add(key, value);
         }
 
-        return new ParsedManifest(values, dependencies, capabilities.ToFrozenSet(StringComparer.Ordinal));
+        return new ParsedManifest(
+            values,
+            dependencies,
+            capabilities.ToFrozenSet(StringComparer.Ordinal),
+            configFields.OrderBy(field => field.Name, StringComparer.Ordinal).ToArray(),
+            configSeen);
     }
 
     private static void ValidateManifest(
         IReadOnlyDictionary<string, string> values,
         IReadOnlySet<string> capabilities,
+        bool configSectionSeen,
         string file,
         List<Diagnostic> diagnostics)
     {
@@ -626,6 +719,9 @@ internal static class PackageLoader
 
         if (values.TryGetValue("kind", out var kind) && kind is not ("lib" or "cli" or "web"))
             diagnostics.Add(AtStart("E_MANIFEST", "kind must be \"lib\", \"cli\", or \"web\"", file));
+
+        if (configSectionSeen && kind == "lib")
+            diagnostics.Add(AtStart("E_MANIFEST", "Library packages cannot declare a [config] section", file));
 
         if (values.TryGetValue("source_root", out var sourceRoot) && !IsNormalizedRelativePath(sourceRoot))
         {
@@ -1047,6 +1143,55 @@ internal static class PackageLoader
     private static bool IsKey(string key) =>
         key.Length != 0 && key[0] is >= 'a' and <= 'z' &&
         key.Skip(1).All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '_');
+
+    private static bool IsConfigFieldName(string name) =>
+        IsKey(name) && !name.EndsWith('_') && !name.Contains("__", StringComparison.Ordinal) &&
+        !ReservedDependencyAliases.Contains(name);
+
+    private static bool TryParseConfigField(
+        string name,
+        string descriptor,
+        out ConfigField? field,
+        out string error)
+    {
+        if (descriptor == "Text|required")
+        {
+            field = new ConfigField(name, ConfigFieldKind.Text, Required: true, HasDefault: false, DefaultValue: null);
+            error = string.Empty;
+            return true;
+        }
+
+        const string textDefaultPrefix = "Text|default:";
+        if (descriptor.StartsWith(textDefaultPrefix, StringComparison.Ordinal))
+        {
+            field = new ConfigField(
+                name,
+                ConfigFieldKind.Text,
+                Required: false,
+                HasDefault: true,
+                DefaultValue: descriptor[textDefaultPrefix.Length..]);
+            error = string.Empty;
+            return true;
+        }
+
+        if (descriptor == "Secret<Text>|required")
+        {
+            field = new ConfigField(name, ConfigFieldKind.SecretText, Required: true, HasDefault: false, DefaultValue: null);
+            error = string.Empty;
+            return true;
+        }
+
+        if (descriptor.StartsWith("Secret<Text>|default:", StringComparison.Ordinal))
+        {
+            field = null;
+            error = "Secret config fields cannot have defaults";
+            return false;
+        }
+
+        field = null;
+        error = "Config field descriptor must be Text|required, Text|default:<literal>, or Secret<Text>|required";
+        return false;
+    }
 
     private static string StripComment(string line)
     {
