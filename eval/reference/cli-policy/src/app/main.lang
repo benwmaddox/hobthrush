@@ -1,0 +1,10 @@
+module app::main;
+
+pub union ReadFailure { Unavailable }
+
+command decide {
+    help "Decide access from a UTF-8 policy file.";
+    argument input: FilePath help "Path of the policy file to read.";
+    handler: self::app::policy::decide;
+    error: self::app::policy::describe_error;
+}

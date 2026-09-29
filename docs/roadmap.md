@@ -6,7 +6,7 @@ The source PRD lives in [PRD.md](PRD.md). The executable is `lang`, and source f
 
 - [x] Pin .NET 10 and create a buildable C# repository.
 - [x] Record the grammar decisions and canonical source fixtures.
-- [x] Configure Windows and Linux CI for Release builds, active compiler fixtures, the integration harness, and runnable examples.
+- [x] Configure Windows and Linux Release CI for active compiler fixtures, integration tests, runnable examples, and the separate three-card outcome grader with per-OS evidence uploads; see the [experimental outcome evaluation guide](agent-evals.md).
 
 ## M1 - pure typed values
 

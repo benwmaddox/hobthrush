@@ -1,0 +1,44 @@
+module app::reader;
+
+pub async fn run(
+    args: self::app::main::FirstArgs,
+    fs: FsRead,
+) -> Result<Text, self::app::main::ReadFailure> effects { fs.read } {
+    return match await self::app::io::read_text(fs, args.input) {
+        Ok(contents) => Ok(self::app::reader::first_nonempty(contents)),
+        Err(error) => Err(error),
+    };
+}
+
+fn first_nonempty(contents: Text) -> Text effects {} {
+    var selected: Text = "";
+    for line in contents.split("\n") {
+        let trimmed: Text = line.trim();
+        if selected == "" {
+            if trimmed != "" {
+                selected = trimmed;
+            }
+        }
+    }
+
+    if selected == "" {
+        return "EMPTY";
+    }
+    return selected;
+}
+
+pub fn describe_error(error: self::app::main::ReadFailure) -> Text effects {} {
+    return match error {
+        self::app::main::ReadFailure.Unavailable => "Unable to read input file",
+    };
+}
+
+test "the first nonempty line is trimmed" {
+    let result: Text = self::app::reader::first_nonempty("\n  first\nsecond\n");
+    assert result == "first";
+}
+
+test "an all-whitespace input has the empty result" {
+    let result: Text = self::app::reader::first_nonempty(" \n\t\n");
+    assert result == "EMPTY";
+}

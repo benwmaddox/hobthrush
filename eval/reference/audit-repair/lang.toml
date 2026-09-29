@@ -1,0 +1,8 @@
+name = "first-line-reader"
+version = "0.1.0"
+kind = "cli"
+source_root = "src"
+entry_module = "app::main"
+
+[capabilities]
+fs.read = "allow"

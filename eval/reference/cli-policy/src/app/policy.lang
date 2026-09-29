@@ -1,0 +1,64 @@
+module app::policy;
+
+pub async fn decide(
+    args: self::app::main::DecideArgs,
+    fs: FsRead,
+) -> Result<Text, self::app::main::ReadFailure> effects { fs.read } {
+    return match await fs.read_text_async(args.input) {
+        Ok(contents) => self::app::policy::decide_contents(contents),
+        Err(error) => Err(self::app::main::ReadFailure.Unavailable),
+    };
+}
+
+fn decide_contents(contents: Text) -> Result<Text, self::app::main::ReadFailure> effects {} {
+    var granted: bool = false;
+    var revoked: bool = false;
+
+    for raw_line in contents.split("\n") {
+        let line: Text = raw_line.trim();
+        if line == "GRANT" {
+            granted = true;
+        }
+        if line == "REVOKE" {
+            revoked = true;
+        }
+    }
+
+    if revoked {
+        return Ok("REVOKED");
+    }
+    if granted {
+        return Ok("GRANTED");
+    }
+    return Ok("UNDECIDED");
+}
+
+pub fn describe_error(error: self::app::main::ReadFailure) -> Text effects {} {
+    return match error {
+        self::app::main::ReadFailure.Unavailable => "Unable to read policy file",
+    };
+}
+
+test "revocation wins when grant appears first" {
+    let result: Result<Text, self::app::main::ReadFailure> = self::app::policy::decide_contents("GRANT\nREVOKE\n");
+    assert match result {
+        Ok(value) => value == "REVOKED",
+        Err(error) => false,
+    };
+}
+
+test "revocation wins when grant appears last" {
+    let result: Result<Text, self::app::main::ReadFailure> = self::app::policy::decide_contents("REVOKE\nGRANT\n");
+    assert match result {
+        Ok(value) => value == "REVOKED",
+        Err(error) => false,
+    };
+}
+
+test "blank and unrecognized lines do not grant access" {
+    let result: Result<Text, self::app::main::ReadFailure> = self::app::policy::decide_contents("\n grant \nOTHER\n");
+    assert match result {
+        Ok(value) => value == "UNDECIDED",
+        Err(error) => false,
+    };
+}

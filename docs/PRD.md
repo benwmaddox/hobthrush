@@ -330,6 +330,8 @@ Automate these in CI; the named behaviors are contractual even if final syntax c
 
 A passing test says only what its assertion covers. The current receipt records an audit-snapshot hash but does not record which runtime/integration tests ran or certify their results; the fuller test/check accounting remains a V1 target.
 
+The separate experimental agent outcome grader measures the published task cards and retains machine-readable results and raw command evidence; it is not a language-conformance gate. See [the agent outcome evaluation guide](agent-evals.md).
+
 ## 9. Explicitly deferred
 
 - Theorem proving, `requires`/`ensures`, refinement types, resource/termination bounds, and certified packages.
