@@ -533,11 +533,7 @@ internal sealed class Parser
             Fail(Current, "E_ROUTE_DECL", "Expected a static route path text literal");
         var pathAt = Take();
         var path = DecodeText(pathAt);
-        if (!path.StartsWith("/", StringComparison.Ordinal) ||
-            path.Any(character => character is '{' or '}' or '?' or '#'))
-        {
-            Fail(pathAt, "E_ROUTE_DECL", "Static route paths must begin with '/' and cannot contain '{', '}', '?', or '#'");
-        }
+        var pathSegments = ParseRoutePathSegments(pathAt, path);
 
         if (!Is("{"))
             Fail(Current, "E_ROUTE_DECL", "Expected '{' to begin route declaration");
@@ -564,6 +560,19 @@ internal sealed class Parser
                 var reference = ParseRouteQualifiedReference("route handler");
                 ExpectRoutePunctuation(";");
                 items.Add(new RouteHandlerSyntax(itemAt, reference));
+            }
+            else if (IsRouteKeyword("path") || IsRouteKeyword("query"))
+            {
+                var itemAt = Take();
+                var nameAt = ExpectRouteIdentifier($"{itemAt.Text} binding name");
+                ExpectRoutePunctuation(":");
+                var type = ParseType();
+                ExpectRoutePunctuation(";");
+                items.Add(new RouteBindingSyntax(
+                    itemAt,
+                    nameAt,
+                    itemAt.Text == "path" ? RouteBindingSyntaxKind.Path : RouteBindingSyntaxKind.Query,
+                    type));
             }
             else if (IsRouteKeyword("response"))
             {
@@ -610,7 +619,47 @@ internal sealed class Parser
         }
 
         Take();
-        return new RouteDecl(at, methodAt, methodAt.Text, pathAt, path, items);
+        return new RouteDecl(at, methodAt, methodAt.Text, pathAt, path, pathSegments, items);
+    }
+
+    private IReadOnlyList<RoutePathSegmentSyntax> ParseRoutePathSegments(Token pathAt, string path)
+    {
+        if (!path.StartsWith("/", StringComparison.Ordinal) || path.Contains('?') || path.Contains('#'))
+            Fail(pathAt, "E_ROUTE_DECL", "Route paths must begin with '/' and cannot contain '?' or '#'");
+
+        if (path == "/") return [];
+
+        var segments = path[1..].Split('/');
+        if (segments.Any(segment => segment.Length == 0))
+            Fail(pathAt, "E_ROUTE_DECL", "Route paths cannot contain empty segments");
+
+        var result = new List<RoutePathSegmentSyntax>(segments.Length);
+        foreach (var segment in segments)
+        {
+            if (segment.Contains('{') || segment.Contains('}'))
+            {
+                if (segment.Length >= 3 &&
+                    segment[0] == '{' &&
+                    segment[^1] == '}' &&
+                    IsRouteTemplateIdentifier(segment[1..^1]))
+                {
+                    result.Add(new RoutePathSegmentSyntax(pathAt, null, segment[1..^1]));
+                    continue;
+                }
+
+                Fail(pathAt, "E_ROUTE_DECL", "Route placeholders must be whole '{identifier}' path segments");
+            }
+
+            result.Add(new RoutePathSegmentSyntax(pathAt, segment, null));
+        }
+
+        return result;
+    }
+
+    private static bool IsRouteTemplateIdentifier(string value)
+    {
+        if (value.Length == 0 || !(char.IsLetter(value[0]) || value[0] == '_')) return false;
+        return value.Skip(1).All(character => char.IsLetterOrDigit(character) || character == '_');
     }
 
     private TypeSyntax ParseRouteQualifiedType(string description)

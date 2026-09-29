@@ -202,7 +202,7 @@ internal static class OutcomeEvaluator
             && builtArtifact is not null
             && File.Exists(builtArtifact)
             && IsSuccessful(apiRun.Capture)
-            && GetInt(api?.RootElement, "schema_version") == 5
+            && GetInt(api?.RootElement, "schema_version") == 6
             && IsSuccessful(auditRun.Capture)
             && GetInt(audit?.RootElement, "schema_version") == 7
             && effectsCapture is not null
@@ -283,10 +283,12 @@ internal static class OutcomeEvaluator
             var web = await RunWebSmokeAsync(scenario, packageRoot, tempRoot, runner, scenario.Id, resultsRoot, artifacts, verifyPersistence: true);
             commands.AddRange(web.Commands);
             AddCheck(checks, scenarioPrefix + "openapi", buildDirectory is not null && VerifyOpenApi(Path.Combine(buildDirectory, "openapi.json")),
-                "generated OpenAPI declares the health, greeting, and home routes with their status codes", ArtifactEvidence(artifacts, scenario.Id, "openapi.json"));
+                "generated OpenAPI declares the health, greeting, home, and bound greeting routes with parameter schemas", ArtifactEvidence(artifacts, scenario.Id, "openapi.json"));
             var routesPass = VerifyApiRoutes(api?.RootElement);
             AddCheck(checks, scenarioPrefix + "api-routes", routesPass,
-                "inspect api v5 lists the GET/POST greeting and health routes", Evidence(apiRun));
+                "inspect api v6 lists the GET/POST greeting and health routes", Evidence(apiRun));
+            AddCheck(checks, scenarioPrefix + "route-bindings", VerifyApiRouteBindings(api?.RootElement) && web.RouteBindings,
+                "inspect api v6 and OpenAPI describe path, required query, and optional query bindings that work over HTTP", Evidence(apiRun).Concat(web.EvidencePaths).ToArray());
             AddCheck(checks, scenarioPrefix + "trim-and-persistence", web.TrimmedAndPersisted,
                 "POST trims both fields, blank input preserves the row, and saved data survives restart", web.EvidencePaths);
             AddCheck(checks, scenarioPrefix + "safe-html", web.SafeHtml,
@@ -904,22 +906,102 @@ internal static class OutcomeEvaluator
             && HasStatus(paths, "/api/greeting", "get", 404)
             && HasStatus(paths, "/api/greeting", "post", 201)
             && HasStatus(paths, "/api/greeting", "post", 400)
+            && HasStatus(paths, "/api/greeting/{id}", "get", 200)
+            && HasOpenApiRouteParameters(paths)
             && HasStatus(paths, "/", "get", 200);
     }
 
     private static bool VerifyApiRoutes(JsonElement? api)
     {
-        if (api is null || GetInt(api.Value, "schema_version") != 5
+        if (api is null || GetInt(api.Value, "schema_version") != 6
             || !api.Value.TryGetProperty("routes", out var routes)
             || routes.ValueKind != JsonValueKind.Array)
             return false;
         return HasApiRoute(routes, "GET", "/health", 200)
             && HasApiRoute(routes, "GET", "/api/greeting", 404)
             && HasApiRoute(routes, "GET", "/api/greeting", 200)
+            && HasApiRoute(routes, "GET", "/api/greeting/{id}", 200)
+            && HasApiRoute(routes, "GET", "/api/greeting/{id}", 404)
             && HasApiRoute(routes, "POST", "/api/greeting", 201)
             && HasApiRoute(routes, "POST", "/api/greeting", 400)
             && HasApiRoute(routes, "GET", "/", 200);
     }
+
+    private static bool VerifyApiRouteBindings(JsonElement? api)
+    {
+        if (api is null || GetInt(api.Value, "schema_version") != 6
+            || !api.Value.TryGetProperty("routes", out var routes)
+            || routes.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (var route in routes.EnumerateArray())
+        {
+            if (!TryGetString(route, "method", out var method) || method != "GET"
+                || !TryGetString(route, "path", out var path) || path != "/api/greeting/{id}"
+                || !route.TryGetProperty("parameters", out var parameters)
+                || parameters.ValueKind != JsonValueKind.Array || parameters.GetArrayLength() != 3)
+                continue;
+
+            return HasApiParameter(parameters[0], "id", "path", required: true, "i32", optional: false, handlerIndex: 0)
+                && HasApiParameter(parameters[1], "name", "query", required: true, "Text", optional: false, handlerIndex: 1)
+                && HasApiParameter(parameters[2], "city", "query", required: false, "Text", optional: true, handlerIndex: 2);
+        }
+
+        return false;
+    }
+
+    private static bool HasApiParameter(
+        JsonElement parameter,
+        string name,
+        string location,
+        bool required,
+        string typeName,
+        bool optional,
+        int handlerIndex)
+    {
+        if (!TryGetString(parameter, "name", out var actualName) || actualName != name
+            || !TryGetString(parameter, "in", out var actualLocation) || actualLocation != location
+            || !parameter.TryGetProperty("required", out var requiredValue)
+            || requiredValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+            || requiredValue.GetBoolean() != required
+            || GetInt(parameter, "handler_parameter_index") != handlerIndex
+            || !parameter.TryGetProperty("type", out var type))
+            return false;
+
+        if (!optional)
+            return IsApiPrimitiveType(type, typeName);
+
+        return TryGetString(type, "kind", out var kind) && kind == "option"
+            && type.TryGetProperty("item", out var item)
+            && IsApiPrimitiveType(item, typeName);
+    }
+
+    private static bool IsApiPrimitiveType(JsonElement type, string typeName) =>
+        TryGetString(type, "kind", out var kind) && kind == "primitive"
+        && TryGetString(type, "name", out var name) && name == typeName;
+
+    private static bool HasOpenApiRouteParameters(JsonElement paths)
+    {
+        if (!paths.TryGetProperty("/api/greeting/{id}", out var pathItem)
+            || !pathItem.TryGetProperty("get", out var operation)
+            || !operation.TryGetProperty("parameters", out var parameters)
+            || parameters.ValueKind != JsonValueKind.Array || parameters.GetArrayLength() != 3)
+            return false;
+
+        return HasOpenApiParameter(parameters[0], "id", "path", required: true, "integer")
+            && HasOpenApiParameter(parameters[1], "name", "query", required: true, "string")
+            && HasOpenApiParameter(parameters[2], "city", "query", required: false, "string");
+    }
+
+    private static bool HasOpenApiParameter(JsonElement parameter, string name, string location, bool required, string schemaType) =>
+        TryGetString(parameter, "name", out var actualName) && actualName == name
+        && TryGetString(parameter, "in", out var actualLocation) && actualLocation == location
+        && parameter.TryGetProperty("required", out var requiredValue)
+        && requiredValue.ValueKind is JsonValueKind.True or JsonValueKind.False
+        && requiredValue.GetBoolean() == required
+        && parameter.TryGetProperty("schema", out var schema)
+        && TryGetString(schema, "type", out var actualSchemaType)
+        && actualSchemaType == schemaType;
 
     private static bool HasApiRoute(JsonElement routes, string method, string path, int status)
     {
@@ -972,7 +1054,8 @@ internal static class OutcomeEvaluator
         "cli-policy" => readme.Contains("| Contains `REVOKE`, with or without `GRANT` | `REVOKED` |", StringComparison.Ordinal)
             && readme.Contains("| Contains `GRANT` and no `REVOKE` | `GRANTED` |", StringComparison.Ordinal)
             && readme.Contains("| Contains neither marker | `UNDECIDED` |", StringComparison.Ordinal),
-        "web-greeting" => readme.Contains("| POST | `/api/greeting` | 201 JSON when saved; 400 when name or city is blank after trimming |", StringComparison.Ordinal),
+        "web-greeting" => readme.Contains("| GET | `/api/greeting/{id}?name=…&city=…` | 200 JSON when ID/name and optional city match; otherwise 404; 400 for missing or invalid input |", StringComparison.Ordinal)
+            && readme.Contains("| POST | `/api/greeting` | 201 JSON when saved; 400 when name or city is blank after trimming |", StringComparison.Ordinal),
         "audit-repair" => readme.Contains("`claim_only`", StringComparison.Ordinal)
             && readme.Contains("does not prove adapter behavior", StringComparison.Ordinal)
             && readme.Contains("operating-system sandbox", StringComparison.Ordinal)
@@ -1178,6 +1261,7 @@ internal static class OutcomeEvaluator
         var trimmed = false;
         var blankPreserves = false;
         var safeHtml = false;
+        var routeBindings = false;
         var persisted = !verifyPersistence;
         try
         {
@@ -1204,6 +1288,22 @@ internal static class OutcomeEvaluator
                         && afterInvalid.StatusCode == (int)HttpStatusCode.OK && !afterInvalid.Truncated
                         && GreetingEquals(afterInvalid.Body, "Ada", "Paris");
                     transcript.AppendLine($"blank_preserves={blankPreserves}");
+
+                    var dynamicLookup = await GetBodyAsync(client, "/api/greeting/1?name=Ada");
+                    var dynamicLookupWithOptionalCity = await GetBodyAsync(client, "/api/greeting/1?name=Ada&city=Paris");
+                    var missingRequiredQuery = await GetBodyAsync(client, "/api/greeting/1?city=Paris");
+                    var invalidPathValue = await GetBodyAsync(client, "/api/greeting/not-an-int?name=Ada");
+                    routeBindings = dynamicLookup.StatusCode == (int)HttpStatusCode.OK && !dynamicLookup.Truncated
+                        && GreetingEquals(dynamicLookup.Body, "Ada", "Paris")
+                        && dynamicLookupWithOptionalCity.StatusCode == (int)HttpStatusCode.OK && !dynamicLookupWithOptionalCity.Truncated
+                        && GreetingEquals(dynamicLookupWithOptionalCity.Body, "Ada", "Paris")
+                        && IsStableInvalidRequest(missingRequiredQuery)
+                        && IsStableInvalidRequest(invalidPathValue);
+                    transcript.AppendLine($"dynamic_lookup_status={dynamicLookup.StatusCode}");
+                    transcript.AppendLine($"dynamic_lookup_optional_city_status={dynamicLookupWithOptionalCity.StatusCode}");
+                    transcript.AppendLine($"missing_required_query_status={missingRequiredQuery.StatusCode}");
+                    transcript.AppendLine($"invalid_path_value_status={invalidPathValue.StatusCode}");
+                    transcript.AppendLine($"route_bindings={routeBindings}");
 
                     const string adversarialName = "<b>safe & sound</b>";
                     const string adversarialCity = "<img src=x?m=1&n=2>";
@@ -1286,6 +1386,7 @@ internal static class OutcomeEvaluator
             && !command.StandardErrorTruncated);
         var trimmedAndPersisted = healthy && initiallyMissing && trimmed && blankPreserves && persisted && processOutputClean;
         safeHtml &= processOutputClean;
+        routeBindings &= processOutputClean;
         var relativeEvidence = await WriteEvidenceAsync(resultsRoot, prefix + ".txt", transcript.ToString());
         if (artifacts is not null)
         {
@@ -1295,7 +1396,7 @@ internal static class OutcomeEvaluator
         }
         var paths = new List<string> { relativeEvidence };
         paths.AddRange(commands.SelectMany(command => new[] { command.Stdout.Path, command.Stderr.Path }));
-        return new WebSmokeResult(trimmedAndPersisted, safeHtml, commands, paths);
+        return new WebSmokeResult(trimmedAndPersisted, safeHtml, routeBindings, commands, paths);
     }
 
     private static async Task<WebServerStart> StartWebServerAsync(
@@ -1440,6 +1541,11 @@ internal static class OutcomeEvaluator
     private static Task<ProbeHttpResponse> GetBodyAsync(HttpClient client, string path) =>
         SendAndReadBodyAsync(client, new HttpRequestMessage(HttpMethod.Get, path));
 
+    private static bool IsStableInvalidRequest(ProbeHttpResponse response) =>
+        response.StatusCode == (int)HttpStatusCode.BadRequest
+        && !response.Truncated
+        && response.Body == "{\"error\":\"invalid_request\"}";
+
     private static Task<ProbeHttpResponse> PostGreetingAsync(HttpClient client, string name, string city)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, "/api/greeting")
@@ -1510,6 +1616,7 @@ internal static class OutcomeEvaluator
     private sealed record WebSmokeResult(
         bool TrimmedAndPersisted,
         bool SafeHtml,
+        bool RouteBindings,
         IReadOnlyList<CommandExecution> Commands,
         IReadOnlyList<string> EvidencePaths);
 

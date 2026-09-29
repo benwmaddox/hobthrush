@@ -62,6 +62,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_COMMAND_DECL | Typed CLI command declaration is malformed, duplicated, uses an unsupported type/default (including empty or NUL `FilePath` option defaults), appears in a library package, conflicts with `main`, or violates the command-count/argument requirements | Implemented for PR1 typed commands |
 | E_COMMAND_HANDLER | Command handler or error formatter is not a fully qualified function with the required generated argument/result signature | Implemented for PR1 typed commands |
 | E_ROUTE_DECL | Invalid route placement, method/path/body/status, unknown response variant, or duplicate method/path | Implemented |
+| E_ROUTE_BINDING | A route placeholder is repeated, missing a path declaration, has a mismatched or unused declaration, or duplicates/conflicts with another binding name | Implemented |
 | E_ROUTE_HANDLER | Missing, duplicate, or signature-incompatible route handler | Implemented; unresolved/private qualified references retain `E_NAME_UNRESOLVED`/`E_ACCESS_PRIVATE` |
 | E_ROUTE_RESPONSE_DUPLICATE | A response variant is mapped more than once | Implemented |
 | E_ROUTE_RESPONSE_MISSING | A declared response variant has no mapping | Implemented |

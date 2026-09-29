@@ -16,16 +16,16 @@ union FaultReply { Completed }
 union ResetReply { Reset }
 union NoteWriteReply { Saved, Failed(Text) }
 
-fn load_greeting(db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
+fn load_greeting(id: i32, db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
     let result: Result<Option<self::app::main::GreetingRow>, DbError> = db.query_one(
         "SELECT id, name, city FROM greeting WHERE id = $id",
-        self::app::main::GreetingLookupParameters { id: 1 }
+        self::app::main::GreetingLookupParameters { id: id }
     );
     return result;
 }
 
 fn home(db: DbRead) -> self::app::main::HomeReply effects { db.read } {
-    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(1, db);
     let content: Html = match loaded {
         Ok(value) => match value {
             Some(row) => html.concat(
@@ -47,13 +47,46 @@ fn home(db: DbRead) -> self::app::main::HomeReply effects { db.read } {
 }
 
 fn lookup(db: DbRead) -> self::app::main::LookupReply effects { db.read } {
-    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(1, db);
     return match loaded {
         Ok(value) => match value {
             Some(row) => self::app::main::LookupReply.Found(self::app::main::Greeting {
                 message: row.name,
                 profile: self::app::main::Profile { city: row.city }
             }),
+            None => self::app::main::LookupReply.Missing
+        },
+        Err(error) => match error {
+            DbError.Statement => self::app::main::LookupReply.StorageFailure("database statement failed"),
+            DbError.RowShape => self::app::main::LookupReply.StorageFailure("database row shape is invalid")
+        }
+    };
+}
+
+fn filter_greeting(row_name: Text, row_city: Text, expected_name: Text, expected_city: Option<Text>) -> Option<self::app::main::Greeting> effects {} {
+    let city_to_match: Text = match expected_city {
+        Some(value) => value,
+        None => row_city
+    };
+    if row_name == expected_name {
+        if row_city == city_to_match {
+            return Some(self::app::main::Greeting {
+                message: row_name,
+                profile: self::app::main::Profile { city: row_city }
+            });
+        }
+    }
+    return None;
+}
+
+fn lookup_by_id(id: i32, name: Text, city: Option<Text>, db: DbRead) -> self::app::main::LookupReply effects { db.read } {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(id, db);
+    return match loaded {
+        Ok(value) => match value {
+            Some(row) => match self::app::main::filter_greeting(row.name, row.city, name, city) {
+                Some(greeting) => self::app::main::LookupReply.Found(greeting),
+                None => self::app::main::LookupReply.Missing
+            },
             None => self::app::main::LookupReply.Missing
         },
         Err(error) => match error {
@@ -128,6 +161,16 @@ route GET "/" {
 
 route GET "/api/greeting" {
     handler: self::app::main::lookup;
+    response Found: 200 json self::app::main::Greeting;
+    response Missing: 404;
+    response StorageFailure: 500 json Text;
+}
+
+route GET "/api/greeting/{id}" {
+    path id: i32;
+    query name: Text;
+    query city: Option<Text>;
+    handler: self::app::main::lookup_by_id;
     response Found: 200 json self::app::main::Greeting;
     response Missing: 404;
     response StorageFailure: 500 json Text;

@@ -778,6 +778,22 @@ internal static class Driver
                     packageIdentities,
                     sourceAliasesByPackageId),
                 handler_source_ids = ApiFunctionSourceIds(route.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
+                parameters = route.Bindings
+                    .OrderBy(binding => binding.HandlerParameterIndex)
+                    .Select(binding => new
+                    {
+                        name = binding.WireName,
+                        @in = binding.Kind switch
+                        {
+                            CheckedRouteBindingKind.Path => "path",
+                            CheckedRouteBindingKind.Query => "query",
+                            _ => throw new InvalidOperationException("Unknown checked route binding kind")
+                        },
+                        required = binding.Kind == CheckedRouteBindingKind.Path || !binding.IsOptional,
+                        type = ApiType(binding.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                        handler_parameter_index = binding.HandlerParameterIndex
+                    })
+                    .ToArray(),
                 responses = route.Responses
                     .Select(response => new
                     {
@@ -828,7 +844,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 5,
+            schema_version = 6,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
