@@ -19,8 +19,11 @@ internal enum LangTypeKind
     Config,
     Secrets,
     Logger,
+    ProcessRunner,
     SecretText,
     FsError,
+    ProcessOutput,
+    ProcessError,
     HttpClient,
     HttpResponse,
     HttpError,
@@ -65,6 +68,9 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsConfig => Kind == LangTypeKind.Config;
     public bool IsSecrets => Kind == LangTypeKind.Secrets;
     public bool IsLogger => Kind == LangTypeKind.Logger;
+    public bool IsProcessRunner => Kind == LangTypeKind.ProcessRunner;
+    public bool IsProcessOutput => Kind == LangTypeKind.ProcessOutput;
+    public bool IsProcessError => Kind == LangTypeKind.ProcessError;
     public bool IsFsError => Kind == LangTypeKind.FsError;
     public bool IsHttpClient => Kind == LangTypeKind.HttpClient;
     public bool IsHttpResponse => Kind == LangTypeKind.HttpResponse;
@@ -91,8 +97,11 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType Config { get; } = new(LangTypeKind.Config, "Config");
     internal static LangType Secrets { get; } = new(LangTypeKind.Secrets, "Secrets");
     internal static LangType Logger { get; } = new(LangTypeKind.Logger, "Logger");
+    internal static LangType ProcessRunner { get; } = new(LangTypeKind.ProcessRunner, "ProcessRunner");
     internal static LangType SecretText { get; } = new(LangTypeKind.SecretText, "Secret<Text>", arguments: [Text]);
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
+    internal static LangType ProcessOutput { get; } = new(LangTypeKind.ProcessOutput, "ProcessOutput");
+    internal static LangType ProcessError { get; } = new(LangTypeKind.ProcessError, "ProcessError");
     internal static LangType HttpClient { get; } = new(LangTypeKind.HttpClient, "HttpClient");
     internal static LangType HttpResponse { get; } = new(LangTypeKind.HttpResponse, "HttpResponse");
     internal static LangType HttpError { get; } = new(LangTypeKind.HttpError, "HttpError");
@@ -213,7 +222,7 @@ internal sealed record CheckedCommand(
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
-internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger }
+internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, ProcessRunner }
 internal sealed record CheckedCapabilityParameter(
     CheckedCapabilityKind Kind,
     int HandlerParameterIndex,
@@ -330,6 +339,7 @@ internal enum BuiltinIntrinsic
     ConfigGetSecretText,
     SecretsRevealText,
     LoggerInfo,
+    ProcessRunTextAsync,
     HtmlText,
     HtmlHeading,
     HtmlParagraph,
@@ -377,6 +387,12 @@ internal enum BuiltinVariant
     HttpTimeout,
     HttpResponseTooLarge,
     HttpInvalidText,
+    ProcessInvalidArgument,
+    ProcessInputTooLarge,
+    ProcessOutputTooLarge,
+    ProcessInvalidText,
+    ProcessStartFailed,
+    ProcessTimedOut,
     DbErrorStatement,
     DbErrorRowShape
 }
@@ -649,6 +665,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
+    private bool _rootIsCliPackage;
     private bool _rootIsWebPackage;
 
     public CheckResult CheckSingle(ParsedProgram program) =>
@@ -671,6 +688,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         _rootCapabilities = rootCapabilities ?? new HashSet<string>(StringComparer.Ordinal);
         _rootPackageId = rootPackageId;
+        _rootIsCliPackage = rootIsCliPackage;
         _rootIsWebPackage = rootIsWebPackage;
         var orderedConfigFields = (rootConfigFields ?? [])
             .OrderBy(field => field.Name, StringComparer.Ordinal)
@@ -1152,10 +1170,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 {
                     var hasHttpClient = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.HttpClient);
                     var hasFsWrite = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite);
+                    var hasProcessRunner = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.ProcessRunner);
                     var hasConfig = commandCapabilities.Any(capability => capability.Kind is
                         CheckedCapabilityKind.Config or CheckedCapabilityKind.Secrets or CheckedCapabilityKind.Logger);
-                    var expectation = hasConfig
-                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, and Logger in that order, and return Result<Text, E> for a concrete error type"
+                    var expectation = hasProcessRunner
+                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, Logger, and ProcessRunner in that order, and return Result<Text, E> for a concrete error type"
+                        : hasConfig
+                            ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, and Logger in that order, and return Result<Text, E> for a concrete error type"
                         : hasHttpClient
                             ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, and HttpClient in that order, and return Result<Text, E> for a concrete error type"
                             : hasFsWrite
@@ -1506,6 +1527,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.Config => 3,
                 CheckedCapabilityKind.Secrets => 4,
                 CheckedCapabilityKind.Logger => 5,
+                CheckedCapabilityKind.ProcessRunner => 6,
                 _ => -1
             };
             if (kind is null || order < 0)
@@ -1541,6 +1563,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         LangTypeKind.Config => CheckedCapabilityKind.Config,
         LangTypeKind.Secrets => CheckedCapabilityKind.Secrets,
         LangTypeKind.Logger => CheckedCapabilityKind.Logger,
+        LangTypeKind.ProcessRunner => CheckedCapabilityKind.ProcessRunner,
         _ => null
     };
 
@@ -1554,6 +1577,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         CheckedCapabilityKind.Config => "env.read",
         CheckedCapabilityKind.Secrets => "secret.reveal",
         CheckedCapabilityKind.Logger => "log.write",
+        CheckedCapabilityKind.ProcessRunner => "process.spawn",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
 
@@ -1892,8 +1916,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
-            "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "Secret" or "FsError" or
-            "DbRead" or "DbWrite" or "Transaction" or "DbError";
+            "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "ProcessRunner" or "Secret" or
+            "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
     private void ValidatePublicSignatures()
     {
@@ -2645,7 +2669,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var diagnosticsBeforeOperand = diagnostics.Count;
         var value = CheckExpr(expression.Value, null, locals, depth, isAwaitOperand: true);
         if (value is TypedCallExpr { IsAsync: true } or
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync })
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync })
             return new TypedAwaitExpr(value.Type, value, expression.At);
 
         if (value.Type.IsError)
@@ -2834,6 +2858,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
+        if (!expression.Reference.IsQualified && expression.Reference.Declaration == "ProcessOutput")
+        {
+            foreach (var field in expression.Fields)
+                _ = CheckExpr(field.Value, null, locals, depth);
+
+            if (!CheckProcessTypeScope("ProcessOutput", expression.At))
+                return new TypedErrorExpr(expression.At);
+
+            Add("E_TYPE_MISMATCH", "ProcessOutput values can only be produced by process operations", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         var (union, structure) = ResolveTypeDeclaration(expression.Reference);
         if (structure is null)
         {
@@ -2924,6 +2960,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (expression.Target is NameExpr processErrorName &&
+            !locals.ContainsKey(processErrorName.Name) &&
+            processErrorName.Name == "ProcessError")
+        {
+            if (!CheckProcessTypeScope("ProcessError", expression.At))
+                return new TypedErrorExpr(expression.At);
+            if (IsProcessErrorVariant(expression.Field))
+                Add("E_TYPE_MISMATCH", "ProcessError variants can only be produced by process operations", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on ProcessError", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         var target = CheckExpr(expression.Target, null, locals, depth);
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
@@ -2937,6 +2986,20 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             if (expression.Field == "body")
                 return new TypedFieldAccessExpr(LangType.Text, target, 1, expression.At);
             Add("E_FIELD_UNKNOWN", $"HttpResponse has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+        if (target.Type.IsProcessOutput)
+        {
+            var outputField = expression.Field switch
+            {
+                "exit_code" => (Type: LangType.I32, Index: 0),
+                "stdout" => (Type: LangType.Text, Index: 1),
+                "stderr" => (Type: LangType.Text, Index: 2),
+                _ => (Type: (LangType?)null, Index: -1)
+            };
+            if (outputField.Type is not null)
+                return new TypedFieldAccessExpr(outputField.Type, target, outputField.Index, expression.At);
+            Add("E_FIELD_UNKNOWN", $"ProcessOutput has no field '{expression.Field}'", expression.At);
             return new TypedErrorExpr(expression.At);
         }
         if (target.Type.Kind != LangTypeKind.Struct)
@@ -3165,6 +3228,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "ProcessError")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                if (!CheckProcessTypeScope("ProcessError", expression.At))
+                    return new TypedErrorExpr(expression.At);
+                if (IsProcessErrorVariant(expression.Member))
+                    Add("E_TYPE_MISMATCH", "ProcessError variants can only be produced by process operations", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on ProcessError", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "config" && expression.Member is ("get_text" or "get_secret_text"))
             {
                 CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
@@ -3200,6 +3276,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
                 Add("E_CAPABILITY_MISSING", "Intrinsic 'http.get_text_async' requires a local or parameter of type 'HttpClient'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "ProcessRunner" && expression.Member == "run_text_async")
+            {
+                CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+                if (!CheckProcessTypeScope("ProcessRunner", expression.At))
+                    return new TypedErrorExpr(expression.At);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'ProcessRunner.run_text_async' requires a local or parameter of type 'ProcessRunner'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
 
@@ -3298,6 +3383,56 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedIntrinsicCallExpr(
                 LangType.Result(LangType.HttpResponse, LangType.HttpError),
                 BuiltinIntrinsic.HttpGetTextAsync,
+                ReadOnly(arguments),
+                expression.At);
+        }
+
+        if (expression.Member == "run_text_async")
+        {
+            if (!receiver.Type.IsProcessRunner)
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                var processTargetDescription = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
+                    ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}'"
+                    : $"Value of type '{receiver.Type.DisplayName}'";
+                Add("E_CAPABILITY_MISSING", $"{processTargetDescription} cannot provide capability member 'run_text_async' (requires 'ProcessRunner')", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 2;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'ProcessRunner.run_text_async' expects 2 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            var expectedTypes = new[] { LangType.List(LangType.Text), LangType.Text };
+            var argumentTypesValid = true;
+            for (var index = 0; index < expectedTypes.Length; index++)
+            {
+                if (index >= expression.Arguments.Count)
+                {
+                    arguments.Add(new TypedErrorExpr(expression.MemberAt));
+                    argumentTypesValid = false;
+                    continue;
+                }
+
+                var argument = CheckExpr(expression.Arguments[index], expectedTypes[index], locals, depth);
+                arguments.Add(argument);
+                argumentTypesValid &= argument.Type == expectedTypes[index];
+            }
+            for (var index = expectedTypes.Length; index < expression.Arguments.Count; index++)
+                _ = CheckExpr(expression.Arguments[index], null, locals, depth);
+
+            var callIsValid = hasCorrectArity && argumentTypesValid && diagnostics.Count == diagnosticsBeforeCall;
+            if (!isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'ProcessRunner.run_text_async' must be called with 'await'", expression.At);
+            if (callIsValid)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("process.spawn", "ProcessRunner.run_text_async", expression.MemberAt));
+
+            return new TypedIntrinsicCallExpr(
+                LangType.Result(LangType.ProcessOutput, LangType.ProcessError),
+                BuiltinIntrinsic.ProcessRunTextAsync,
                 ReadOnly(arguments),
                 expression.At);
         }
@@ -4192,6 +4327,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("HttpError.InvalidText", "httperror:InvalidText", null, 4, BuiltinVariant.HttpInvalidText, [])
             ]);
         }
+        if (type.IsProcessError)
+        {
+            return ReadOnly<VariantShape>([
+                new("ProcessError.InvalidArgument", "processerror:InvalidArgument", null, 0, BuiltinVariant.ProcessInvalidArgument, []),
+                new("ProcessError.InputTooLarge", "processerror:InputTooLarge", null, 1, BuiltinVariant.ProcessInputTooLarge, []),
+                new("ProcessError.OutputTooLarge", "processerror:OutputTooLarge", null, 2, BuiltinVariant.ProcessOutputTooLarge, []),
+                new("ProcessError.InvalidText", "processerror:InvalidText", null, 3, BuiltinVariant.ProcessInvalidText, []),
+                new("ProcessError.StartFailed", "processerror:StartFailed", null, 4, BuiltinVariant.ProcessStartFailed, []),
+                new("ProcessError.TimedOut", "processerror:TimedOut", null, 5, BuiltinVariant.ProcessTimedOut, [])
+            ]);
+        }
         return null;
     }
 
@@ -4218,11 +4364,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
-        else if (scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError)
+        else if (scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError || scrutineeType.IsProcessError)
         {
             var builtinErrorName = scrutineeType.IsFsError
                 ? "FsError"
-                : scrutineeType.IsDbError ? "DbError" : "HttpError";
+                : scrutineeType.IsDbError ? "DbError" : scrutineeType.IsHttpError ? "HttpError" : "ProcessError";
             if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != builtinErrorName)
             {
                 Add("E_TYPE_MISMATCH", $"Expected pattern from '{builtinErrorName}.<variant>', found '{pattern.VariantName}'", pattern.At);
@@ -4235,7 +4381,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return null;
         }
 
-        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError
+        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError ||
+                        scrutineeType.IsHttpError || scrutineeType.IsProcessError
             ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
         var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
@@ -4278,7 +4425,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsResourceHandle(LangType type) =>
         type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.Config or LangTypeKind.Secrets or
-            LangTypeKind.Logger or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.HttpClient or LangTypeKind.Transaction;
+            LangTypeKind.Logger or LangTypeKind.ProcessRunner or LangTypeKind.DbRead or LangTypeKind.DbWrite or
+            LangTypeKind.HttpClient or LangTypeKind.Transaction;
 
     private bool TryGetDeclarationNode(LangType type, out int declaration)
     {
@@ -4393,6 +4541,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return ResolveRootOnlyConfigType(syntax, LangType.Secrets);
             case "Logger":
                 return ResolveRootOnlyConfigType(syntax, LangType.Logger);
+            case "ProcessRunner":
+                return ResolveRootOnlyProcessType(syntax, LangType.ProcessRunner);
             case "Secret":
                 if (syntax.Args.Count != 1)
                 {
@@ -4411,6 +4561,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return ResolveRootOnlyConfigType(syntax, LangType.SecretText, checkTypeArguments: false);
             case "FsError":
                 return NoTypeArguments(syntax, LangType.FsError);
+            case "ProcessOutput":
+                return ResolveRootOnlyProcessType(syntax, LangType.ProcessOutput);
+            case "ProcessError":
+                return ResolveRootOnlyProcessType(syntax, LangType.ProcessError);
             case "HttpClient":
                 return NoTypeArguments(syntax, LangType.HttpClient);
             case "HttpResponse":
@@ -4507,6 +4661,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return checkTypeArguments ? NoTypeArguments(syntax, type) : type;
     }
 
+    private LangType ResolveRootOnlyProcessType(TypeSyntax syntax, LangType type)
+    {
+        if (!CheckProcessTypeScope(type.DisplayName, syntax.At))
+            return LangType.Error;
+
+        return NoTypeArguments(syntax, type);
+    }
+
+    private bool CheckProcessTypeScope(string typeName, Token at)
+    {
+        if (CurrentModule.PackageId == _rootPackageId && _rootIsCliPackage)
+            return true;
+
+        Add("E_CAPABILITY_SCOPE", $"Type '{typeName}' is available only in the root CLI package", at);
+        return false;
+    }
+
     private static bool IsFsErrorVariant(string name) =>
         name is "NotFound" or "PermissionDenied" or "InvalidPath" or "InvalidText" or "Io";
 
@@ -4515,6 +4686,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsHttpErrorVariant(string name) =>
         name is "InvalidTarget" or "Transport" or "Timeout" or "ResponseTooLarge" or "InvalidText";
+
+    private static bool IsProcessErrorVariant(string name) =>
+        name is "InvalidArgument" or "InputTooLarge" or "OutputTooLarge" or "InvalidText" or "StartFailed" or "TimedOut";
 
 
     private void AddMismatch(LangType expected, LangType actual, Token at) =>

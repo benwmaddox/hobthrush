@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -714,6 +715,7 @@ internal static class Driver
                         CheckedCapabilityKind.Config => "env.read",
                         CheckedCapabilityKind.Secrets => "secret.reveal",
                         CheckedCapabilityKind.Logger => "log.write",
+                        CheckedCapabilityKind.ProcessRunner => "process.spawn",
                         _ => throw new InvalidOperationException("Unknown checked command capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -792,7 +794,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 4,
+            schema_version = 5,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -800,6 +802,15 @@ internal static class Driver
                 .ToArray(),
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
+            process_executables = graph.Root.Package.Manifest.ProcessExecutables
+                .OrderBy(pin => pin.Os == "windows" ? 0 : 1)
+                .Select(pin => new
+                {
+                    os = pin.Os,
+                    path = pin.Path,
+                    sha256 = pin.Sha256
+                })
+                .ToArray(),
             functions,
             structs,
             unions,
@@ -837,6 +848,9 @@ internal static class Driver
         LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
         LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
         LangTypeKind.HttpError => new { kind = "primitive", name = "HttpError" },
+        LangTypeKind.ProcessRunner => new { kind = "primitive", name = "ProcessRunner" },
+        LangTypeKind.ProcessOutput => new { kind = "primitive", name = "ProcessOutput" },
+        LangTypeKind.ProcessError => new { kind = "primitive", name = "ProcessError" },
         LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
         LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
         LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
@@ -1253,6 +1267,24 @@ internal static class Driver
         var entryCommand = program.EntryCommandId is int entryCommandId
             ? program.Commands.FirstOrDefault(command => command.Id == entryCommandId)
             : null;
+        var needsProcessRunner = program.Commands.Any(command =>
+            command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.ProcessRunner));
+        var selectedProcessExecutable = package?.SelectedProcessExecutable;
+        var processRunnerPin = needsProcessRunner ? selectedProcessExecutable : null;
+        if (needsProcessRunner && processRunnerPin is null)
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_PROCESS_EXECUTABLE", "The current-host process executable pin is unavailable", sourceFile)
+            ],
+            json: false);
+            return 1;
+        }
+        var processRunnerOptions = processRunnerPin is null
+            ? null
+            : new ProcessRunnerRuntimeOptions(
+                ProcessRunnerArtifactFileName(processRunnerPin.Os, package?.Manifest.Name ?? "Generated"),
+                processRunnerPin.Sha256);
         if (isWebPackage && program.Routes.Count == 0)
         {
             PrintDiagnostics(
@@ -1342,7 +1374,12 @@ internal static class Driver
                     sqlitePackage: usesDatabaseAdapter));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
-                Emitter.Emit(program, executable, package?.WebDatabaseOptions, package?.Manifest.HttpOrigin));
+                Emitter.Emit(
+                    program,
+                    executable,
+                    package?.WebDatabaseOptions,
+                    package?.Manifest.HttpOrigin,
+                    processRunnerOptions));
         }
         catch (Exception error) when (IsFileError(error))
         {
@@ -1404,6 +1441,8 @@ internal static class Driver
                             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                     }
                     EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
+                    if (selectedProcessExecutable is not null)
+                        CopyProcessExecutable(selectedProcessExecutable, stagedPublishDirectory, assemblyName);
                     CopyBuildArtifacts(stagedPublishDirectory, outputDirectory);
                     if (!File.Exists(executablePath))
                     {
@@ -1446,6 +1485,12 @@ internal static class Driver
                             aotRid,
                             sdkVersion);
                     }
+                }
+                catch (ProcessExecutablePreparationException)
+                {
+                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
+                    PrintProcessExecutableDiagnostic(sourceFile);
+                    return 1;
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
@@ -1503,8 +1548,11 @@ internal static class Driver
                             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                     }
                     EnsureBuildOutputPathSafe(sourceFile, outputDirectory, package);
+                    var stagedOutputDirectory = Path.GetDirectoryName(stagedAssemblyFile)!;
+                    if (selectedProcessExecutable is not null)
+                        CopyProcessExecutable(selectedProcessExecutable, stagedOutputDirectory, assemblyName);
                     CopyBuildArtifacts(
-                        Path.GetDirectoryName(stagedAssemblyFile)!,
+                        stagedOutputDirectory,
                         outputDirectory);
                     var sdkVersion = await GetSdkVersionForReceiptAsync(dotnet, sourceFile);
                     if (sdkVersion is null)
@@ -1521,6 +1569,12 @@ internal static class Driver
                         "managed",
                         runtimeIdentifier: null,
                         sdkVersion);
+                }
+                catch (ProcessExecutablePreparationException)
+                {
+                    TryCleanupBuildOutputDirectory(sourceFile, outputDirectory, package);
+                    PrintProcessExecutableDiagnostic(sourceFile);
+                    return 1;
                 }
                 catch (Exception error) when (IsFileError(error))
                 {
@@ -1540,6 +1594,18 @@ internal static class Driver
             }
 
             var runArguments = BuildApplicationArguments(stagedAssemblyFile, applicationArguments);
+            if (processRunnerPin is not null)
+            {
+                try
+                {
+                    CopyProcessExecutable(processRunnerPin, Path.GetDirectoryName(stagedAssemblyFile)!, assemblyName);
+                }
+                catch (ProcessExecutablePreparationException)
+                {
+                    PrintProcessExecutableDiagnostic(sourceFile);
+                    return 1;
+                }
+            }
             if (isWebPackage)
             {
                 return await ExecWebHostAsync(
@@ -1714,6 +1780,75 @@ internal static class Driver
         {
             return false;
         }
+    }
+
+    private static string ProcessRunnerArtifactFileName(string os, string assemblyName) =>
+        assemblyName + ".process-runner" +
+        (string.Equals(os, "windows", StringComparison.Ordinal) ? ".exe" : "");
+
+    private sealed class ProcessExecutablePreparationException : IOException
+    {
+        public ProcessExecutablePreparationException()
+            : base("The pinned process executable could not be prepared") { }
+    }
+
+    private static void PrintProcessExecutableDiagnostic(string sourceFile) =>
+        PrintDiagnostics(
+        [
+            AtStart("E_PROCESS_EXECUTABLE", "The pinned process executable could not be prepared", sourceFile)
+        ],
+        json: false);
+
+    private static void CopyProcessExecutable(ProcessExecutablePin pin, string stagedOutputDirectory, string assemblyName)
+    {
+        try
+        {
+            if (pin.FullPath is null)
+                throw new IOException();
+
+            var sourcePath = Path.GetFullPath(pin.FullPath);
+            if (!File.Exists(sourcePath) || Directory.Exists(sourcePath) || HasReparsePointOnPath(sourcePath))
+                throw new IOException();
+
+            var sourceAttributes = File.GetAttributes(sourcePath);
+            if ((sourceAttributes & (FileAttributes.Directory | FileAttributes.Device | FileAttributes.ReparsePoint)) != 0)
+                throw new IOException();
+
+            var sourceUnixMode = UnixFileMode.None;
+            if (OperatingSystem.IsLinux())
+            {
+                sourceUnixMode = File.GetUnixFileMode(sourcePath);
+                const UnixFileMode executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+                if ((sourceUnixMode & executeBits) == 0)
+                    throw new IOException();
+            }
+
+            if (!string.Equals(HashProcessExecutable(sourcePath), pin.Sha256, StringComparison.Ordinal))
+                throw new IOException();
+
+            var destinationPath = Path.Combine(stagedOutputDirectory, ProcessRunnerArtifactFileName(pin.Os, assemblyName));
+            File.Copy(sourcePath, destinationPath, overwrite: false);
+            if (OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(destinationPath, sourceUnixMode);
+                if (File.GetUnixFileMode(destinationPath) != sourceUnixMode)
+                    throw new IOException();
+            }
+
+            if (!string.Equals(HashProcessExecutable(destinationPath), pin.Sha256, StringComparison.Ordinal) ||
+                !string.Equals(HashProcessExecutable(sourcePath), pin.Sha256, StringComparison.Ordinal))
+                throw new IOException();
+        }
+        catch (Exception error) when (IsFileError(error) || error is CryptographicException)
+        {
+            throw new ProcessExecutablePreparationException();
+        }
+    }
+
+    private static string HashProcessExecutable(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private static void CopyBuildArtifacts(string stagedOutputDirectory, string destinationDirectory)

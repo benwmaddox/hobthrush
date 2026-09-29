@@ -2,13 +2,16 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
+internal sealed record ProcessRunnerRuntimeOptions(string ArtifactFileName, string Sha256);
+
 internal static class Emitter
 {
     public static string Emit(
         CheckedProgram program,
         bool executable = true,
         WebDatabaseOptions? webDatabaseOptions = null,
-        string? httpOrigin = null)
+        string? httpOrigin = null,
+        ProcessRunnerRuntimeOptions? processRunnerOptions = null)
     {
         var entry = program.EntryFunctionId is int entryId
             ? program.Functions.FirstOrDefault(function =>
@@ -23,7 +26,11 @@ internal static class Emitter
         if (executable && entry is null && entryCommand is null && !webHost)
             throw new InvalidOperationException("Executable emission requires a selected valid entry function");
 
-        var emitter = new SourceEmitter(program, webDatabaseOptions: webDatabaseOptions, httpOrigin: httpOrigin);
+        var emitter = new SourceEmitter(
+            program,
+            webDatabaseOptions: webDatabaseOptions,
+            httpOrigin: httpOrigin,
+            processRunnerOptions: processRunnerOptions);
         return emitter.Emit(entry, executable, command: entryCommand, webHost: webHost);
     }
 
@@ -233,7 +240,7 @@ internal static class Emitter
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
         {
             writer.WriteStartObject();
-            writer.WriteNumber("schema_version", 3);
+            writer.WriteNumber("schema_version", 4);
             writer.WriteStartArray("commands");
             foreach (var command in program.Commands.OrderBy(command => command.Id))
             {
@@ -269,6 +276,7 @@ internal static class Emitter
         CheckedCapabilityKind.Config => "env.read",
         CheckedCapabilityKind.Secrets => "secret.reveal",
         CheckedCapabilityKind.Logger => "log.write",
+        CheckedCapabilityKind.ProcessRunner => "process.spawn",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
 
@@ -350,7 +358,8 @@ internal static class Emitter
         CheckedProgram program,
         IReadOnlySet<int>? includedTestFunctionIds = null,
         WebDatabaseOptions? webDatabaseOptions = null,
-        string? httpOrigin = null)
+        string? httpOrigin = null,
+        ProcessRunnerRuntimeOptions? processRunnerOptions = null)
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
@@ -360,6 +369,7 @@ internal static class Emitter
         private readonly IReadOnlySet<int> _includedTestFunctionIds = includedTestFunctionIds ?? new HashSet<int>();
         private readonly WebDatabaseOptions? _webDatabaseOptions = webDatabaseOptions;
         private readonly string? _httpOrigin = httpOrigin;
+        private readonly ProcessRunnerRuntimeOptions? _processRunnerOptions = processRunnerOptions;
 
         private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
             !_testFunctionIds.Contains(function.Id) || _includedTestFunctionIds.Contains(function.Id));
@@ -429,6 +439,7 @@ internal static class Emitter
             if (NeedsHttpClientType) EmitHttpClientType();
             if (NeedsHttpResponseType) EmitHttpResponseType();
             if (NeedsHttpErrorType) EmitHttpErrorType();
+            if (NeedsProcessRunnerRuntime) EmitProcessRunnerRuntime();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
             foreach (var function in EmittedFunctions) EmitFunction(function);
@@ -818,6 +829,310 @@ internal static class Emitter
             _source.AppendLine();
         }
 
+        private void EmitProcessRunnerRuntime()
+        {
+            _source.AppendLine("    public sealed record ProcessOutput(int Field_0, string Field_1, string Field_2);");
+            _source.AppendLine("    public abstract record ProcessError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private protected ProcessError() { }");
+            _source.AppendLine("        public sealed record InvalidArgument() : ProcessError;");
+            _source.AppendLine("        public sealed record InputTooLarge() : ProcessError;");
+            _source.AppendLine("        public sealed record OutputTooLarge() : ProcessError;");
+            _source.AppendLine("        public sealed record InvalidText() : ProcessError;");
+            _source.AppendLine("        public sealed record StartFailed() : ProcessError;");
+            _source.AppendLine("        public sealed record TimedOut() : ProcessError;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    public sealed class ProcessRunner");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private const int MaximumArgumentCount = 128;");
+            _source.AppendLine("        private const int MaximumArgumentBytes = 16 * 1024;");
+            _source.AppendLine("        private const int MaximumInputBytes = 1024 * 1024;");
+            _source.AppendLine("        private const int MaximumOutputBytes = 1024 * 1024;");
+            _source.AppendLine("        private static readonly global::System.Text.UTF8Encoding StrictUtf8 = new(false, true);");
+            _source.AppendLine("        private readonly string _artifactDirectory;");
+            _source.AppendLine("        private readonly string _executablePath;");
+            _source.AppendLine("        private readonly string _expectedSha256;");
+            _source.AppendLine();
+            _source.AppendLine("        internal ProcessRunner(string artifactFileName, string expectedSha256)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            _artifactDirectory = global::System.IO.Path.GetFullPath(global::System.AppContext.BaseDirectory);");
+            _source.AppendLine("            _executablePath = global::System.IO.Path.GetFullPath(global::System.IO.Path.Combine(_artifactDirectory, artifactFileName));");
+            _source.AppendLine("            _expectedSha256 = expectedSha256;");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        internal async global::System.Threading.Tasks.Task<Result<ProcessOutput, ProcessError>> RunTextAsync(");
+            _source.AppendLine("            global::System.Collections.Generic.List<string> arguments,");
+            _source.AppendLine("            string stdin,");
+            _source.AppendLine("            global::System.Threading.CancellationToken cancellationToken)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            if (arguments is null || arguments.Count > MaximumArgumentCount)");
+            _source.AppendLine("                return Error(new ProcessError.InvalidArgument(), cancellationToken);");
+            _source.AppendLine();
+            _source.AppendLine("            var argumentBytes = 0;");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                foreach (var argument in arguments)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    if (argument is null || argument.IndexOf('\\0') >= 0)");
+            _source.AppendLine("                        return Error(new ProcessError.InvalidArgument(), cancellationToken);");
+            _source.AppendLine("                    if (argument.Length > MaximumArgumentBytes)");
+            _source.AppendLine("                        return Error(new ProcessError.InvalidArgument(), cancellationToken);");
+            _source.AppendLine("                    var currentArgumentBytes = StrictUtf8.GetByteCount(argument);");
+            _source.AppendLine("                    if (currentArgumentBytes > MaximumArgumentBytes - argumentBytes)");
+            _source.AppendLine("                        return Error(new ProcessError.InvalidArgument(), cancellationToken);");
+            _source.AppendLine("                    argumentBytes += currentArgumentBytes;");
+            _source.AppendLine("                }");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Text.EncoderFallbackException)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return Error(new ProcessError.InvalidText(), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine();
+            _source.AppendLine("            if (stdin is null)");
+            _source.AppendLine("                return Error(new ProcessError.InvalidText(), cancellationToken);");
+            _source.AppendLine("            if (stdin.Length > MaximumInputBytes)");
+            _source.AppendLine("                return Error(new ProcessError.InputTooLarge(), cancellationToken);");
+            _source.AppendLine("            byte[] inputBytes;");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (StrictUtf8.GetByteCount(stdin) > MaximumInputBytes)");
+            _source.AppendLine("                    return Error(new ProcessError.InputTooLarge(), cancellationToken);");
+            _source.AppendLine("                inputBytes = StrictUtf8.GetBytes(stdin);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Text.EncoderFallbackException)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return Error(new ProcessError.InvalidText(), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine();
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            var startInfo = new global::System.Diagnostics.ProcessStartInfo");
+            _source.AppendLine("            {");
+            _source.AppendLine("                FileName = _executablePath,");
+            _source.AppendLine("                WorkingDirectory = _artifactDirectory,");
+            _source.AppendLine("                UseShellExecute = false,");
+            _source.AppendLine("                RedirectStandardInput = true,");
+            _source.AppendLine("                RedirectStandardOutput = true,");
+            _source.AppendLine("                RedirectStandardError = true,");
+            _source.AppendLine("                CreateNoWindow = true");
+            _source.AppendLine("            };");
+            _source.AppendLine("            startInfo.Environment.Clear();");
+            _source.AppendLine("            foreach (var argument in arguments)");
+            _source.AppendLine("                startInfo.ArgumentList.Add(argument);");
+            _source.AppendLine();
+            _source.AppendLine("            using var process = new global::System.Diagnostics.Process { StartInfo = startInfo };");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (!string.Equals(ComputeSha256(_executablePath), _expectedSha256, global::System.StringComparison.Ordinal))");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.OperationCanceledException) when (cancellationToken.IsCancellationRequested)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                throw;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Exception)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine();
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (!process.Start())");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Exception)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine();
+            _source.AppendLine("            global::System.Threading.Tasks.Task<CapturedOutput>? stdoutTask = null;");
+            _source.AppendLine("            global::System.Threading.Tasks.Task<CapturedOutput>? stderrTask = null;");
+            _source.AppendLine("            global::System.Threading.Tasks.Task? stdinTask = null;");
+            _source.AppendLine("            global::System.Threading.Tasks.Task? exitTask = null;");
+            _source.AppendLine("            global::System.Threading.Tasks.Task? completionTask = null;");
+            _source.AppendLine("            var outputOverflow = new global::System.Threading.Tasks.TaskCompletionSource<bool>(global::System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);");
+            _source.AppendLine("            var processCleanupStarted = false;");
+            _source.AppendLine("            async global::System.Threading.Tasks.Task StopProcessAsync()");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (processCleanupStarted) return;");
+            _source.AppendLine("                processCleanupStarted = true;");
+            _source.AppendLine("                await StopAndReapAsync(process);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                stdoutTask = ReadBoundedAsync(process.StandardOutput.BaseStream, outputOverflow);");
+            _source.AppendLine("                stderrTask = ReadBoundedAsync(process.StandardError.BaseStream, outputOverflow);");
+            _source.AppendLine("                stdinTask = WriteInputAndCloseAsync(process, inputBytes);");
+            _source.AppendLine("                exitTask = process.WaitForExitAsync();");
+            _source.AppendLine("                completionTask = global::System.Threading.Tasks.Task.WhenAll(stdinTask, stdoutTask, stderrTask, exitTask);");
+            _source.AppendLine("                var hostCancellation = new global::System.Threading.Tasks.TaskCompletionSource<bool>(global::System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);");
+            _source.AppendLine("                using var cancellationRegistration = cancellationToken.Register(static state =>");
+            _source.AppendLine("                    ((global::System.Threading.Tasks.TaskCompletionSource<bool>)state!).TrySetResult(true), hostCancellation);");
+            _source.AppendLine("                var timeoutTask = global::System.Threading.Tasks.Task.Delay(global::System.TimeSpan.FromSeconds(10));");
+            _source.AppendLine("                await global::System.Threading.Tasks.Task.WhenAny(completionTask, outputOverflow.Task, timeoutTask, hostCancellation.Task);");
+            _source.AppendLine();
+            _source.AppendLine("                if (cancellationToken.IsCancellationRequested)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    await StopProcessAsync();");
+            _source.AppendLine("                    throw new global::System.OperationCanceledException(cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine("                if (outputOverflow.Task.IsCompleted)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    await StopProcessAsync();");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.OutputTooLarge(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine("                if (!completionTask.IsCompleted && timeoutTask.IsCompleted)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    await StopProcessAsync();");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.TimedOut(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine();
+            _source.AppendLine("                try");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    await completionTask;");
+            _source.AppendLine("                }");
+            _source.AppendLine("                catch (global::System.Exception)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    await StopProcessAsync();");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine();
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                string stdout;");
+            _source.AppendLine("                string stderr;");
+            _source.AppendLine("                try");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    stdout = StrictUtf8.GetString(stdoutTask.Result.Bytes);");
+            _source.AppendLine("                    stderr = StrictUtf8.GetString(stderrTask.Result.Bytes);");
+            _source.AppendLine("                }");
+            _source.AppendLine("                catch (global::System.Text.DecoderFallbackException)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    return Error(new ProcessError.InvalidText(), cancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine();
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return new Result<ProcessOutput, ProcessError>.Ok(new ProcessOutput(process.ExitCode, stdout, stderr));");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.OperationCanceledException) when (cancellationToken.IsCancellationRequested)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await StopProcessAsync();");
+            _source.AppendLine("                throw;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Exception)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await StopProcessAsync();");
+            _source.AppendLine("                cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                return Error(new ProcessError.StartFailed(), cancellationToken);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            finally");
+            _source.AppendLine("            {");
+            _source.AppendLine("                ObserveTask(stdinTask);");
+            _source.AppendLine("                ObserveTask(stdoutTask);");
+            _source.AppendLine("                ObserveTask(stderrTask);");
+            _source.AppendLine("                ObserveTask(exitTask);");
+            _source.AppendLine("                ObserveTask(completionTask);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private sealed record CapturedOutput(byte[] Bytes);");
+            _source.AppendLine();
+            _source.AppendLine("        private static Result<ProcessOutput, ProcessError> Error(");
+            _source.AppendLine("            ProcessError error,");
+            _source.AppendLine("            global::System.Threading.CancellationToken cancellationToken)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            return new Result<ProcessOutput, ProcessError>.Err(error);");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private static string ComputeSha256(string path)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            using var stream = global::System.IO.File.OpenRead(path);");
+            _source.AppendLine("            return global::System.Convert.ToHexString(global::System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private static async global::System.Threading.Tasks.Task<CapturedOutput> ReadBoundedAsync(");
+            _source.AppendLine("            global::System.IO.Stream stream,");
+            _source.AppendLine("            global::System.Threading.Tasks.TaskCompletionSource<bool> overflowSignal)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            using var captured = new global::System.IO.MemoryStream();");
+            _source.AppendLine("            var buffer = new byte[8192];");
+            _source.AppendLine("            while (true)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                var count = await stream.ReadAsync(buffer.AsMemory());");
+            _source.AppendLine("                if (count == 0)");
+            _source.AppendLine("                    return new CapturedOutput(captured.ToArray());");
+            _source.AppendLine("                if (captured.Length + count > MaximumOutputBytes)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    overflowSignal.TrySetResult(true);");
+            _source.AppendLine("                    return new CapturedOutput(global::System.Array.Empty<byte>());");
+            _source.AppendLine("                }");
+            _source.AppendLine("                captured.Write(buffer, 0, count);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private static async global::System.Threading.Tasks.Task WriteInputAndCloseAsync(");
+            _source.AppendLine("            global::System.Diagnostics.Process process,");
+            _source.AppendLine("            byte[] inputBytes)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await process.StandardInput.BaseStream.WriteAsync(inputBytes.AsMemory());");
+            _source.AppendLine("                await process.StandardInput.BaseStream.FlushAsync();");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.IO.IOException)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                // A child may close stdin before consuming all input.");
+            _source.AppendLine("            }");
+            _source.AppendLine("            finally");
+            _source.AppendLine("            {");
+            _source.AppendLine("                try { process.StandardInput.Close(); }");
+            _source.AppendLine("                catch (global::System.Exception) { }");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private static async global::System.Threading.Tasks.Task StopAndReapAsync(");
+            _source.AppendLine("            global::System.Diagnostics.Process process)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            try { process.StandardInput.Close(); }");
+            _source.AppendLine("            catch (global::System.Exception) { }");
+            _source.AppendLine("            try { process.Kill(entireProcessTree: true); }");
+            _source.AppendLine("            catch (global::System.Exception) { }");
+            _source.AppendLine("            try");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await process.WaitForExitAsync().WaitAsync(global::System.TimeSpan.FromSeconds(2));");
+            _source.AppendLine("            }");
+            _source.AppendLine("            catch (global::System.Exception) { }");
+            _source.AppendLine("        }");
+            _source.AppendLine();
+            _source.AppendLine("        private static void ObserveTask(global::System.Threading.Tasks.Task? task)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (task is null) return;");
+            _source.AppendLine("            _ = task.ContinueWith(");
+            _source.AppendLine("                static completed => { _ = completed.Exception; },");
+            _source.AppendLine("                global::System.Threading.CancellationToken.None,");
+            _source.AppendLine("                global::System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted | global::System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously,");
+            _source.AppendLine("                global::System.Threading.Tasks.TaskScheduler.Default);");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
         private void EmitUnion(CheckedUnion union)
         {
             var accessibility = union.Public ? "public" : "private";
@@ -973,7 +1288,7 @@ internal static class Emitter
             TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
             TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
             TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedAwaitExpr awaited => EmitAwait(awaited),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
@@ -1041,6 +1356,8 @@ internal static class Emitter
                 "await " + EmitIntrinsicCall(intrinsic),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.HttpGetTextAsync } intrinsic =>
                 "await " + EmitIntrinsicCall(intrinsic),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.ProcessRunTextAsync } intrinsic =>
+                "await " + EmitIntrinsicCall(intrinsic),
             _ => throw new InvalidOperationException("Await expression has no checked async target")
         };
 
@@ -1058,6 +1375,10 @@ internal static class Emitter
                 EmitHttpGetTextAsync(expression),
             BuiltinIntrinsic.HttpGetTextAsync =>
                 throw new InvalidOperationException("HttpClient.get_text_async requires a receiver and a target"),
+            BuiltinIntrinsic.ProcessRunTextAsync when expression.Arguments.Count == 3 =>
+                EmitProcessRunTextAsync(expression),
+            BuiltinIntrinsic.ProcessRunTextAsync =>
+                throw new InvalidOperationException("ProcessRunner.run_text_async requires a receiver, arguments, and stdin"),
             BuiltinIntrinsic.FsWriteText when expression.Arguments.Count == 3 =>
                 EmitFsWriteText(expression),
             BuiltinIntrinsic.FsWriteText =>
@@ -1144,6 +1465,15 @@ internal static class Emitter
 
         private string EmitHttpGetTextAsync(TypedIntrinsicCallExpr expression) =>
             "HttpGetTextAsync(" + EmitExpr(expression.Arguments[0]) + ", " + EmitExpr(expression.Arguments[1]) + ")";
+
+        private string EmitProcessRunTextAsync(TypedIntrinsicCallExpr expression)
+        {
+            if (_emittingFunction?.IsAsync != true)
+                throw new InvalidOperationException("ProcessRunner.run_text_async has no enclosing async function token");
+
+            return "(" + EmitExpr(expression.Arguments[0]) + ").RunTextAsync(new global::System.Collections.Generic.List<string>(" +
+                EmitExpr(expression.Arguments[1]) + "), " + EmitExpr(expression.Arguments[2]) + ", cancellationToken)";
+        }
 
         private string EmitBinary(TypedBinaryExpr expression)
         {
@@ -1250,8 +1580,14 @@ internal static class Emitter
                     BuiltinVariant.HttpInvalidTarget => "InvalidTarget",
                     BuiltinVariant.HttpTransport => "Transport",
                     BuiltinVariant.HttpTimeout => "Timeout",
-                    BuiltinVariant.HttpResponseTooLarge => "ResponseTooLarge",
-                    BuiltinVariant.HttpInvalidText => "InvalidText",
+            BuiltinVariant.HttpResponseTooLarge => "ResponseTooLarge",
+            BuiltinVariant.HttpInvalidText => "InvalidText",
+            BuiltinVariant.ProcessInvalidArgument => "InvalidArgument",
+            BuiltinVariant.ProcessInputTooLarge => "InputTooLarge",
+            BuiltinVariant.ProcessOutputTooLarge => "OutputTooLarge",
+            BuiltinVariant.ProcessInvalidText => "InvalidText",
+            BuiltinVariant.ProcessStartFailed => "StartFailed",
+            BuiltinVariant.ProcessTimedOut => "TimedOut",
                     _ => throw new InvalidOperationException("Unknown builtin pattern")
                 };
                 variantType = EmitType(scrutineeType) + "." + variantName;
@@ -2667,6 +3003,7 @@ internal static class Emitter
                     CheckedCapabilityKind.Config => ", new Config(configSnapshot)",
                     CheckedCapabilityKind.Secrets => ", new Secrets()",
                     CheckedCapabilityKind.Logger => ", new Logger(null)",
+                    CheckedCapabilityKind.ProcessRunner => ", " + ProcessRunnerConstructor,
                     _ => throw new InvalidOperationException("Unsupported checked command capability")
                 });
             }
@@ -2922,6 +3259,9 @@ internal static class Emitter
             LangTypeKind.HttpClient => "HttpClientCapability",
             LangTypeKind.HttpResponse => "HttpResponse",
             LangTypeKind.HttpError => "HttpError",
+            LangTypeKind.ProcessRunner => "ProcessRunner",
+            LangTypeKind.ProcessOutput => "ProcessOutput",
+            LangTypeKind.ProcessError => "ProcessError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
 
@@ -2940,6 +3280,17 @@ internal static class Emitter
 
         private string HttpOriginLiteral => JsonSerializer.Serialize(_httpOrigin ??
             throw new InvalidOperationException("HTTP client capability reached emission without a manifest origin"));
+
+        private string ProcessRunnerConstructor
+        {
+            get
+            {
+                var options = _processRunnerOptions ??
+                    throw new InvalidOperationException("ProcessRunner capability reached emission without a selected executable pin");
+                return "new ProcessRunner(" + JsonSerializer.Serialize(options.ArtifactFileName) + ", " +
+                    JsonSerializer.Serialize(options.Sha256) + ")";
+            }
+        }
 
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
 
@@ -2990,6 +3341,13 @@ internal static class Emitter
 
         private bool NeedsHttpErrorType => UsesTypeKind(LangTypeKind.HttpError) || UsesHttpGetTextAsync;
 
+        private bool NeedsProcessRunnerRuntime =>
+            UsesTypeKind(LangTypeKind.ProcessRunner) ||
+            UsesTypeKind(LangTypeKind.ProcessOutput) ||
+            UsesTypeKind(LangTypeKind.ProcessError) ||
+            HasCapabilityKind(CheckedCapabilityKind.ProcessRunner) ||
+            UsesProcessRunTextAsync;
+
         private bool UsesDatabase => _webDatabaseOptions is not null || DatabaseCalls.Count != 0 ||
             TransactionScopes.Count != 0 || TransactionCommits.Count != 0;
 
@@ -3034,6 +3392,13 @@ internal static class Emitter
             .SelectMany(EnumerateExpressions)
             .OfType<TypedIntrinsicCallExpr>()
             .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.HttpGetTextAsync);
+
+        private bool UsesProcessRunTextAsync => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.ProcessRunTextAsync);
 
         private bool UsesFsWriteText => EmittedFunctions.Any(function =>
             function.InferredEffects.Contains("fs.write", StringComparer.Ordinal) ||
