@@ -31,28 +31,56 @@ internal sealed record AuditTrustedClaim(
 
 internal sealed record AuditForeignDependency(string Name, string Version, string Ecosystem, string Reason);
 
+internal sealed record AuditManagedAdapterParameter(string Name, string Type);
+
+internal sealed record AuditManagedAdapterOperation(
+    string OperationId,
+    string Name,
+    IReadOnlyList<AuditManagedAdapterParameter> Parameters,
+    string Result,
+    bool IsAsync,
+    IReadOnlyList<string> Effects,
+    IReadOnlyList<string> RequiredCapabilities);
+
+internal sealed record AuditManagedAdapterAssembly(string Identity, string Path, string Sha256);
+
+internal sealed record AuditManagedAdapterProvenance(
+    AuditPackageIdentity Package,
+    string BridgeId,
+    int ContractVersion,
+    string TargetFramework,
+    string PortabilityTarget,
+    IReadOnlyList<AuditManagedAdapterOperation> Operations,
+    IReadOnlyList<AuditManagedAdapterAssembly> Assemblies,
+    string ClosureSha256);
+
 internal sealed record AuditReportSnapshot(
     byte[] Json,
     IReadOnlyList<AuditPackageSnapshot> Packages,
     IReadOnlyList<string> ManifestGrants,
     IReadOnlyList<AuditTrustedClaim> TrustedClaims,
-    IReadOnlyList<AuditForeignDependency> ForeignDependencies)
+    IReadOnlyList<AuditForeignDependency> ForeignDependencies,
+    IReadOnlyList<AuditManagedAdapterProvenance> ManagedAdapters)
 {
     public string Sha256 => AuditReport.Hash(Json);
 }
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 6;
+    private const int SchemaVersion = 7;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly byte[] ContentHashDomain = Encoding.UTF8.GetBytes("LANG-AUDIT-PACKAGE-CONTENT\0v1");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static AuditReportSnapshot Create(PackageDependencyGraph graph, CheckedProgram program)
+    public static AuditReportSnapshot Create(
+        PackageDependencyGraph graph,
+        CheckedProgram program,
+        IReadOnlyList<AuditManagedAdapterProvenance>? managedAdapters = null)
     {
         var packageSnapshots = CreatePackageSnapshots(graph);
+        var canonicalManagedAdapters = CanonicalizeManagedAdapters(managedAdapters ?? []);
         var identities = new Dictionary<string, AuditPackageIdentity?>(StringComparer.Ordinal);
         foreach (var package in packageSnapshots)
             identities.Add(FindNodeId(graph, package.Identity.Path), package.Identity);
@@ -107,7 +135,8 @@ internal static class AuditReport
                 version = dependency.Version,
                 ecosystem = dependency.Ecosystem,
                 reason = dependency.Reason
-            }).ToArray()
+            }).ToArray(),
+            managed_adapters = ManagedAdapterMetadataJson(canonicalManagedAdapters)
         };
 
         return new AuditReportSnapshot(
@@ -115,7 +144,8 @@ internal static class AuditReport
             packageSnapshots,
             grants,
             claims,
-            foreignDependencies);
+            foreignDependencies,
+            canonicalManagedAdapters);
     }
 
     public static string Hash(ReadOnlySpan<byte> bytes) =>
@@ -162,10 +192,75 @@ internal static class AuditReport
                         reason = "generated_build"
                     }
                 }
-                : []
+                : [],
+            managed_adapters = Array.Empty<object>()
         };
         return Serialize(output);
     }
+
+    public static AuditManagedAdapterProvenance CreateManagedAdapterProvenance(
+        ResolvedPackage package,
+        string bridgeId,
+        int contractVersion,
+        string targetFramework,
+        string portabilityTarget,
+        IEnumerable<AuditManagedAdapterOperation> operations,
+        IEnumerable<AuditManagedAdapterAssembly> assemblies,
+        string closureSha256) => CanonicalizeManagedAdapter(new AuditManagedAdapterProvenance(
+            Identity(package),
+            bridgeId,
+            contractVersion,
+            targetFramework,
+            portabilityTarget,
+            operations.ToArray(),
+            assemblies.ToArray(),
+            closureSha256));
+
+    public static IReadOnlyList<AuditManagedAdapterProvenance> CanonicalizeManagedAdapters(
+        IEnumerable<AuditManagedAdapterProvenance> managedAdapters) => managedAdapters
+        .Select(CanonicalizeManagedAdapter)
+        .OrderBy(adapter => adapter.Package.Path, StringComparer.Ordinal)
+        .ThenBy(adapter => adapter.Package.Name, StringComparer.Ordinal)
+        .ThenBy(adapter => adapter.Package.Version, StringComparer.Ordinal)
+        .ThenBy(adapter => adapter.BridgeId, StringComparer.Ordinal)
+        .ToArray();
+
+    internal static object[] ManagedAdapterMetadataJson(
+        IReadOnlyList<AuditManagedAdapterProvenance> managedAdapters) => managedAdapters
+        .Select(adapter => (object)new
+        {
+            package = ManagedPackageIdentityJson(adapter.Package),
+            bridge_id = adapter.BridgeId,
+            contract_version = adapter.ContractVersion,
+            target_framework = adapter.TargetFramework,
+            portability_target = adapter.PortabilityTarget,
+            operations = adapter.Operations.Select(operation => new
+            {
+                operation_id = operation.OperationId,
+                name = operation.Name,
+                signature = new
+                {
+                    parameters = operation.Parameters.Select(parameter => new
+                    {
+                        name = parameter.Name,
+                        type = parameter.Type
+                    }).ToArray(),
+                    result = operation.Result
+                },
+                is_async = operation.IsAsync,
+                effects = operation.Effects,
+                required_capabilities = operation.RequiredCapabilities
+            }).ToArray(),
+            assemblies = adapter.Assemblies.Select(assembly => new
+            {
+                identity = assembly.Identity,
+                path = assembly.Path,
+                sha256 = assembly.Sha256
+            }).ToArray(),
+            closure_sha256 = adapter.ClosureSha256,
+            assurance = "claim_only"
+        })
+        .ToArray();
 
     public static IReadOnlyList<AuditTrustedClaim> CreateStandaloneTrustedClaims(CheckedProgram program)
     {
@@ -502,6 +597,122 @@ internal static class AuditReport
         path = identity.Path,
         source = SourceJson(identity.Source)
     };
+
+    private static object ManagedPackageIdentityJson(AuditPackageIdentity identity) => new
+    {
+        name = identity.Name,
+        version = identity.Version,
+        path = identity.Path,
+        source = identity.Source.Kind switch
+        {
+            PackageSourceKind.Root => (object)new { kind = "root" },
+            PackageSourceKind.Path => new { kind = "path", path = identity.Source.Path },
+            PackageSourceKind.Git => new
+            {
+                kind = "git",
+                package_id = identity.Path,
+                commit = identity.Source.Commit
+            },
+            _ => throw new InvalidOperationException("Unknown package source identity kind")
+        }
+    };
+
+    private static AuditManagedAdapterProvenance CanonicalizeManagedAdapter(
+        AuditManagedAdapterProvenance adapter)
+    {
+        ArgumentNullException.ThrowIfNull(adapter.Package);
+        if (string.IsNullOrWhiteSpace(adapter.Package.Name) ||
+            string.IsNullOrWhiteSpace(adapter.Package.Version) ||
+            string.IsNullOrWhiteSpace(adapter.Package.Path))
+            throw new InvalidOperationException("Managed adapter provenance requires a stable package identity");
+        if (string.IsNullOrWhiteSpace(adapter.BridgeId) || adapter.BridgeId.Any(char.IsControl))
+            throw new InvalidOperationException("Managed adapter provenance requires a stable bridge ID");
+        if (adapter.ContractVersion <= 0)
+            throw new InvalidOperationException("Managed adapter provenance requires a positive contract version");
+        if (string.IsNullOrWhiteSpace(adapter.TargetFramework) ||
+            string.IsNullOrWhiteSpace(adapter.PortabilityTarget))
+            throw new InvalidOperationException("Managed adapter provenance requires a target framework and portability target");
+
+        var operations = adapter.Operations
+            .Select(operation =>
+            {
+                if (string.IsNullOrWhiteSpace(operation.OperationId) ||
+                    string.IsNullOrWhiteSpace(operation.Name) ||
+                    string.IsNullOrWhiteSpace(operation.Result))
+                    throw new InvalidOperationException("Managed adapter operations require an ID, Lang symbol, and result type");
+                if (operation.Parameters.Any(parameter =>
+                        string.IsNullOrWhiteSpace(parameter.Name) || string.IsNullOrWhiteSpace(parameter.Type)))
+                    throw new InvalidOperationException("Managed adapter operation parameters require names and closed Lang types");
+
+                return operation with
+                {
+                    Parameters = operation.Parameters.ToArray(),
+                    Effects = CanonicalNames(operation.Effects),
+                    RequiredCapabilities = CanonicalNames(operation.RequiredCapabilities)
+                };
+            })
+            .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
+            .ThenBy(operation => operation.Name, StringComparer.Ordinal)
+            .ToArray();
+        if (operations.Select(operation => operation.OperationId)
+                .Distinct(StringComparer.Ordinal).Count() != operations.Length)
+            throw new InvalidOperationException("Managed adapter provenance requires unique operation IDs");
+
+        var assemblies = adapter.Assemblies
+            .Select(assembly =>
+            {
+                if (string.IsNullOrWhiteSpace(assembly.Identity) ||
+                    assembly.Identity.IndexOfAny(['/', '\\', ':']) >= 0)
+                    throw new InvalidOperationException("Managed adapter assembly identity must not contain a path");
+                return assembly with
+                {
+                    Path = NormalizePackageRelativePath(assembly.Path),
+                    Sha256 = CanonicalSha256(assembly.Sha256)
+                };
+            })
+            .OrderBy(assembly => assembly.Identity, StringComparer.Ordinal)
+            .ThenBy(assembly => assembly.Path, StringComparer.Ordinal)
+            .ToArray();
+        if (assemblies.Length == 0 || assemblies.Select(assembly => assembly.Path)
+                .Distinct(StringComparer.Ordinal).Count() != assemblies.Length)
+            throw new InvalidOperationException("Managed adapter provenance requires unique relative assembly paths");
+
+        return adapter with
+        {
+            Operations = operations,
+            Assemblies = assemblies,
+            ClosureSha256 = CanonicalSha256(adapter.ClosureSha256)
+        };
+
+        static IReadOnlyList<string> CanonicalNames(IEnumerable<string> names)
+        {
+            var result = names.ToArray();
+            if (result.Any(string.IsNullOrWhiteSpace) || result.Any(name => name.Any(char.IsControl)))
+                throw new InvalidOperationException("Managed adapter effect and capability names must be stable tokens");
+            return result.Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        }
+    }
+
+    private static string NormalizePackageRelativePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new InvalidOperationException("Managed adapter assembly path must be package-relative");
+        var normalized = path.Replace('\\', '/');
+        var segments = normalized.Split('/');
+        if (normalized[0] == '/' ||
+            normalized.StartsWith("//", StringComparison.Ordinal) ||
+            (segments[0].Length >= 2 && char.IsAsciiLetter(segments[0][0]) && segments[0][1] == ':') ||
+            segments.Any(segment => segment.Length == 0 || segment is "." or ".."))
+            throw new InvalidOperationException("Managed adapter assembly path must be normalized and relative to its package");
+        return normalized;
+    }
+
+    private static string CanonicalSha256(string value)
+    {
+        if (value.Length != 64 || value.Any(character => !Uri.IsHexDigit(character)))
+            throw new InvalidOperationException("Managed adapter provenance requires a 64-digit SHA-256 value");
+        return value.ToLowerInvariant();
+    }
 
     private static object SourceJson(PackageSourceIdentity source) => source.Kind switch
     {

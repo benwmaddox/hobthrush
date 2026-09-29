@@ -15,7 +15,7 @@ using System.Net.Sockets;
 
 return await IntegrationTests.RunAsync();
 
-internal static class IntegrationTests
+internal static partial class IntegrationTests
 {
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan AotPublishTimeout = TimeSpan.FromMinutes(10);
@@ -125,6 +125,7 @@ internal static class IntegrationTests
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("new and add workflows create projects and resolve pinned Git dependencies offline", TestProjectWorkflow),
             ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
+            ("managed adapter packages lock and report closed provenance, execute, reject drift, and publish to NativeAOT", TestManagedAdapterPackages),
             ("dependency graphs reject cycles, missing manifests, non-libraries, and duplicate identities", TestDependencyGraphDiagnostics),
             ("dependency aliases enforce direct visibility and preserve module identity", TestDependencyAliasResolution),
             ("dependency references enforce public and existing symbols", TestDependencyReferenceDiagnostics),
@@ -935,6 +936,9 @@ internal static class IntegrationTests
                 return with;
             }
 
+            fn adapter(adapter: i32) -> i32 effects {} {
+                return adapter;
+            }
             fn make_choice(value: self::true::false::null::match::if::await::with::route::command::effects::return::fn::effects) -> self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice effects {} {
                 return self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice.return(value.route + value.return + value.if + value.true + value.null);
             }
@@ -946,7 +950,7 @@ internal static class IntegrationTests
                     self::true::false::null::match::if::await::with::route::command::effects::return::fn::Choice.return(payload) => self::true::false::null::match::if::await::with::route::command::effects::return::fn::route(payload),
                 };
                 let with_field: self::true::false::null::match::if::await::with::route::command::effects::return::fn::WithField = self::true::false::null::match::if::await::with::route::command::effects::return::fn::WithField { with: self::true::false::null::match::if::await::with::route::command::effects::return::fn::with(payload_value) };
-                return with_field.with;
+                return self::true::false::null::match::if::await::with::route::command::effects::return::fn::adapter(with_field.with);
             }
             """;
 
@@ -2508,7 +2512,9 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(6, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6.");
+        AssertEqual(7, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7.");
+        AssertEqual(0, report.GetProperty("managed_adapters").GetArrayLength(),
+            "Ordinary packages must report an empty managed adapter provenance array.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2647,7 +2653,7 @@ internal static class IntegrationTests
             AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
                 "Audit JSON property order is part of the deterministic report contract.");
 
-        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,process_executables,trusted_claims,foreign_dependencies");
+        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,process_executables,trusted_claims,foreign_dependencies,managed_adapters");
         foreach (var pin in root.GetProperty("process_executables").EnumerateArray())
             Order(pin, "os,path,sha256");
         foreach (var field in root.GetProperty("config").EnumerateArray())
@@ -2689,6 +2695,7 @@ internal static class IntegrationTests
         }
         foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
             Order(dependency, "name,version,ecosystem,reason");
+        AssertManagedAdapterProvenanceOrder(root.GetProperty("managed_adapters"));
     }
 
     private static void AssertPackageIdentitySource(JsonElement identity)
@@ -3499,8 +3506,8 @@ internal static class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(6, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 6.");
+            AssertEqual(7, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 7.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -4096,8 +4103,8 @@ internal static class IntegrationTests
             CurrentHostAotRid(),
             [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async FsWrite NativeAOT builds must use build receipt schema version 2.");
+        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async FsWrite NativeAOT builds must use build receipt schema version 3.");
 
         var nativeDestination = Path.Combine(destinationDirectory, "native.txt");
         const string nativeValue = "native async FsWrite λ 😀";
@@ -4786,8 +4793,8 @@ internal static class IntegrationTests
             expectedRuntimeIdentifier: null,
             [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async managed CLI builds must use build receipt schema version 2.");
+        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async managed CLI builds must use build receipt schema version 3.");
 
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
@@ -5297,7 +5304,7 @@ internal static class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6.");
+            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -5336,8 +5343,8 @@ internal static class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    firstRoot))
         {
-            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Config fields should use build receipt schema version 2.");
+            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Config fields should use build receipt schema version 3.");
             AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
         var commandSchema = await File.ReadAllTextAsync(schemaPath);
@@ -5442,8 +5449,8 @@ internal static class IntegrationTests
                    expectedRuntimeIdentifier: null,
                    [Path.GetRelativePath(managedOutputDirectory, managedExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed config CLI receipts should use schema version 2.");
+            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed config CLI receipts should use schema version 3.");
 
         const string secretCanary = "secret-canary-runtime-0a91e6";
         var defaultEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -5549,8 +5556,8 @@ internal static class IntegrationTests
                    CurrentHostAotRid(),
                    [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "NativeAOT config CLI receipts should use schema version 2.");
+            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT config CLI receipts should use schema version 3.");
 
         var nativeRun = await ExecuteNativeWithEnvironmentAsync(
             nativeExecutable,
@@ -6086,7 +6093,7 @@ internal static class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6 with pinned process metadata.");
+            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "Audit process pins must use deterministic OS ordering.");
@@ -6143,7 +6150,7 @@ internal static class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, managedArtifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json", processCopyName],
                    packageRoot))
         {
-            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts use schema version 2.");
+            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts use schema version 3.");
             AssertTrue(receipt.RootElement.GetProperty("inputs").EnumerateArray().Any(input =>
                     input.GetProperty("kind").GetString() == "process_executable"
                     && input.GetProperty("sha256").GetString() == helperHash),
@@ -7367,8 +7374,8 @@ internal static class IntegrationTests
         var pathLockBytes = await File.ReadAllBytesAsync(pathLockPath);
         using (var pathLock = JsonDocument.Parse(pathLockBytes))
         {
-            AssertEqual(2, pathLock.RootElement.GetProperty("schema_version").GetInt32(),
-                "lang add must write the current package-lock schema.");
+            AssertEqual(3, pathLock.RootElement.GetProperty("schema_version").GetInt32(),
+                "lang add must write package-lock schema version 3.");
             var lockedNames = pathLock.RootElement.GetProperty("packages").EnumerateArray()
                 .Select(item => item.GetProperty("name").GetString())
                 .Order(StringComparer.Ordinal)
@@ -7541,8 +7548,8 @@ internal static class IntegrationTests
         using (var gitLock = JsonDocument.Parse(gitLockBytes))
         {
             var root = gitLock.RootElement.GetProperty("root");
-            AssertEqual(2, gitLock.RootElement.GetProperty("schema_version").GetInt32(),
-                "A fetched Git package must be written in lock schema version 2.");
+            AssertEqual(3, gitLock.RootElement.GetProperty("schema_version").GetInt32(),
+                "A fetched Git package must be written in lock schema version 3.");
             AssertEqual("root", root.GetProperty("source").GetProperty("kind").GetString(),
                 "The Git lock root must carry a root source identity.");
             var lockedRelative = root.GetProperty("dependencies").GetProperty("git_library").GetString() ?? string.Empty;
@@ -7693,8 +7700,8 @@ internal static class IntegrationTests
             AssertEqual(0, audit.ExitCode, Describe(audit));
             using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
             {
-                AssertEqual(6, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                    "Audit reports with source identities must use schema version 6.");
+                AssertEqual(7, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                    "Audit reports with source identities must use schema version 7.");
                 var identity = auditDocument.RootElement.GetProperty("packages").EnumerateArray()
                     .Single(package => package.GetProperty("role").GetString() == "direct")
                     .GetProperty("identity");
@@ -7945,8 +7952,8 @@ internal static class IntegrationTests
         var firstLock = Encoding.UTF8.GetString(firstLockBytes);
         using (var document = JsonDocument.Parse(firstLock))
         {
-            AssertEqual(2, document.RootElement.GetProperty("schema_version").GetInt32(),
-                "Package locks with source identities must use schema version 2.");
+            AssertEqual(3, document.RootElement.GetProperty("schema_version").GetInt32(),
+                "Package locks with source identities must use schema version 3.");
             var root = document.RootElement.GetProperty("root");
             AssertEqual("root", root.GetProperty("source").GetProperty("kind").GetString(),
                 "The root package lock entry must identify the root source.");
@@ -10978,7 +10985,7 @@ internal static class IntegrationTests
 
         var moduleInputType = assembly.GetType("PackageModuleInput", throwOnError: true)!;
         var moduleInputConstructor = moduleInputType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Single(constructor => constructor.GetParameters().Length == 4);
+            .Single(constructor => constructor.GetParameters().Length == 5);
         var moduleListType = typeof(List<>).MakeGenericType(moduleInputType);
         var moduleInputs = Activator.CreateInstance(moduleListType)!;
         var add = moduleListType.GetMethod("Add")!;
@@ -10988,7 +10995,8 @@ internal static class IntegrationTests
                 "root",
                 parsed,
                 new Dictionary<string, string>(StringComparer.Ordinal),
-                "route-root"]);
+                "route-root",
+                null]);
             add.Invoke(moduleInputs, [moduleInput]);
         }
 
@@ -11889,8 +11897,8 @@ internal static class IntegrationTests
         var document = JsonDocument.Parse(bytes);
         var root = document.RootElement;
         AssertJsonPropertyOrder(root,
-            "schema_version,build,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,audit_snapshot_sha256,artifacts");
-        AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 2.");
+            "schema_version,build,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,managed_adapters,audit_snapshot_sha256,artifacts");
+        AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 3.");
         var build = root.GetProperty("build");
         AssertJsonPropertyOrder(build, "mode,framework,runtime_identifier");
         AssertEqual(expectedMode, build.GetProperty("mode").GetString(), "Unexpected build receipt mode.");
@@ -11962,6 +11970,7 @@ internal static class IntegrationTests
             "Top-level and toolchain foreign dependency records should match.");
         foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
             AssertJsonPropertyOrder(dependency, "name,version,ecosystem,reason");
+        AssertManagedAdapterProvenanceOrder(root.GetProperty("managed_adapters"));
         AssertTrue(IsLowerSha256(root.GetProperty("audit_snapshot_sha256").GetString()),
             "Build receipts should bind the checked audit snapshot with SHA-256.");
 

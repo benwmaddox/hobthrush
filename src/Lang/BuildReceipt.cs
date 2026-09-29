@@ -5,7 +5,7 @@ using System.Text.Json;
 
 internal static class BuildReceipt
 {
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -16,9 +16,10 @@ internal static class BuildReceipt
         PackageDependencyGraph? graph,
         string buildMode,
         string? runtimeIdentifier,
-        string sdkVersion)
+        string sdkVersion,
+        IReadOnlyList<AuditManagedAdapterProvenance>? managedAdapters = null)
     {
-        var snapshot = graph is null ? null : AuditReport.Create(graph, program);
+        var snapshot = graph is null ? null : AuditReport.Create(graph, program, managedAdapters);
         var checkedClaims = snapshot?.Json ?? AuditReport.CreateStandaloneSnapshot(program, sourceText);
         var packageInputs = snapshot?.Packages
             .SelectMany(package => package.Inputs)
@@ -60,6 +61,8 @@ internal static class BuildReceipt
         var grants = snapshot?.ManifestGrants ?? Array.Empty<string>();
         var trustedClaims = snapshot?.TrustedClaims ?? AuditReport.CreateStandaloneTrustedClaims(program);
         var trustedComponents = trustedClaims.Select(ClaimJson).ToArray();
+        var adapterProvenance = snapshot?.ManagedAdapters ??
+            AuditReport.CanonicalizeManagedAdapters(managedAdapters ?? []);
         var foreignDependencies = snapshot?.ForeignDependencies ??
             (AuditReport.RequiresSqliteDependency(null, program)
                 ? new[] { new AuditForeignDependency("Microsoft.Data.Sqlite", "10.0.12", "nuget", "generated_build") }
@@ -95,6 +98,7 @@ internal static class BuildReceipt
             manifest_grants = grants.OrderBy(grant => grant, StringComparer.Ordinal).ToArray(),
             trusted_components = trustedComponents,
             foreign_dependencies = foreignDependencies.Select(ForeignDependencyJson).ToArray(),
+            managed_adapters = AuditReport.ManagedAdapterMetadataJson(adapterProvenance),
             audit_snapshot_sha256 = AuditReport.Hash(checkedClaims),
             artifacts
         };

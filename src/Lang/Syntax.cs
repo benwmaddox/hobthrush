@@ -73,7 +73,9 @@ internal sealed record FunctionDecl(
     TypeSyntax ReturnType,
     IReadOnlyList<EffectSyntax> Effects,
     IReadOnlyList<Stmt> Body,
-    Token At);
+    Token At,
+    bool IsAdapter = false,
+    string? AdapterOperation = null);
 internal sealed record ParsedProgram(
     string Module,
     Token ModuleAt,

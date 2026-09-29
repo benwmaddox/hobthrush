@@ -379,6 +379,23 @@ internal sealed class Parser
                     Take();
                     functions.Add(ParseFunction(isPublic, isAsync: true));
                 }
+                else if (Is("adapter") && LookAhead().Text == "fn")
+                {
+                    Take();
+                    functions.Add(ParseFunction(isPublic, isAsync: false, isAdapter: true));
+                }
+                else if (Is("adapter") && LookAhead().Text == "async" && LookAhead(2).Text == "fn")
+                {
+                    Take();
+                    Take();
+                    functions.Add(ParseFunction(isPublic, isAsync: true, isAdapter: true));
+                }
+                else if (Is("async") && LookAhead().Text == "adapter" && LookAhead(2).Text == "fn")
+                {
+                    Take();
+                    Take();
+                    functions.Add(ParseFunction(isPublic, isAsync: true, isAdapter: true));
+                }
                 else if (Is("union"))
                 {
                     unions.Add(ParseUnion(isPublic));
@@ -708,7 +725,7 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private FunctionDecl ParseFunction(bool isPublic, bool isAsync)
+    private FunctionDecl ParseFunction(bool isPublic, bool isAsync, bool isAdapter = false)
     {
         Expect("fn");
         var name = ExpectBareIdentifier();
@@ -738,8 +755,35 @@ internal sealed class Parser
         var returnType = ParseType();
         Expect("effects");
         var effects = ParseEffects();
-        var body = ParseStatementBlock("Unclosed function body");
-        return new FunctionDecl(name.Text, typeParameters, isPublic, isAsync, parameters, returnType, effects, body, name);
+        string? adapterOperation = null;
+        IReadOnlyList<Stmt> body;
+        if (isAdapter)
+        {
+            if (!Is("="))
+                Fail(Current, "E_ADAPTER_DECL", "An adapter function must bind an operation with '= \"operation.id\";'");
+            Take();
+            if (Current.Kind != "text")
+                Fail(Current, "E_ADAPTER_DECL", "Expected a text operation ID after '=' in adapter function");
+            adapterOperation = DecodeText(Take());
+            Expect(";");
+            body = [];
+        }
+        else
+        {
+            body = ParseStatementBlock("Unclosed function body");
+        }
+        return new FunctionDecl(
+            name.Text,
+            typeParameters,
+            isPublic,
+            isAsync,
+            parameters,
+            returnType,
+            effects,
+            body,
+            name,
+            isAdapter,
+            adapterOperation);
     }
 
     private TestDecl ParseTest()

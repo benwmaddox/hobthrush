@@ -204,7 +204,7 @@ internal static class OutcomeEvaluator
             && IsSuccessful(apiRun.Capture)
             && GetInt(api?.RootElement, "schema_version") == 5
             && IsSuccessful(auditRun.Capture)
-            && GetInt(audit?.RootElement, "schema_version") == 6
+            && GetInt(audit?.RootElement, "schema_version") == 7
             && effectsCapture is not null
             && IsSuccessful(effectsCapture)
             && (scenario.Id != "web-greeting" || effects is not null
@@ -221,7 +221,7 @@ internal static class OutcomeEvaluator
         {
             case "cli-policy":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "command-schema", commandSchemaValid && HasCommand(buildDirectory, "decide", "fs.read"),
                     "v4 command schema declares decide with fs.read", Evidence(build));
                 AddCheck(checks, scenarioPrefix + "priority-order", cliBehavior?.PriorityOrderPassed == true,
@@ -229,7 +229,7 @@ internal static class OutcomeEvaluator
                 break;
             case "audit-repair":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "expected-diagnostics", IsSuccessful(check.Capture) && DiagnosticsAreEmpty(check.Capture),
                     "clean reference candidate has no compiler diagnostics before the constraint seed is applied", Evidence(check));
                 var effectPassed = effects is not null
@@ -240,18 +240,21 @@ internal static class OutcomeEvaluator
                     && JsonTextContains(effects.RootElement, "fs.read_text_async");
                 AddCheck(checks, scenarioPrefix + "inspect-effects", effectPassed,
                     "selected function reports declared and inferred fs.read through async read", EvidenceFor(commands, "inspect-effects"));
-                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 6
+                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 7
                     && JsonArrayContains(audit!.RootElement.GetProperty("manifest_grants"), "fs.read")
                     && JsonTextContains(audit.RootElement, "fs.read_text_async")
-                    && JsonTextContains(audit.RootElement, "claim_only");
-                AddCheck(checks, scenarioPrefix + "audit-v6", auditPassed,
-                    "audit v6 records the fs.read grant, claim-only operation, and portable root source identity", Evidence(auditRun));
-                AddCheck(checks, scenarioPrefix + "receipt-v2", receiptValid && commandSchemaValid && receiptDetail,
-                    "build receipt v2 hashes its generated files and carries portable package source identities", Evidence(build));
+                    && JsonTextContains(audit.RootElement, "claim_only")
+                    && audit.RootElement.TryGetProperty("managed_adapters", out var auditAdapters)
+                    && auditAdapters.ValueKind == JsonValueKind.Array
+                    && auditAdapters.GetArrayLength() == 0;
+                AddCheck(checks, scenarioPrefix + "audit-v7", auditPassed,
+                    "audit v7 records the fs.read grant, claim-only operation, portable root identity, and adapter array", Evidence(auditRun));
+                AddCheck(checks, scenarioPrefix + "receipt-v3", receiptValid && commandSchemaValid && receiptDetail,
+                    "build receipt v3 hashes its generated files and carries portable package identities and adapter array", Evidence(build));
                 break;
             case "web-greeting":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 break;
         }
 
@@ -842,7 +845,7 @@ internal static class OutcomeEvaluator
     {
         detail = false;
         using var receipt = ReadJsonFile(Path.Combine(buildDirectory, "build-receipt.json"));
-        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 2
+        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 3
             || !receipt.RootElement.TryGetProperty("package_graph", out var packageGraph)
             || packageGraph.ValueKind != JsonValueKind.Array
             || !packageGraph.EnumerateArray().Any(package =>
@@ -852,6 +855,8 @@ internal static class OutcomeEvaluator
                 && identity.TryGetProperty("source", out var source)
                 && TryGetString(source, "kind", out var sourceKind)
                 && sourceKind == "root")
+            || !receipt.RootElement.TryGetProperty("managed_adapters", out var managedAdapters)
+            || managedAdapters.ValueKind != JsonValueKind.Array
             || !receipt.RootElement.TryGetProperty("artifacts", out var artifacts)
             || artifacts.ValueKind != JsonValueKind.Array)
             return false;

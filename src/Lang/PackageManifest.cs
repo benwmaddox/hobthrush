@@ -16,7 +16,8 @@ internal sealed record PackageManifest(
     IReadOnlyList<ProcessExecutablePin> ProcessExecutables,
     IReadOnlySet<string> Capabilities,
     IReadOnlyList<ConfigField> ConfigFields,
-    IReadOnlyList<PackageDependency> Dependencies)
+    IReadOnlyList<PackageDependency> Dependencies,
+    ManagedAdapterDescriptor? ManagedAdapter)
 {
     public bool IsLibrary => Kind == "lib";
 }
@@ -47,7 +48,10 @@ internal sealed record LoadedPackage(
     string ManifestText,
     IReadOnlyList<PackageSource> Sources,
     WebDatabaseOptions? WebDatabaseOptions,
-    ProcessExecutablePin? SelectedProcessExecutable);
+    ProcessExecutablePin? SelectedProcessExecutable)
+{
+    public ManagedAdapterDescriptor? ManagedAdapter => Manifest.ManagedAdapter;
+}
 
 internal sealed record WebDatabaseOptions(
     string RelativePath,
@@ -127,6 +131,13 @@ internal static class PackageLoader
         "process_linux_path",
         "process_linux_sha256"
     };
+    private static readonly HashSet<string> ManagedAdapterKeys = new(StringComparer.Ordinal)
+    {
+        "bridge_id",
+        "target_framework",
+        "assembly_path",
+        "assembly_sha256"
+    };
 
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
     {
@@ -185,6 +196,16 @@ internal static class PackageLoader
             parsedManifest.Values,
             parsedManifest.Capabilities,
             parsedManifest.ConfigSectionSeen,
+            parsedManifest.ManagedAdapterSectionSeen,
+            parsedManifest.ManagedAdapterValues,
+            manifestFile,
+            diagnostics);
+        if (diagnostics.Count != 0)
+            return new PackageLoadResult(null, diagnostics);
+
+        var managedAdapter = ManagedAdapterCatalog.ValidatePackageDeclaration(
+            root,
+            parsedManifest.ManagedAdapterValues,
             manifestFile,
             diagnostics);
         if (diagnostics.Count != 0)
@@ -209,7 +230,8 @@ internal static class PackageLoader
             processExecutables,
             parsedManifest.Capabilities,
             parsedManifest.ConfigFields,
-            parsedManifest.Dependencies);
+            parsedManifest.Dependencies,
+            managedAdapter);
 
         string sourceDirectory;
         try
@@ -659,10 +681,12 @@ internal static class PackageLoader
 
     private sealed record ParsedManifest(
         Dictionary<string, string> Values,
+        Dictionary<string, string> ManagedAdapterValues,
         IReadOnlyList<PackageDependency> Dependencies,
         IReadOnlySet<string> Capabilities,
         IReadOnlyList<ConfigField> ConfigFields,
-        bool ConfigSectionSeen);
+        bool ConfigSectionSeen,
+        bool ManagedAdapterSectionSeen);
 
     private static ParsedManifest ParseManifest(
         string text,
@@ -670,6 +694,7 @@ internal static class PackageLoader
         List<Diagnostic> diagnostics)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var managedAdapterValues = new Dictionary<string, string>(StringComparer.Ordinal);
         var dependencies = new List<PackageDependency>();
         var capabilities = new HashSet<string>(StringComparer.Ordinal);
         var configFields = new List<ConfigField>();
@@ -678,9 +703,11 @@ internal static class PackageLoader
         var inConfig = false;
         var inCapabilities = false;
         var inDependencies = false;
+        var inManagedAdapter = false;
         var configSeen = false;
         var capabilitiesSeen = false;
         var dependenciesSeen = false;
+        var managedAdapterSeen = false;
         using var reader = new StringReader(text);
         var lineNumber = 0;
         while (reader.ReadLine() is { } line)
@@ -692,6 +719,16 @@ internal static class PackageLoader
 
             if (trimmed.StartsWith('['))
             {
+                if (trimmed == "[managed_adapter]" && !managedAdapterSeen && !dependenciesSeen)
+                {
+                    inConfig = false;
+                    inCapabilities = false;
+                    inDependencies = false;
+                    inManagedAdapter = true;
+                    managedAdapterSeen = true;
+                    continue;
+                }
+
                 if (trimmed == "[config]")
                 {
                     if (configSeen)
@@ -700,6 +737,7 @@ internal static class PackageLoader
                         inConfig = true;
                         inCapabilities = false;
                         inDependencies = false;
+                        inManagedAdapter = false;
                         continue;
                     }
                     if (capabilitiesSeen || dependenciesSeen)
@@ -709,12 +747,14 @@ internal static class PackageLoader
                         inConfig = true;
                         inCapabilities = false;
                         inDependencies = false;
+                        inManagedAdapter = false;
                         continue;
                     }
 
                     inConfig = true;
                     inCapabilities = false;
                     inDependencies = false;
+                    inManagedAdapter = false;
                     configSeen = true;
                     continue;
                 }
@@ -724,6 +764,7 @@ internal static class PackageLoader
                     inConfig = false;
                     inCapabilities = true;
                     inDependencies = false;
+                    inManagedAdapter = false;
                     capabilitiesSeen = true;
                     continue;
                 }
@@ -733,6 +774,7 @@ internal static class PackageLoader
                     inConfig = false;
                     inCapabilities = false;
                     inDependencies = true;
+                    inManagedAdapter = false;
                     dependenciesSeen = true;
                     continue;
                 }
@@ -741,11 +783,14 @@ internal static class PackageLoader
                     ? "The [dependencies] section may appear only once"
                     : trimmed == "[capabilities]"
                         ? "The [capabilities] section may appear once before [dependencies]"
+                        : trimmed == "[managed_adapter]"
+                            ? "The [managed_adapter] section may appear only once before [dependencies]"
                     : $"Unknown manifest section '{trimmed}'";
                 diagnostics.Add(AtLine("E_MANIFEST", sectionMessage, file, lineNumber));
                 inConfig = false;
                 inCapabilities = false;
                 inDependencies = false;
+                inManagedAdapter = false;
                 continue;
             }
 
@@ -772,6 +817,34 @@ internal static class PackageLoader
 
             var key = trimmed[..equals].Trim();
             var rawValue = trimmed[(equals + 1)..].Trim();
+            if (inManagedAdapter)
+            {
+                if (!ManagedAdapterKeys.Contains(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Unknown managed adapter key '{key}'", file, lineNumber));
+                    continue;
+                }
+
+                if (managedAdapterValues.ContainsKey(key))
+                {
+                    diagnostics.Add(AtLine("E_MANIFEST", $"Duplicate managed adapter key '{key}'", file, lineNumber));
+                    continue;
+                }
+
+                if (!TryReadStringValue(rawValue, out var adapterValue))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Value for managed adapter key '{key}' must be a simple double-quoted string",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                managedAdapterValues.Add(key, adapterValue);
+                continue;
+            }
+
             if (inConfig)
             {
                 if (IsProcessExecutableKey(key))
@@ -922,16 +995,20 @@ internal static class PackageLoader
 
         return new ParsedManifest(
             values,
+            managedAdapterValues,
             dependencies,
             capabilities.ToFrozenSet(StringComparer.Ordinal),
             configFields.OrderBy(field => field.Name, StringComparer.Ordinal).ToArray(),
-            configSeen);
+            configSeen,
+            managedAdapterSeen);
     }
 
     private static void ValidateManifest(
         IReadOnlyDictionary<string, string> values,
         IReadOnlySet<string> capabilities,
         bool configSectionSeen,
+        bool managedAdapterSectionSeen,
+        IReadOnlyDictionary<string, string> managedAdapterValues,
         string file,
         List<Diagnostic> diagnostics)
     {
@@ -979,6 +1056,35 @@ internal static class PackageLoader
 
         if (configSectionSeen && kind == "lib")
             diagnostics.Add(AtStart("E_MANIFEST", "Library packages cannot declare a [config] section", file));
+
+        if (managedAdapterSectionSeen)
+        {
+            if (kind is not null && kind != "lib")
+                diagnostics.Add(AtStart("E_MANIFEST", "Managed adapters may only be declared by library packages", file));
+
+            foreach (var key in ManagedAdapterKeys)
+            {
+                if (!managedAdapterValues.ContainsKey(key))
+                    diagnostics.Add(AtStart("E_MANIFEST", $"The [managed_adapter] section requires '{key}'", file));
+            }
+
+            if (managedAdapterValues.TryGetValue("assembly_path", out var adapterPath) &&
+                !IsNormalizedPackageRelativeFilePath(adapterPath))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "managed_adapter.assembly_path must be a normalized package-relative file path using forward slashes",
+                    file));
+            }
+
+            if (managedAdapterValues.TryGetValue("assembly_sha256", out var adapterHash) && !IsLowerHexSha256(adapterHash))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "managed_adapter.assembly_sha256 must be exactly 64 lowercase hexadecimal characters",
+                    file));
+            }
+        }
 
         if (values.TryGetValue("source_root", out var sourceRoot) && !IsNormalizedRelativePath(sourceRoot))
         {

@@ -20,6 +20,21 @@ internal static class CheckedReportFacts
         })
         .ToArray();
 
+    private static IReadOnlyList<string> TrustedAdapterEffects(string operation) => operation switch
+    {
+        "sha256.text.hash_utf8" => Array.Empty<string>(),
+        "FsRead.read_text" or "FsRead.read_text_async" => ["fs.read"],
+        "FsWrite.write_text" or "FsWrite.write_text_async" => ["fs.write"],
+        "DbRead.query_one" => ["db.read"],
+        "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => ["db.write"],
+        "HttpClient.get_text_async" => ["net.client"],
+        "ProcessRunner.run_text_async" => ["process.spawn"],
+        "Config.get_text" or "Config.get_secret_text" => ["env.read"],
+        "Secrets.reveal_text" => ["secret.reveal"],
+        "Logger.info" => ["log.write"],
+        _ => throw new InvalidOperationException($"Unknown trusted adapter operation '{operation}'")
+    };
+
     public static IReadOnlyList<TrustedOperation> FindTrustedAdapterOperations(
         CheckedProgram program,
         CheckedFunction root)
@@ -32,26 +47,15 @@ internal static class CheckedReportFacts
         return operationNames.Select(operation => new TrustedOperation(
             operation,
             "trusted_adapter",
-            [operation switch
-            {
-                "FsRead.read_text" => "fs.read",
-                "FsRead.read_text_async" => "fs.read",
-                "FsWrite.write_text" => "fs.write",
-                "FsWrite.write_text_async" => "fs.write",
-                "DbRead.query_one" => "db.read",
-                "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => "db.write",
-                "HttpClient.get_text_async" => "net.client",
-                "ProcessRunner.run_text_async" => "process.spawn",
-                "Config.get_text" or "Config.get_secret_text" => "env.read",
-                "Secrets.reveal_text" => "secret.reveal",
-                "Logger.info" => "log.write",
-                _ => throw new InvalidOperationException($"Unknown trusted adapter operation '{operation}'")
-            }])).ToArray();
+            TrustedAdapterEffects(operation))).ToArray();
 
         void VisitFunction(CheckedFunction function)
         {
             if (!visitedFunctions.Add(function.Id))
                 return;
+
+            if (function.AdapterBinding is { } adapterBinding)
+                operationNames.Add(adapterBinding.OperationId);
 
             foreach (var statement in function.Body)
                 VisitStatement(statement);

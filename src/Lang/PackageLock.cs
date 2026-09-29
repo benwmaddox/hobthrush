@@ -6,9 +6,9 @@ using System.Text.Json;
 internal static class PackageLock
 {
     private const string FileName = "lang.lock";
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly byte[] ContentHashDomain = Encoding.UTF8.GetBytes("LANG-PACKAGE-CONTENT\0v1");
+    private static readonly byte[] ContentHashDomain = Encoding.UTF8.GetBytes("LANG-PACKAGE-CONTENT\0v2");
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
     {
         "await", "false", "if", "match", "null", "true", "with"
@@ -18,10 +18,10 @@ internal static class PackageLock
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
-               {
-                   Indented = true,
-                   IndentSize = 2
-               }))
+        {
+            Indented = true,
+            IndentSize = 2
+        }))
         {
             writer.WriteStartObject();
             writer.WriteNumber("schema_version", SchemaVersion);
@@ -32,6 +32,7 @@ internal static class PackageLock
             writer.WriteString("version", graph.Root.Package.Manifest.Version);
             writer.WriteString("manifest_sha256", HashNormalizedText(graph.Root.Package.ManifestText));
             WriteSourceIdentity(writer, graph.Root.SourceIdentity);
+            WriteManagedAdapter(writer, graph.Root.Package.ManagedAdapter);
             WriteDependencies(writer, graph, graph.Root);
             writer.WriteEndObject();
 
@@ -47,6 +48,7 @@ internal static class PackageLock
                 writer.WriteString("version", package.Package.Manifest.Version);
                 WriteSourceIdentity(writer, package.SourceIdentity);
                 writer.WriteString("content_sha256", HashPackageContent(package.Package));
+                WriteManagedAdapter(writer, package.Package.ManagedAdapter);
                 WriteDependencies(writer, graph, package);
                 writer.WriteEndObject();
             }
@@ -64,7 +66,7 @@ internal static class PackageLock
 
     public static List<Diagnostic> Write(PackageDependencyGraph graph)
     {
-        if (!HasDependencies(graph))
+        if (!HasLockInputs(graph))
             return [];
 
         var lockFile = Path.Combine(graph.Root.Package.Root, FileName);
@@ -123,7 +125,7 @@ internal static class PackageLock
 
     public static List<Diagnostic> Validate(PackageDependencyGraph graph)
     {
-        if (!HasDependencies(graph))
+        if (!HasLockInputs(graph))
             return [];
 
         var lockFile = Path.Combine(graph.Root.Package.Root, FileName);
@@ -208,6 +210,35 @@ internal static class PackageLock
         writer.WriteEndObject();
     }
 
+    private static void WriteManagedAdapter(Utf8JsonWriter writer, ManagedAdapterDescriptor? adapter)
+    {
+        writer.WritePropertyName("managed_adapter");
+        if (adapter is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        var currentSha256 = HashManagedAdapterAssembly(adapter);
+        if (!string.Equals(currentSha256, adapter.AssemblySha256, StringComparison.Ordinal))
+            throw new IOException("Managed adapter assembly changed after package validation");
+
+        writer.WriteStartObject();
+        writer.WriteString("bridge_id", adapter.Definition.BridgeId);
+        writer.WriteString("catalog_revision", adapter.Definition.CatalogRevision);
+        writer.WritePropertyName("operation_ids");
+        writer.WriteStartArray();
+        foreach (var operationId in adapter.OperationIds)
+            writer.WriteStringValue(operationId);
+        writer.WriteEndArray();
+        writer.WriteString("target_framework", adapter.Definition.TargetFramework);
+        writer.WriteString("portability_target", adapter.Definition.PortabilityTarget);
+        writer.WriteString("assembly_path", adapter.AssemblyPath);
+        writer.WriteString("assembly_sha256", adapter.AssemblySha256);
+        writer.WriteString("closure_sha256", adapter.ClosureSha256);
+        writer.WriteEndObject();
+    }
+
     private static string HashPackageContent(LoadedPackage package)
     {
         var entries = new List<(string Path, string Text)>
@@ -233,11 +264,29 @@ internal static class PackageLock
             hash.AppendData(textBytes);
         }
 
+        if (package.ManagedAdapter is { } adapter)
+        {
+            var adapterPathBytes = StrictUtf8.GetBytes($"managed_adapter/{adapter.AssemblyPath}");
+            var adapterHashBytes = Convert.FromHexString(HashManagedAdapterAssembly(adapter));
+            BinaryPrimitives.WriteUInt64BigEndian(length, (ulong)adapterPathBytes.LongLength);
+            hash.AppendData(length);
+            hash.AppendData(adapterPathBytes);
+            BinaryPrimitives.WriteUInt64BigEndian(length, (ulong)adapterHashBytes.LongLength);
+            hash.AppendData(length);
+            hash.AppendData(adapterHashBytes);
+        }
+
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     private static string HashNormalizedText(string text) =>
         Convert.ToHexString(SHA256.HashData(StrictUtf8.GetBytes(NormalizeLineEndings(text)))).ToLowerInvariant();
+
+    private static string HashManagedAdapterAssembly(ManagedAdapterDescriptor adapter)
+    {
+        using var file = new FileStream(adapter.SourceAssemblyPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant();
+    }
 
     private static string NormalizeLineEndings(string text) =>
         text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
@@ -245,8 +294,8 @@ internal static class PackageLock
     private static string NormalizeRelative(string path) =>
         path.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
 
-    private static bool HasDependencies(PackageDependencyGraph graph) =>
-        graph.Nodes.Any(node => node.Package.Manifest.Dependencies.Count != 0);
+    private static bool HasLockInputs(PackageDependencyGraph graph) =>
+        graph.Nodes.Any(node => node.Package.Manifest.Dependencies.Count != 0 || node.Package.ManagedAdapter is not null);
 
     private static bool HasStrictSchema(byte[] bytes)
     {
@@ -269,11 +318,12 @@ internal static class PackageLock
                 return false;
 
             var root = documentRoot.GetProperty("root");
-            if (!HasExactProperties(root, ["name", "version", "manifest_sha256", "source", "dependencies"]) ||
+            if (!HasExactProperties(root, ["name", "version", "manifest_sha256", "source", "managed_adapter", "dependencies"]) ||
                 !IsString(root.GetProperty("name")) ||
                 !IsString(root.GetProperty("version")) ||
                 !IsHash(root.GetProperty("manifest_sha256")) ||
                 !HasSourceIdentity(root.GetProperty("source")) ||
+                !ManagedAdapterCatalog.IsPortableLockRecord(root.GetProperty("managed_adapter")) ||
                 !HasSortedDependencies(root.GetProperty("dependencies")))
                 return false;
 
@@ -285,7 +335,7 @@ internal static class PackageLock
             string? previousPath = null;
             foreach (var package in packages.EnumerateArray())
             {
-                if (!HasExactProperties(package, ["path", "name", "version", "source", "content_sha256", "dependencies"]))
+                if (!HasExactProperties(package, ["path", "name", "version", "source", "content_sha256", "managed_adapter", "dependencies"]))
                     return false;
 
                 var pathElement = package.GetProperty("path");
@@ -302,6 +352,7 @@ internal static class PackageLock
                     !IsString(package.GetProperty("version")) ||
                     !HasSourceIdentity(source) ||
                     !IsHash(package.GetProperty("content_sha256")) ||
+                    !ManagedAdapterCatalog.IsPortableLockRecord(package.GetProperty("managed_adapter")) ||
                     !HasSortedDependencies(package.GetProperty("dependencies")))
                     return false;
             }
