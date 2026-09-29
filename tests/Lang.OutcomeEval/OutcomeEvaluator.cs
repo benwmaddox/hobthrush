@@ -204,7 +204,7 @@ internal static class OutcomeEvaluator
             && IsSuccessful(apiRun.Capture)
             && GetInt(api?.RootElement, "schema_version") == 5
             && IsSuccessful(auditRun.Capture)
-            && GetInt(audit?.RootElement, "schema_version") == 5
+            && GetInt(audit?.RootElement, "schema_version") == 6
             && effectsCapture is not null
             && IsSuccessful(effectsCapture)
             && (scenario.Id != "web-greeting" || effects is not null
@@ -221,7 +221,7 @@ internal static class OutcomeEvaluator
         {
             case "cli-policy":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v1 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "command-schema", commandSchemaValid && HasCommand(buildDirectory, "decide", "fs.read"),
                     "v4 command schema declares decide with fs.read", Evidence(build));
                 AddCheck(checks, scenarioPrefix + "priority-order", cliBehavior?.PriorityOrderPassed == true,
@@ -229,7 +229,7 @@ internal static class OutcomeEvaluator
                 break;
             case "audit-repair":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v1 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "expected-diagnostics", IsSuccessful(check.Capture) && DiagnosticsAreEmpty(check.Capture),
                     "clean reference candidate has no compiler diagnostics before the constraint seed is applied", Evidence(check));
                 var effectPassed = effects is not null
@@ -240,18 +240,18 @@ internal static class OutcomeEvaluator
                     && JsonTextContains(effects.RootElement, "fs.read_text_async");
                 AddCheck(checks, scenarioPrefix + "inspect-effects", effectPassed,
                     "selected function reports declared and inferred fs.read through async read", EvidenceFor(commands, "inspect-effects"));
-                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 5
+                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 6
                     && JsonArrayContains(audit!.RootElement.GetProperty("manifest_grants"), "fs.read")
                     && JsonTextContains(audit.RootElement, "fs.read_text_async")
                     && JsonTextContains(audit.RootElement, "claim_only");
-                AddCheck(checks, scenarioPrefix + "audit-v5", auditPassed,
-                    "audit v5 records the fs.read grant and claim-only trusted operation", Evidence(auditRun));
-                AddCheck(checks, scenarioPrefix + "receipt-v1", receiptValid && commandSchemaValid && receiptDetail,
-                    "build receipt v1 hashes its generated files and command schema v4 is present", Evidence(build));
+                AddCheck(checks, scenarioPrefix + "audit-v6", auditPassed,
+                    "audit v6 records the fs.read grant, claim-only operation, and portable root source identity", Evidence(auditRun));
+                AddCheck(checks, scenarioPrefix + "receipt-v2", receiptValid && commandSchemaValid && receiptDetail,
+                    "build receipt v2 hashes its generated files and carries portable package source identities", Evidence(build));
                 break;
             case "web-greeting":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/audit/API/effects and generated v4 schema/v1 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/audit/API/effects and generated v4 schema/v2 receipt passed", Evidence(check, build, apiRun, auditRun));
                 break;
         }
 
@@ -842,7 +842,16 @@ internal static class OutcomeEvaluator
     {
         detail = false;
         using var receipt = ReadJsonFile(Path.Combine(buildDirectory, "build-receipt.json"));
-        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 1
+        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 2
+            || !receipt.RootElement.TryGetProperty("package_graph", out var packageGraph)
+            || packageGraph.ValueKind != JsonValueKind.Array
+            || !packageGraph.EnumerateArray().Any(package =>
+                package.TryGetProperty("identity", out var identity)
+                && TryGetString(identity, "path", out var path)
+                && path == "."
+                && identity.TryGetProperty("source", out var source)
+                && TryGetString(source, "kind", out var sourceKind)
+                && sourceKind == "root")
             || !receipt.RootElement.TryGetProperty("artifacts", out var artifacts)
             || artifacts.ValueKind != JsonValueKind.Array)
             return false;
@@ -1118,7 +1127,14 @@ internal static class OutcomeEvaluator
     private static bool VerifyAuditRootInputs(JsonElement? audit) => audit is not null
         && audit.Value.TryGetProperty("packages", out var packages)
         && packages.ValueKind == JsonValueKind.Array
-        && packages.EnumerateArray().Any(package => package.TryGetProperty("inputs", out var inputs)
+        && packages.EnumerateArray().Any(package =>
+            package.TryGetProperty("identity", out var identity)
+            && TryGetString(identity, "path", out var path)
+            && path == "."
+            && identity.TryGetProperty("source", out var source)
+            && TryGetString(source, "kind", out var sourceKind)
+            && sourceKind == "root"
+            && package.TryGetProperty("inputs", out var inputs)
             && inputs.ValueKind == JsonValueKind.Array
             && inputs.EnumerateArray().Any(input => TryGetString(input, "kind", out var kind) && kind == "manifest"));
 

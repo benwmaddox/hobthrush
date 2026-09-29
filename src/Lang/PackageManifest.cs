@@ -30,7 +30,10 @@ internal sealed record ConfigField(
     bool HasDefault,
     string? DefaultValue);
 
-internal sealed record PackageDependency(string Alias, string Path);
+internal sealed record PackageDependency(string Alias, PackageDependencySpec Spec)
+{
+    public string Path => Spec.FormatManifest();
+}
 
 internal sealed record ProcessExecutablePin(string Os, string Path, string Sha256, string? FullPath);
 
@@ -57,7 +60,8 @@ internal sealed record ResolvedPackage(
     string Id,
     string RelativePath,
     LoadedPackage Package,
-    IReadOnlyDictionary<string, string> DependencyIds);
+    IReadOnlyDictionary<string, string> DependencyIds,
+    PackageSourceIdentity SourceIdentity);
 
 internal sealed record PackageDependencyGraph(
     ResolvedPackage Root,
@@ -247,6 +251,29 @@ internal static class PackageLoader
             return new PackageLoadResult(null, diagnostics);
         }
 
+        var configuredPackageCache = Environment.GetEnvironmentVariable("LANG_PACKAGE_CACHE");
+        if (!string.IsNullOrWhiteSpace(configuredPackageCache))
+        {
+            try
+            {
+                var sourceCache = new PackageSourceCache();
+                var cacheRootError = sourceCache.ValidateCacheRootForPackage(root);
+                if (cacheRootError is not null)
+                {
+                    diagnostics.Add(AtStart("E_DEPENDENCY", cacheRootError, manifestFile));
+                    return new PackageLoadResult(null, diagnostics);
+                }
+            }
+            catch (Exception error) when (IsFileError(error) || error is InvalidOperationException)
+            {
+                diagnostics.Add(AtStart(
+                    "E_DEPENDENCY",
+                    "Could not validate the configured package cache location",
+                    manifestFile));
+                return new PackageLoadResult(null, diagnostics);
+            }
+        }
+
         var webDatabaseOptions = LoadWebDatabaseOptions(root, manifest, manifestFile, diagnostics);
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
@@ -294,7 +321,10 @@ internal static class PackageLoader
             diagnostics);
     }
 
-    public static PackageGraphResult ResolveGraph(string packageDirectory)
+    public static PackageGraphResult ResolveGraph(string packageDirectory) =>
+        ResolveGraph(packageDirectory, PackageResolutionMode.Offline);
+
+    public static PackageGraphResult ResolveGraph(string packageDirectory, PackageResolutionMode mode)
     {
         PackageLoadResult rootLoad;
         try
@@ -316,15 +346,28 @@ internal static class PackageLoader
         var diagnostics = new List<Diagnostic>();
         var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         var completed = new Dictionary<string, ResolvedPackage>(pathComparer);
-        var loadedByPath = new Dictionary<string, LoadedPackage>(pathComparer)
+        var sourceIdentities = new Dictionary<string, PackageSourceIdentity>(pathComparer)
         {
-            [root.Root] = root
+            [root.Root] = PackageSourceIdentity.Root
+        };
+        var stablePaths = new Dictionary<string, string>(pathComparer)
+        {
+            [root.Root] = string.Empty
+        };
+        var rootsByStablePath = new Dictionary<string, string>(pathComparer)
+        {
+            [string.Empty] = root.Root
         };
         var active = new List<(LoadedPackage Package, string? ViaAlias)>();
         var identities = new Dictionary<(string Name, string Version), string>();
         identities[(root.Manifest.Name, root.Manifest.Version)] = root.Root;
 
-        ResolvedPackage? Visit(LoadedPackage package, string? viaAlias, string edgeFile)
+        ResolvedPackage? Visit(
+            LoadedPackage package,
+            string? viaAlias,
+            string edgeFile,
+            PackageSourceIdentity sourceIdentity,
+            string relativePath)
         {
             var activeIndex = active.FindIndex(frame => pathComparer.Equals(frame.Package.Root, package.Root));
             if (activeIndex >= 0)
@@ -348,78 +391,35 @@ internal static class PackageLoader
             if (completed.TryGetValue(package.Root, out var existing))
                 return existing;
 
+            sourceIdentities.TryAdd(package.Root, sourceIdentity);
+            stablePaths.TryAdd(package.Root, relativePath);
+            sourceIdentity = sourceIdentities[package.Root];
+            relativePath = stablePaths[package.Root];
             active.Add((package, viaAlias));
             var dependencyIds = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var dependency in package.Manifest.Dependencies.OrderBy(item => item.Alias, StringComparer.Ordinal))
             {
-                string targetRoot;
-                try
-                {
-                    targetRoot = Path.GetFullPath(Path.Combine(
-                        package.Root,
-                        dependency.Path.Replace('/', Path.DirectorySeparatorChar)));
-                    if (HasReparsePointOnPath(targetRoot))
-                    {
-                        diagnostics.Add(AtStart(
-                            "E_DEPENDENCY",
-                            $"Dependency '{dependency.Alias}' resolves through a symbolic link or reparse point",
-                            package.ManifestFile));
-                        continue;
-                    }
-                }
-                catch (Exception error) when (IsFileError(error))
+                if (sourceIdentity.Kind == PackageSourceKind.Git && dependency.Spec.Kind == PackageDependencyKind.Path)
                 {
                     diagnostics.Add(AtStart(
                         "E_DEPENDENCY",
-                        $"Could not resolve dependency '{dependency.Alias}': {error.Message}",
+                        $"Dependency '{dependency.Alias}': path dependencies declared by Git-sourced packages are not supported",
                         package.ManifestFile));
                     continue;
                 }
 
-                if (!Directory.Exists(targetRoot))
+                var childLoad = ResolveDependencyPackage(package.Root, dependency.Spec, mode);
+                if (childLoad.Diagnostics.Count != 0 || childLoad.Package is null || childLoad.SourceIdentity is null)
                 {
-                    diagnostics.Add(AtStart(
-                        "E_DEPENDENCY",
-                        $"Dependency '{dependency.Alias}' directory '{dependency.Path}' does not exist",
-                        package.ManifestFile));
+                    diagnostics.AddRange(childLoad.Diagnostics.Select(diagnostic =>
+                        diagnostic.Code == "E_DEPENDENCY"
+                            ? diagnostic with { Message = $"Dependency '{dependency.Alias}': {diagnostic.Message}" }
+                            : diagnostic));
                     continue;
                 }
 
-                if (!loadedByPath.TryGetValue(targetRoot, out var childPackage))
-                {
-                    var childManifest = Path.Combine(targetRoot, "lang.toml");
-                    if (!File.Exists(childManifest))
-                    {
-                        diagnostics.Add(AtStart(
-                            "E_DEPENDENCY",
-                            $"Dependency '{dependency.Alias}' directory '{dependency.Path}' has no lang.toml manifest",
-                            package.ManifestFile));
-                        continue;
-                    }
-
-                    PackageLoadResult childLoad;
-                    try
-                    {
-                        childLoad = Load(targetRoot);
-                    }
-                    catch (Exception error) when (IsFileError(error))
-                    {
-                        diagnostics.Add(AtStart(
-                            "E_DEPENDENCY",
-                            $"Could not load dependency '{dependency.Alias}': {error.Message}",
-                            package.ManifestFile));
-                        continue;
-                    }
-
-                    if (childLoad.Diagnostics.Count != 0 || childLoad.Package is null)
-                    {
-                        diagnostics.AddRange(childLoad.Diagnostics);
-                        continue;
-                    }
-
-                    childPackage = childLoad.Package;
-                    loadedByPath.Add(childPackage.Root, childPackage);
-                }
+                var childPackage = childLoad.Package;
+                var targetRoot = childPackage.Root;
 
                 if (!childPackage.Manifest.IsLibrary)
                 {
@@ -441,7 +441,51 @@ internal static class PackageLoader
                 }
 
                 identities[identity] = childPackage.Root;
-                var child = Visit(childPackage, dependency.Alias, package.ManifestFile);
+                var childSourceIdentity = childLoad.SourceIdentity;
+                string childRelativePath;
+                if (dependency.Spec.Kind == PackageDependencyKind.Git)
+                {
+                    childRelativePath = PackageSourceCache.StableGitPackagePath(
+                        dependency.Spec.Url!,
+                        dependency.Spec.Commit!);
+                    childSourceIdentity = PackageSourceIdentity.ForGit(
+                        dependency.Spec.Url!,
+                        dependency.Spec.Commit!);
+                }
+                else
+                {
+                    childRelativePath = NormalizeRelative(Path.GetRelativePath(root.Root, targetRoot));
+                    childSourceIdentity = PackageSourceIdentity.ForPath(childRelativePath);
+                }
+
+                if (rootsByStablePath.TryGetValue(childRelativePath, out var priorStableRoot) &&
+                    !pathComparer.Equals(priorStableRoot, targetRoot))
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Dependency '{dependency.Alias}' has a stable lock path that collides with another package source",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                rootsByStablePath[childRelativePath] = targetRoot;
+
+                if (sourceIdentities.TryGetValue(targetRoot, out var priorSourceIdentity) &&
+                    priorSourceIdentity != childSourceIdentity)
+                {
+                    diagnostics.Add(AtStart(
+                        "E_DEPENDENCY",
+                        $"Package '{childPackage.Manifest.Name}' resolves from multiple source identities",
+                        package.ManifestFile));
+                    continue;
+                }
+
+                var child = Visit(
+                    childPackage,
+                    dependency.Alias,
+                    package.ManifestFile,
+                    childSourceIdentity,
+                    childRelativePath);
                 if (child is not null)
                     dependencyIds.Add(dependency.Alias, child.Id);
             }
@@ -449,14 +493,15 @@ internal static class PackageLoader
             active.RemoveAt(active.Count - 1);
             var resolved = new ResolvedPackage(
                 package.Root,
-                NormalizeRelative(Path.GetRelativePath(root.Root, package.Root)),
+                relativePath,
                 package,
-                dependencyIds);
+                dependencyIds,
+                sourceIdentity);
             completed.Add(package.Root, resolved);
             return resolved;
         }
 
-        var resolvedRoot = Visit(root, null, root.ManifestFile);
+        var resolvedRoot = Visit(root, null, root.ManifestFile, PackageSourceIdentity.Root, string.Empty);
         if (diagnostics.Count != 0 || resolvedRoot is null)
             return new PackageGraphResult(null, diagnostics);
 
@@ -470,6 +515,143 @@ internal static class PackageLoader
         return new PackageGraphResult(
             new PackageDependencyGraph(resolvedRoot, nodes, byId),
             diagnostics);
+    }
+
+    public static PackageDependencyLoadResult ResolveDependencyPackage(
+        string packageDirectory,
+        PackageDependencySpec spec,
+        PackageResolutionMode mode)
+    {
+        string manifestFile;
+        try
+        {
+            manifestFile = Path.Combine(Path.GetFullPath(packageDirectory), "lang.toml");
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            return new PackageDependencyLoadResult(
+                null,
+                null,
+                [AtStart("E_DEPENDENCY", $"Could not resolve package directory: {error.Message}", packageDirectory)]);
+        }
+
+        if (!PackageDependencySpec.TryParseManifest(spec.FormatManifest(), out var parsedSpec, out var parseError) ||
+            parsedSpec is null || parsedSpec.Kind != spec.Kind)
+            return new PackageDependencyLoadResult(
+                null,
+                null,
+                [AtStart("E_DEPENDENCY", $"Dependency source is invalid: {parseError}", manifestFile)]);
+
+        spec = parsedSpec;
+        string targetRoot;
+        PackageSourceIdentity sourceIdentity;
+        if (spec.Kind == PackageDependencyKind.Path)
+        {
+            if (spec.Path is null || !PackageDependencySpec.IsValidRelativePath(spec.Path))
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", "Dependency has an invalid relative path", manifestFile)]);
+
+            try
+            {
+                targetRoot = Path.GetFullPath(Path.Combine(
+                    packageDirectory,
+                    spec.Path.Replace('/', Path.DirectorySeparatorChar)));
+                if (HasReparsePointOnPath(targetRoot))
+                    return new PackageDependencyLoadResult(
+                        null,
+                        null,
+                        [AtStart("E_DEPENDENCY", "Dependency resolves through a symbolic link or reparse point", manifestFile)]);
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", $"Could not resolve dependency path: {error.Message}", manifestFile)]);
+            }
+
+            if (!Directory.Exists(targetRoot))
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", $"Dependency directory '{spec.Path}' does not exist", manifestFile)]);
+
+            if (!File.Exists(Path.Combine(targetRoot, "lang.toml")))
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", $"Dependency directory '{spec.Path}' has no lang.toml manifest", manifestFile)]);
+
+            sourceIdentity = PackageSourceIdentity.ForPath(spec.Path);
+        }
+        else if (spec.Kind == PackageDependencyKind.Git)
+        {
+            PackageSourceCache sourceCache;
+            try
+            {
+                sourceCache = new PackageSourceCache();
+            }
+            catch (Exception error) when (IsFileError(error) || error is InvalidOperationException)
+            {
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", "Could not initialize the configured package cache", manifestFile)]);
+            }
+
+            string? cacheRootError;
+            try
+            {
+                cacheRootError = sourceCache.ValidateCacheRootForPackage(packageDirectory);
+            }
+            catch (Exception error) when (IsFileError(error) || error is InvalidOperationException)
+            {
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", "Could not validate the configured package cache location", manifestFile)]);
+            }
+
+            if (cacheRootError is not null)
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", cacheRootError, manifestFile)]);
+
+            var cacheEntry = sourceCache.ResolveGit(spec, mode);
+            if (!cacheEntry.Success)
+                return new PackageDependencyLoadResult(
+                    null,
+                    null,
+                    [AtStart("E_DEPENDENCY", cacheEntry.Error ?? "Could not resolve pinned Git dependency", manifestFile)]);
+
+            targetRoot = cacheEntry.PackageRoot!;
+            sourceIdentity = PackageSourceIdentity.ForGit(spec.Url!, spec.Commit!);
+        }
+        else
+        {
+            return new PackageDependencyLoadResult(
+                null,
+                null,
+                [AtStart("E_DEPENDENCY", "Dependency source kind is not supported", manifestFile)]);
+        }
+
+        PackageLoadResult childLoad;
+        try
+        {
+            childLoad = Load(targetRoot);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            return new PackageDependencyLoadResult(
+                null,
+                null,
+                [AtStart("E_DEPENDENCY", $"Could not load dependency package: {error.Message}", manifestFile)]);
+        }
+
+        return new PackageDependencyLoadResult(childLoad.Package, sourceIdentity, childLoad.Diagnostics);
     }
 
     public static Diagnostic ModulePathError(string message, string file) =>
@@ -682,7 +864,8 @@ internal static class PackageLoader
                     continue;
                 }
 
-                if (!IsDependencyRelativePath(dependencyPath))
+                if (!dependencyPath.StartsWith("git+", StringComparison.Ordinal) &&
+                    !IsDependencyRelativePath(dependencyPath))
                 {
                     diagnostics.Add(AtLine(
                         "E_MANIFEST",
@@ -692,7 +875,17 @@ internal static class PackageLoader
                     continue;
                 }
 
-                dependencies.Add(new PackageDependency(key, dependencyPath));
+                if (!PackageDependencySpec.TryParseManifest(dependencyPath, out var dependencySpec, out var dependencyError))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Dependency '{key}' is invalid: {dependencyError}",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                dependencies.Add(new PackageDependency(key, dependencySpec!));
                 continue;
             }
 

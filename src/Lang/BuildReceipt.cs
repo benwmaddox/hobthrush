@@ -5,7 +5,7 @@ using System.Text.Json;
 
 internal static class BuildReceipt
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -147,12 +147,8 @@ internal static class BuildReceipt
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    private static object IdentityJson(AuditPackageIdentity identity) => new
-    {
-        name = identity.Name,
-        version = identity.Version,
-        path = identity.Path
-    };
+    private static object IdentityJson(AuditPackageIdentity identity) =>
+        AuditReport.IdentityJson(identity);
 
     private static object ClaimJson(AuditTrustedClaim claim) => new
     {

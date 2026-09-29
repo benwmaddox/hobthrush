@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
@@ -122,6 +123,7 @@ internal static class IntegrationTests
             ("qualified union variants participate in exhaustive matching", TestPackageQualifiedUnionExhaustiveness),
             ("same-package declarations use qualified cross-module references", TestPackageQualifiedReferencesCrossModules),
             ("library packages build as managed libraries", TestPackageLibraryBuild),
+            ("new and add workflows create projects and resolve pinned Git dependencies offline", TestProjectWorkflow),
             ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
             ("dependency graphs reject cycles, missing manifests, non-libraries, and duplicate identities", TestDependencyGraphDiagnostics),
             ("dependency aliases enforce direct visibility and preserve module identity", TestDependencyAliasResolution),
@@ -2506,7 +2508,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(5, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5.");
+        AssertEqual(6, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2653,11 +2655,11 @@ internal static class IntegrationTests
         foreach (var package in root.GetProperty("packages").EnumerateArray())
         {
             Order(package, "identity,role,content_sha256,dependencies,inputs");
-            Order(package.GetProperty("identity"), "name,version,path");
+            AssertPackageIdentitySource(package.GetProperty("identity"));
             foreach (var dependency in package.GetProperty("dependencies").EnumerateArray())
             {
                 Order(dependency, "alias,package");
-                Order(dependency.GetProperty("package"), "name,version,path");
+                AssertPackageIdentitySource(dependency.GetProperty("package"));
             }
             foreach (var input in package.GetProperty("inputs").EnumerateArray())
                 Order(input, "kind,path,sha256");
@@ -2666,7 +2668,7 @@ internal static class IntegrationTests
         foreach (var function in root.GetProperty("compiler").GetProperty("functions").EnumerateArray())
         {
             Order(function, "package,module,name,visibility,is_async,declared_effects,inferred_effects,effect_paths,direct_calls,required_capabilities");
-            Order(function.GetProperty("package"), "name,version,path");
+            AssertPackageIdentitySource(function.GetProperty("package"));
             foreach (var path in function.GetProperty("effect_paths").EnumerateArray())
             {
                 Order(path, "effect,steps");
@@ -2682,11 +2684,60 @@ internal static class IntegrationTests
             foreach (var reachable in claim.GetProperty("reachable_from").EnumerateArray())
             {
                 Order(reachable, "package,module,name");
-                Order(reachable.GetProperty("package"), "name,version,path");
+                AssertPackageIdentitySource(reachable.GetProperty("package"));
             }
         }
         foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
             Order(dependency, "name,version,ecosystem,reason");
+    }
+
+    private static void AssertPackageIdentitySource(JsonElement identity)
+    {
+        AssertJsonPropertyOrder(identity, "name,version,path,source");
+        var stablePath = identity.GetProperty("path").GetString() ?? string.Empty;
+        var source = identity.GetProperty("source");
+        var kind = source.GetProperty("kind").GetString();
+        switch (kind)
+        {
+            case "root":
+                AssertJsonPropertyOrder(source, "kind");
+                AssertEqual(".", stablePath, "A root package identity must use the portable '.' path.");
+                break;
+            case "path":
+                AssertJsonPropertyOrder(source, "kind,path");
+                var sourcePath = source.GetProperty("path").GetString() ?? string.Empty;
+                AssertEqual(stablePath, sourcePath,
+                    "A path package identity must retain the same portable path in its source metadata.");
+                AssertTrue(!string.IsNullOrEmpty(sourcePath)
+                           && !Path.IsPathFullyQualified(sourcePath)
+                           && !sourcePath.Contains('\\'),
+                    $"A path package source must be relative and portable, got <{sourcePath}>.");
+                break;
+            case "git":
+                AssertJsonPropertyOrder(source, "kind,url,commit");
+                AssertTrue(Regex.IsMatch(stablePath, "^git:[0-9a-f]{64}$", RegexOptions.CultureInvariant),
+                    $"A Git package identity must use a stable digest path, got <{stablePath}>.");
+                var url = source.GetProperty("url").GetString() ?? string.Empty;
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri is null)
+                {
+                    AssertTrue(false, $"A Git package identity must contain an absolute URL, got <{url}>.");
+                    return;
+                }
+
+                AssertTrue((uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeFile)
+                           && uri.UserInfo.Length == 0
+                           && uri.Query.Length == 0
+                           && uri.Fragment.Length == 0
+                           && string.Equals(uri.AbsoluteUri, url, StringComparison.Ordinal),
+                    $"A Git package source URL must be canonical, credential-free, and portable, got <{url}>.");
+                var commit = source.GetProperty("commit").GetString() ?? string.Empty;
+                AssertTrue(Regex.IsMatch(commit, "^[0-9a-f]{40}$", RegexOptions.CultureInvariant),
+                    $"A Git package identity must retain a full lowercase commit, got <{commit}>.");
+                break;
+            default:
+                AssertTrue(false, $"Unknown package source identity kind <{kind}>.");
+                break;
+        }
     }
 
     private static void AssertAuditPortable(string json, string packageRoot, string temporaryRoot)
@@ -3448,8 +3499,8 @@ internal static class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(5, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 5.");
+            AssertEqual(6, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 6.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -4045,8 +4096,8 @@ internal static class IntegrationTests
             CurrentHostAotRid(),
             [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async FsWrite NativeAOT builds must preserve build receipt schema version 1.");
+        AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async FsWrite NativeAOT builds must use build receipt schema version 2.");
 
         var nativeDestination = Path.Combine(destinationDirectory, "native.txt");
         const string nativeValue = "native async FsWrite λ 😀";
@@ -4735,8 +4786,8 @@ internal static class IntegrationTests
             expectedRuntimeIdentifier: null,
             [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async managed CLI builds must preserve build receipt schema version 1.");
+        AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async managed CLI builds must use build receipt schema version 2.");
 
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
@@ -5246,7 +5297,7 @@ internal static class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5.");
+            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -5285,8 +5336,8 @@ internal static class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    firstRoot))
         {
-            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Config fields should preserve build receipt schema version 1.");
+            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Config fields should use build receipt schema version 2.");
             AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
         var commandSchema = await File.ReadAllTextAsync(schemaPath);
@@ -5391,8 +5442,8 @@ internal static class IntegrationTests
                    expectedRuntimeIdentifier: null,
                    [Path.GetRelativePath(managedOutputDirectory, managedExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed config CLI receipts should use schema version 1.");
+            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed config CLI receipts should use schema version 2.");
 
         const string secretCanary = "secret-canary-runtime-0a91e6";
         var defaultEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -5498,8 +5549,8 @@ internal static class IntegrationTests
                    CurrentHostAotRid(),
                    [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "NativeAOT config CLI receipts should use schema version 1.");
+            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT config CLI receipts should use schema version 2.");
 
         var nativeRun = await ExecuteNativeWithEnvironmentAsync(
             nativeExecutable,
@@ -6035,7 +6086,7 @@ internal static class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5 with pinned process metadata.");
+            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 6 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "Audit process pins must use deterministic OS ordering.");
@@ -6092,7 +6143,7 @@ internal static class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, managedArtifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json", processCopyName],
                    packageRoot))
         {
-            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts remain schema version 1.");
+            AssertEqual(2, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts use schema version 2.");
             AssertTrue(receipt.RootElement.GetProperty("inputs").EnumerateArray().Any(input =>
                     input.GetProperty("kind").GetString() == "process_executable"
                     && input.GetProperty("sha256").GetString() == helperHash),
@@ -7198,6 +7249,645 @@ internal static class IntegrationTests
         AssertTrue(File.Exists(artifact), $"Expected package library artifact at {artifact}. {Describe(build)}");
     }
 
+    private static async Task TestProjectWorkflow(Harness harness)
+    {
+        var templateWorkspace = Path.Combine(harness.TemporaryRoot, "project-workflow-templates");
+        Directory.CreateDirectory(templateWorkspace);
+        foreach (var (kind, name) in new[]
+                 {
+                     ("lib", "created-library"),
+                     ("cli", "created-cli"),
+                     ("web", "created-web")
+                 })
+        {
+            var create = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+                templateWorkspace, null, "new", kind, name);
+            AssertEqual(0, create.ExitCode, Describe(create));
+            var packageRoot = Path.Combine(templateWorkspace, name);
+            AssertTrue(Directory.Exists(packageRoot), $"lang new {kind} should create {packageRoot}.");
+
+            var manifestPath = Path.Combine(packageRoot, "lang.toml");
+            var manifestBytes = await File.ReadAllBytesAsync(manifestPath);
+            AssertTrue(manifestBytes.Length < 3 ||
+                       !(manifestBytes[0] == 0xEF && manifestBytes[1] == 0xBB && manifestBytes[2] == 0xBF),
+                "Generated manifests must be UTF-8 without a byte-order mark.");
+            var manifestText = Encoding.UTF8.GetString(manifestBytes);
+            AssertTrue(manifestText.Contains($"kind = \"{kind}\"", StringComparison.Ordinal),
+                $"Generated {kind} manifest must retain its package kind.");
+
+            var sources = Directory.EnumerateFiles(Path.Combine(packageRoot, "src"), "*.lang", SearchOption.AllDirectories)
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToArray();
+            AssertTrue(sources.Length > 0, $"Generated {kind} package must include source.");
+            foreach (var sourcePath in sources)
+            {
+                var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
+                AssertTrue(sourceBytes.Length < 3 ||
+                           !(sourceBytes[0] == 0xEF && sourceBytes[1] == 0xBB && sourceBytes[2] == 0xBF),
+                    "Generated sources must be UTF-8 without a byte-order mark.");
+                var source = Encoding.UTF8.GetString(sourceBytes);
+                AssertTrue(source.Contains("test \"", StringComparison.Ordinal),
+                    $"Generated {kind} source must include at least one language test.");
+                if (kind == "web")
+                    AssertTrue(source.Contains("route GET \"/health\"", StringComparison.Ordinal),
+                        "The generated web source must declare its health route.");
+            }
+            if (kind == "web")
+                AssertTrue(manifestText.Contains("net.listen = \"allow\"", StringComparison.Ordinal),
+                    "The generated web manifest must grant net.listen.");
+
+            var check = await harness.InvokePackageDirectoryAsync($"new-{kind}-check", packageRoot, "check");
+            AssertEqual(0, check.ExitCode, Describe(check));
+            var tests = await harness.InvokePackageDirectoryAsync($"new-{kind}-test", packageRoot, "test");
+            AssertEqual(0, tests.ExitCode, Describe(tests));
+            AssertTrue(tests.StandardOutput.Contains("1 passed, 0 failed", StringComparison.Ordinal),
+                $"Generated {kind} package must run its language test. {Describe(tests)}");
+        }
+
+        var overwriteParent = Path.Combine(harness.TemporaryRoot, "project-workflow-overwrite");
+        var existingTarget = Path.Combine(overwriteParent, "kept");
+        Directory.CreateDirectory(existingTarget);
+        var sentinelPath = Path.Combine(existingTarget, "sentinel.txt");
+        await File.WriteAllTextAsync(sentinelPath, "keep this file");
+        var refusedOverwrite = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            overwriteParent, null, "new", "cli", "kept");
+        AssertEqual(1, refusedOverwrite.ExitCode, Describe(refusedOverwrite));
+        AssertEqual("keep this file", await File.ReadAllTextAsync(sentinelPath),
+            "lang new must preserve an existing target directory exactly.");
+        AssertTrue(!File.Exists(Path.Combine(existingTarget, "lang.toml")),
+            "A refused project creation must not partially populate the existing target.");
+        AssertEqual(0, Directory.EnumerateDirectories(overwriteParent, ".kept.lang-new-*").Count(),
+            "A refused project creation must not leave staging directories.");
+
+        var invalidName = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            overwriteParent, null, "new", "lib", "CON");
+        AssertEqual(1, invalidName.ExitCode, Describe(invalidName));
+        AssertTrue(!Directory.Exists(Path.Combine(overwriteParent, "CON")),
+            "A reserved filesystem name must not be created.");
+
+        var packageGraph = await harness.WritePackageGraphAsync(
+            "project-workflow-path-add",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    "name = \"path-add-root\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                    + "\n[capabilities]\nfs.read = \"allow\"\n"
+                    + "\n[dependencies]\nbase = \"../base\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = "module app::main;\n"
+                            + "pub fn main() -> Text effects {} { return new_helper::starter::lib::identity(\"added\"); }\n"
+                            + "test \"added path package is visible\" { assert self::app::main::main() == \"added\"; }\n"
+                    }),
+                ["base"] = new PackageFixture(LibraryPackageManifest("base-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/base.lang"] = "module base; pub fn marker() -> i32 effects {} { return 1; }"
+                    }),
+                ["incoming"] = new PackageFixture(LibraryPackageManifest("New-Helper"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/starter/lib.lang"] = "module starter::lib;\n"
+                            + "pub fn identity(value: Text) -> Text effects {} { return value; }\n"
+                    })
+            });
+        var packageManifestPath = Path.Combine(packageGraph, "lang.toml");
+        var originalPackageManifest = await File.ReadAllTextAsync(packageManifestPath);
+        var dependencyHeader = originalPackageManifest.IndexOf("[dependencies]", StringComparison.Ordinal);
+        AssertTrue(dependencyHeader >= 0, "The path-add fixture must include a dependency section after capabilities.");
+        var pathAdd = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            packageGraph, null, "add", "../incoming");
+        AssertEqual(0, pathAdd.ExitCode, Describe(pathAdd));
+        var pathManifest = await File.ReadAllTextAsync(packageManifestPath);
+        var expectedPathManifest = originalPackageManifest + "new_helper = \"../incoming\"\n";
+        AssertEqual(expectedPathManifest, pathManifest,
+            "Current-directory lang add must insert the dependency inside [dependencies] and preserve unrelated text.");
+
+        var pathLockPath = Path.Combine(packageGraph, "lang.lock");
+        var pathLockBytes = await File.ReadAllBytesAsync(pathLockPath);
+        using (var pathLock = JsonDocument.Parse(pathLockBytes))
+        {
+            AssertEqual(2, pathLock.RootElement.GetProperty("schema_version").GetInt32(),
+                "lang add must write the current package-lock schema.");
+            var lockedNames = pathLock.RootElement.GetProperty("packages").EnumerateArray()
+                .Select(item => item.GetProperty("name").GetString())
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            AssertTrue(lockedNames.SequenceEqual(["New-Helper", "base-library"]),
+                "lang add must lock the incoming dependency and the existing dependency.");
+        }
+        var pathCheck = await harness.InvokePackageDirectoryAsync("project-workflow-path-add-check", packageGraph, "check");
+        AssertEqual(0, pathCheck.ExitCode, Describe(pathCheck));
+        var pathBuild = await harness.InvokePackageDirectoryAsync("project-workflow-path-add-build", packageGraph, "build");
+        AssertEqual(0, pathBuild.ExitCode, Describe(pathBuild));
+        var pathTests = await harness.InvokePackageDirectoryAsync("project-workflow-path-add-test", packageGraph, "test");
+        AssertEqual(0, pathTests.ExitCode, Describe(pathTests));
+        AssertTrue(pathTests.StandardOutput.Contains("1 passed, 0 failed", StringComparison.Ordinal), Describe(pathTests));
+
+        var beforeDuplicateManifest = await File.ReadAllBytesAsync(packageManifestPath);
+        var beforeDuplicateLock = await File.ReadAllBytesAsync(pathLockPath);
+        var duplicateAdd = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            packageGraph, null, "add", "../incoming");
+        AssertEqual(1, duplicateAdd.ExitCode, Describe(duplicateAdd));
+        var duplicateManifestAfter = await File.ReadAllBytesAsync(packageManifestPath);
+        var duplicateLockAfter = await File.ReadAllBytesAsync(pathLockPath);
+        AssertTrue(beforeDuplicateManifest.SequenceEqual(duplicateManifestAfter),
+            "Rejecting a duplicate source must leave the manifest byte-for-byte unchanged.");
+        AssertTrue(beforeDuplicateLock.SequenceEqual(duplicateLockAfter),
+            "Rejecting a duplicate source must leave the lock byte-for-byte unchanged.");
+
+        var explicitRoot = await harness.WritePackageAsync(
+            "project-workflow-explicit-add",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 42; }"
+            });
+        var explicitDependency = Path.Combine(Path.GetDirectoryName(explicitRoot)!, "explicit-dependency");
+        Directory.CreateDirectory(Path.Combine(explicitDependency, "src"));
+        await File.WriteAllTextAsync(Path.Combine(explicitDependency, "lang.toml"), LibraryPackageManifest("explicit-helper"));
+        await File.WriteAllTextAsync(
+            Path.Combine(explicitDependency, "src", "helper.lang"),
+            "module helper; pub fn value() -> i32 effects {} { return 7; }");
+        var explicitAdd = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            null, "add", explicitRoot, "../explicit-dependency");
+        AssertEqual(0, explicitAdd.ExitCode, Describe(explicitAdd));
+        var explicitManifest = await File.ReadAllTextAsync(Path.Combine(explicitRoot, "lang.toml"));
+        AssertTrue(explicitManifest.Contains("explicit_helper = \"../explicit-dependency\"", StringComparison.Ordinal),
+            "The explicit PACKAGE_DIRECTORY SOURCE form must persist a relative path dependency.");
+        var explicitCheck = await harness.InvokePackageDirectoryAsync(
+            "project-workflow-explicit-add-check", explicitRoot, "check");
+        AssertEqual(0, explicitCheck.ExitCode, Describe(explicitCheck));
+
+        var rollbackRoot = await harness.WritePackageAsync(
+            "project-workflow-add-rollback",
+            CliPackageManifest() + "\n[dependencies]\nmissing = \"../missing\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
+            });
+        var rollbackDependency = Path.Combine(Path.GetDirectoryName(rollbackRoot)!, "rollback-dependency");
+        Directory.CreateDirectory(Path.Combine(rollbackDependency, "src"));
+        await File.WriteAllTextAsync(Path.Combine(rollbackDependency, "lang.toml"), LibraryPackageManifest("rollback-helper"));
+        await File.WriteAllTextAsync(
+            Path.Combine(rollbackDependency, "src", "helper.lang"),
+            "module helper; pub fn value() -> i32 effects {} { return 7; }");
+        var rollbackManifestPath = Path.Combine(rollbackRoot, "lang.toml");
+        var rollbackManifestBytes = await File.ReadAllBytesAsync(rollbackManifestPath);
+        var rollbackLockPath = Path.Combine(rollbackRoot, "lang.lock");
+        var rollbackLockBytes = Encoding.UTF8.GetBytes("preserve previous lock bytes\n");
+        await File.WriteAllBytesAsync(rollbackLockPath, rollbackLockBytes);
+        var failedAdd = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            null, "add", rollbackRoot, "../rollback-dependency");
+        AssertEqual(1, failedAdd.ExitCode, Describe(failedAdd));
+        var rollbackManifestAfter = await File.ReadAllBytesAsync(rollbackManifestPath);
+        var rollbackLockAfter = await File.ReadAllBytesAsync(rollbackLockPath);
+        AssertTrue(rollbackManifestBytes.SequenceEqual(rollbackManifestAfter),
+            "A failed dependency graph update must restore the manifest byte-for-byte.");
+        AssertTrue(rollbackLockBytes.SequenceEqual(rollbackLockAfter),
+            "A failed dependency graph update must restore the prior lock byte-for-byte.");
+
+        var invalidGitRoot = await harness.WritePackageAsync(
+            "project-workflow-invalid-git",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 1; }"
+            });
+        var invalidGitManifestPath = Path.Combine(invalidGitRoot, "lang.toml");
+        var invalidGitManifest = await File.ReadAllBytesAsync(invalidGitManifestPath);
+        foreach (var invalidSource in new[]
+                 {
+                     "https://example.invalid/library#deadbeef",
+                     "git+https://example.invalid/library#main"
+                 })
+        {
+            var invalidAdd = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+                invalidGitRoot, null, "add", invalidSource);
+            AssertEqual(1, invalidAdd.ExitCode, Describe(invalidAdd));
+            var invalidGitManifestAfter = await File.ReadAllBytesAsync(invalidGitManifestPath);
+            AssertTrue(invalidGitManifest.SequenceEqual(invalidGitManifestAfter),
+                "A short commit or branch name must be rejected without modifying the manifest.");
+            AssertTrue(!File.Exists(Path.Combine(invalidGitRoot, "lang.lock")),
+                "An invalid Git pin must not create a lockfile.");
+        }
+
+        var gitRepository = Path.Combine(harness.TemporaryRoot, "project-workflow-local-git");
+        Directory.CreateDirectory(Path.Combine(gitRepository, "src", "greeting"));
+        await File.WriteAllTextAsync(
+            Path.Combine(gitRepository, "lang.toml"),
+            "name = \"Git-Library\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(gitRepository, "src", "greeting", "lib.lang"),
+            "module greeting::lib;\npub fn identity(value: Text) -> Text effects {} { return value; }\n");
+
+        var gitHome = Path.Combine(harness.TemporaryRoot, "project-workflow-git-home");
+        var gitConfig = Path.Combine(harness.TemporaryRoot, "project-workflow-gitconfig");
+        var gitHooks = Path.Combine(harness.TemporaryRoot, "project-workflow-git-hooks");
+        Directory.CreateDirectory(gitHome);
+        Directory.CreateDirectory(gitHooks);
+        await File.WriteAllTextAsync(gitConfig, string.Empty);
+        var gitEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_GLOBAL"] = gitConfig,
+            ["GIT_TERMINAL_PROMPT"] = "0",
+            ["HOME"] = gitHome,
+            ["XDG_CONFIG_HOME"] = Path.Combine(gitHome, ".config")
+        };
+        async Task<string> Git(params string[] arguments)
+        {
+            var result = await InvokeExternalProcessAsync("git", gitRepository, gitEnvironment, arguments);
+            AssertEqual(0, result.ExitCode, Describe(result));
+            return result.StandardOutput.Trim();
+        }
+
+        await Git("init", "--quiet");
+        await Git("config", "user.name", "Lang Integration Tests");
+        await Git("config", "user.email", "lang-integration@example.invalid");
+        await Git("config", "core.hooksPath", gitHooks);
+        await Git("config", "commit.gpgsign", "false");
+        await Git("add", "--all");
+        await Git("commit", "--quiet", "-m", "pinned package fixture");
+        var commit = await Git("rev-parse", "--verify", "HEAD");
+        AssertTrue(Regex.IsMatch(commit, "^[0-9a-f]{40}$", RegexOptions.CultureInvariant),
+            $"The local Git fixture must produce a full lowercase commit ID, got '{commit}'.");
+        var gitUrl = new Uri(Path.GetFullPath(gitRepository) + Path.DirectorySeparatorChar).AbsoluteUri;
+        var gitSource = $"git+{gitUrl}#{commit}";
+
+        var gitCache = Path.Combine(harness.TemporaryRoot, "package-cache-original");
+        var hostileGitExecPath = Path.Combine(harness.TemporaryRoot, "hostile-git-exec-path");
+        var packageCacheEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = gitCache,
+            ["GIT_EXEC_PATH"] = hostileGitExecPath
+        };
+        var gitConsumerRoot = await harness.WritePackageAsync(
+            "project-workflow-git-lock",
+            CliPackageManifest() + $"\n[dependencies]\ngit_library = \"{gitSource}\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main;\n"
+                    + "pub fn main() -> Text effects {} { return git_library::greeting::lib::identity(\"cached\"); }\n"
+                    + "test \"pinned package call\" { assert self::app::main::main() == \"cached\"; }\n"
+            });
+        var createGitLock = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-lock-fetch", gitConsumerRoot, "lock", packageCacheEnvironment);
+        AssertEqual(0, createGitLock.ExitCode, Describe(createGitLock));
+
+        var gitLockPath = Path.Combine(gitConsumerRoot, "lang.lock");
+        var gitLockBytes = await File.ReadAllBytesAsync(gitLockPath);
+        var gitLockText = Encoding.UTF8.GetString(gitLockBytes);
+        using (var gitLock = JsonDocument.Parse(gitLockBytes))
+        {
+            var root = gitLock.RootElement.GetProperty("root");
+            AssertEqual(2, gitLock.RootElement.GetProperty("schema_version").GetInt32(),
+                "A fetched Git package must be written in lock schema version 2.");
+            AssertEqual("root", root.GetProperty("source").GetProperty("kind").GetString(),
+                "The Git lock root must carry a root source identity.");
+            var lockedRelative = root.GetProperty("dependencies").GetProperty("git_library").GetString() ?? string.Empty;
+            AssertTrue(Regex.IsMatch(lockedRelative, "^git:[0-9a-f]{64}$", RegexOptions.CultureInvariant)
+                       && !Path.IsPathRooted(lockedRelative),
+                "Git dependency lock paths must use their portable cache identity.");
+            var dependency = gitLock.RootElement.GetProperty("packages").EnumerateArray().Single();
+            var source = dependency.GetProperty("source");
+            AssertEqual("git", source.GetProperty("kind").GetString(),
+                "A pinned dependency lock entry must identify a Git source.");
+            AssertEqual(gitUrl, source.GetProperty("url").GetString(),
+                "The lock must retain the canonical pinned Git URL.");
+            AssertEqual(commit, source.GetProperty("commit").GetString(),
+                "The lock must retain the exact full commit.");
+            AssertEqual(lockedRelative, dependency.GetProperty("path").GetString(),
+                "The locked Git package path must be the source's stable cache identity.");
+        }
+        AssertTrue(!gitLockText.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
+            "The package lock must not serialize an absolute package-cache path.");
+        var lockBeforeNestedCache = await File.ReadAllBytesAsync(gitLockPath);
+        var nestedCacheRoot = Path.Combine(gitConsumerRoot, "src", "nested-package-cache");
+        var nestedCacheEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = nestedCacheRoot
+        };
+        var nestedCacheLock = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-nested-cache-lock", gitConsumerRoot, "lock", nestedCacheEnvironment);
+        AssertEqual(1, nestedCacheLock.ExitCode, Describe(nestedCacheLock));
+        AssertTrue(nestedCacheLock.StandardError.Contains("E_DEPENDENCY", StringComparison.Ordinal),
+            "lang lock must reject a package cache under the package source root.");
+        AssertTrue(!Directory.Exists(nestedCacheRoot),
+            "A rejected cache root under the package source must not be created.");
+        var lockAfterNestedCache = await File.ReadAllBytesAsync(gitLockPath);
+        AssertTrue(lockBeforeNestedCache.SequenceEqual(lockAfterNestedCache),
+            "Rejecting a cache root under the package source must preserve the existing lock.");
+
+        var gitAddRoot = await harness.WritePackageAsync(
+            "project-workflow-git-add",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main;\n"
+                    + "pub fn main() -> Text effects {} { return git_library::greeting::lib::identity(\"cached\"); }\n"
+                    + "test \"pinned package call\" { assert self::app::main::main() == \"cached\"; }\n"
+            });
+        var gitAdd = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            gitAddRoot, packageCacheEnvironment, "add", $"{gitUrl}#{commit}");
+        AssertEqual(0, gitAdd.ExitCode, Describe(gitAdd));
+        var gitAddManifest = await File.ReadAllTextAsync(Path.Combine(gitAddRoot, "lang.toml"));
+        AssertTrue(gitAddManifest.Contains($"git_library = \"{gitSource}\"", StringComparison.Ordinal),
+            "lang add must persist a canonical Git URL and the full exact commit.");
+
+        var cacheEntries = Directory.EnumerateDirectories(Path.Combine(gitCache, "git")).ToArray();
+        AssertEqual(1, cacheEntries.Length, "The cache must contain one stable entry for the pinned URL and commit.");
+        var cacheEntryName = Path.GetFileName(cacheEntries[0]);
+        var relocatedCache = Path.Combine(harness.TemporaryRoot, "package-cache-relocated");
+        var relocatedEntry = Path.Combine(relocatedCache, "git", cacheEntryName);
+        CopyDirectory(cacheEntries[0], relocatedEntry);
+
+        var rehashedTamperedCache = Path.Combine(harness.TemporaryRoot, "package-cache-rehashed-tampered");
+        var rehashedTamperedEntry = Path.Combine(rehashedTamperedCache, "git", cacheEntryName);
+        CopyDirectory(cacheEntries[0], rehashedTamperedEntry);
+        var rehashedTamperedSourceRoot = Path.Combine(rehashedTamperedEntry, "source");
+        var rehashedTamperedSource = Path.Combine(rehashedTamperedSourceRoot, "src", "greeting", "lib.lang");
+        await File.AppendAllTextAsync(rehashedTamperedSource, "\n");
+        var rehashedAttestationPath = Path.Combine(rehashedTamperedEntry, "attestation.json");
+        var canonicalAttestationBytes = await File.ReadAllBytesAsync(Path.Combine(cacheEntries[0], "attestation.json"));
+        string rehashedAttestationText;
+        using (var canonicalAttestation = JsonDocument.Parse(canonicalAttestationBytes))
+        {
+            var root = canonicalAttestation.RootElement;
+            rehashedAttestationText = JsonSerializer.Serialize(new
+            {
+                schema_version = root.GetProperty("schema_version").GetInt32(),
+                url = root.GetProperty("url").GetString(),
+                commit = root.GetProperty("commit").GetString(),
+                content_sha256 = HashPackageCacheSource(rehashedTamperedSourceRoot)
+            }, new JsonSerializerOptions { WriteIndented = true }) + "\n";
+        }
+        await File.WriteAllTextAsync(rehashedAttestationPath, rehashedAttestationText, new UTF8Encoding(false));
+        var rehashedSourceBeforeLock = await File.ReadAllBytesAsync(rehashedTamperedSource);
+        var rehashedAttestationBeforeLock = await File.ReadAllBytesAsync(rehashedAttestationPath);
+        var rehashedCacheEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = rehashedTamperedCache
+        };
+        var rehashedLockBefore = await File.ReadAllBytesAsync(gitLockPath);
+        var rehashedTamperedLock = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-rehashed-tampered-lock", gitConsumerRoot, "lock", rehashedCacheEnvironment);
+        AssertEqual(1, rehashedTamperedLock.ExitCode, Describe(rehashedTamperedLock));
+        AssertTrue(rehashedTamperedLock.StandardError.Contains("E_DEPENDENCY", StringComparison.Ordinal),
+            "lang lock must reject altered cache bytes even when their unkeyed content hash is recomputed.");
+        var rehashedSourceAfterLock = await File.ReadAllBytesAsync(rehashedTamperedSource);
+        var rehashedAttestationAfterLock = await File.ReadAllBytesAsync(rehashedAttestationPath);
+        AssertTrue(rehashedSourceBeforeLock.SequenceEqual(rehashedSourceAfterLock)
+                   && rehashedAttestationBeforeLock.SequenceEqual(rehashedAttestationAfterLock),
+            "Rejecting rehashed altered cache contents must preserve the cache source and attestation byte-for-byte.");
+        var rehashedLockAfter = await File.ReadAllBytesAsync(gitLockPath);
+        AssertTrue(rehashedLockBefore.SequenceEqual(rehashedLockAfter),
+            "Rejecting rehashed altered cache contents must preserve the previous package lock byte-for-byte.");
+
+        var rehashedTamperedCheck = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-rehashed-tampered-check", gitConsumerRoot, "check",
+            rehashedCacheEnvironment, "--json");
+        AssertEqual(1, rehashedTamperedCheck.ExitCode, Describe(rehashedTamperedCheck));
+        var rehashedTamperedDiagnostics = ParseDiagnosticSnapshots(rehashedTamperedCheck.StandardOutput);
+        AssertTrue(rehashedTamperedDiagnostics.Any(diagnostic => diagnostic.Code == "E_LOCK"),
+            "Offline check must reject rehashed altered cache bytes against the unchanged lock.");
+
+        File.Copy(
+            Path.Combine(cacheEntries[0], "source", "src", "greeting", "lib.lang"),
+            rehashedTamperedSource,
+            overwrite: true);
+        File.Copy(
+            Path.Combine(cacheEntries[0], "attestation.json"),
+            rehashedAttestationPath,
+            overwrite: true);
+        var restoredCanonicalCheck = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-restored-canonical-check", gitConsumerRoot, "check",
+            rehashedCacheEnvironment, "--json");
+        AssertEqual(0, restoredCanonicalCheck.ExitCode, Describe(restoredCanonicalCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(restoredCanonicalCheck.StandardOutput).Length,
+            Describe(restoredCanonicalCheck));
+        DeleteReadOnlyDirectoryTree(Path.Combine(gitRepository, ".git"));
+        var oldRepository = gitRepository + "-offline";
+        Directory.Move(gitRepository, oldRepository);
+        var consumers = new[] { gitConsumerRoot, gitAddRoot };
+        foreach (var consumer in consumers)
+        {
+            var check = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+                "project-workflow-git-offline-check", consumer, "check", packageCacheEnvironment, "--json");
+            AssertEqual(0, check.ExitCode, Describe(check));
+            AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+            var build = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+                "project-workflow-git-offline-build", consumer, "build", packageCacheEnvironment);
+            AssertEqual(0, build.ExitCode, Describe(build));
+            AssertTrue(!build.StandardOutput.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
+                "A package build must not expose the absolute cache path.");
+
+            var tests = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+                "project-workflow-git-offline-test", consumer, "test", packageCacheEnvironment);
+            AssertEqual(0, tests.ExitCode, Describe(tests));
+            AssertTrue(tests.StandardOutput.Contains("1 passed, 0 failed", StringComparison.Ordinal), Describe(tests));
+
+            var audit = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+                "project-workflow-git-offline-audit", consumer, "audit", packageCacheEnvironment, "--json");
+            AssertEqual(0, audit.ExitCode, Describe(audit));
+            using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
+            {
+                AssertEqual(6, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                    "Audit reports with source identities must use schema version 6.");
+                var identity = auditDocument.RootElement.GetProperty("packages").EnumerateArray()
+                    .Single(package => package.GetProperty("role").GetString() == "direct")
+                    .GetProperty("identity");
+                AssertPackageIdentitySource(identity);
+                AssertEqual("git", identity.GetProperty("source").GetProperty("kind").GetString(),
+                    "Audit package identities must preserve Git provenance.");
+                AssertEqual(commit, identity.GetProperty("source").GetProperty("commit").GetString(),
+                    "Audit package identities must preserve the exact Git commit.");
+            }
+            AssertTrue(!audit.StandardOutput.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
+                "Audit output must not expose the absolute package-cache path.");
+
+            var api = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+                packageCacheEnvironment, "inspect", "api", consumer, "--json");
+            AssertEqual(0, api.ExitCode, Describe(api));
+            AssertTrue(!api.StandardOutput.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
+                "Inspect output must not expose the absolute package-cache path.");
+
+            var effects = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+                packageCacheEnvironment, "inspect", "effects", consumer,
+                "self::app::main::main", "--json");
+            AssertEqual(0, effects.ExitCode, Describe(effects));
+            AssertTrue(!effects.StandardOutput.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
+                "Inspect-effects output must not expose the absolute package-cache path.");
+        }
+
+        var relocatedEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = relocatedCache
+        };
+        var relocatedCheck = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-relocated-check", gitConsumerRoot, "check", relocatedEnvironment, "--json");
+        AssertEqual(0, relocatedCheck.ExitCode, Describe(relocatedCheck));
+        var relocatedAudit = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-relocated-audit", gitConsumerRoot, "audit", relocatedEnvironment, "--json");
+        AssertEqual(0, relocatedAudit.ExitCode, Describe(relocatedAudit));
+        var originalAudit = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-original-audit", gitConsumerRoot, "audit", packageCacheEnvironment, "--json");
+        AssertEqual(originalAudit.StandardOutput, relocatedAudit.StandardOutput,
+            "Equivalent cache contents at different cache roots must produce identical audit JSON.");
+        AssertTrue(!gitLockText.Contains(Path.GetFullPath(relocatedCache), StringComparison.OrdinalIgnoreCase)
+                   && !relocatedAudit.StandardOutput.Contains(Path.GetFullPath(relocatedCache), StringComparison.OrdinalIgnoreCase),
+            "Lock and audit outputs must not depend on the configured cache root.");
+
+        var missingCache = Path.Combine(harness.TemporaryRoot, "package-cache-missing");
+        var missingEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = missingCache
+        };
+        var missingCacheCheck = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-missing-cache", gitConsumerRoot, "check", missingEnvironment, "--json");
+        AssertEqual(1, missingCacheCheck.ExitCode, Describe(missingCacheCheck));
+        var missingCacheDiagnostics = ParseDiagnosticSnapshots(missingCacheCheck.StandardOutput);
+        AssertTrue(missingCacheDiagnostics.Length > 0
+                   && missingCacheDiagnostics.All(diagnostic => diagnostic.Code == "E_DEPENDENCY"),
+            "A missing offline cache must fail dependency resolution before source compilation.");
+
+        var tamperedCache = Path.Combine(harness.TemporaryRoot, "package-cache-tampered");
+        var tamperedEntry = Path.Combine(tamperedCache, "git", cacheEntryName);
+        CopyDirectory(cacheEntries[0], tamperedEntry);
+        var tamperedSource = Path.Combine(tamperedEntry, "source", "src", "greeting", "lib.lang");
+        await File.AppendAllTextAsync(tamperedSource, "\n");
+        var tamperedEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["LANG_PACKAGE_CACHE"] = tamperedCache
+        };
+        var tamperedCheck = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-tampered-cache", gitConsumerRoot, "check", tamperedEnvironment, "--json");
+        AssertEqual(1, tamperedCheck.ExitCode, Describe(tamperedCheck));
+        var tamperedDiagnostics = ParseDiagnosticSnapshots(tamperedCheck.StandardOutput);
+        AssertTrue(tamperedDiagnostics.Length > 0
+                   && tamperedDiagnostics.All(diagnostic => diagnostic.Code == "E_DEPENDENCY"),
+            "A tampered cache must fail attestation before source compilation.");
+        var priorLock = await File.ReadAllBytesAsync(gitLockPath);
+        var tamperedLock = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "project-workflow-git-tampered-lock", gitConsumerRoot, "lock", tamperedEnvironment);
+        AssertEqual(1, tamperedLock.ExitCode, Describe(tamperedLock));
+        var tamperedLockAfter = await File.ReadAllBytesAsync(gitLockPath);
+        AssertTrue(priorLock.SequenceEqual(tamperedLockAfter),
+            "lang lock must not legitimize tampered cached source or rewrite the existing lock.");
+    }
+
+    private static string HashPackageCacheSource(string sourceRoot)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Encoding.UTF8.GetBytes("LANG-GIT-CACHE-TREE\0v1"));
+        Span<byte> lengthBytes = stackalloc byte[sizeof(ulong)];
+        foreach (var file in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories)
+                     .Select(fullPath => (
+                         RelativePath: Path.GetRelativePath(sourceRoot, fullPath)
+                             .Replace(Path.DirectorySeparatorChar, '/')
+                             .Replace(Path.AltDirectorySeparatorChar, '/'),
+                         FullPath: fullPath))
+                     .OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        {
+            var pathBytes = Encoding.UTF8.GetBytes(file.RelativePath);
+            BinaryPrimitives.WriteUInt64BigEndian(lengthBytes, (ulong)pathBytes.LongLength);
+            hash.AppendData(lengthBytes);
+            hash.AppendData(pathBytes);
+            var content = File.ReadAllBytes(file.FullPath);
+            BinaryPrimitives.WriteUInt64BigEndian(lengthBytes, (ulong)content.LongLength);
+            hash.AppendData(lengthBytes);
+            hash.AppendData(content);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories)
+                     .OrderBy(path => path.Length))
+        {
+            var relative = Path.GetRelativePath(source, directory);
+            Directory.CreateDirectory(Path.Combine(destination, relative));
+        }
+
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            var target = Path.Combine(destination, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+    }
+
+    private static void DeleteReadOnlyDirectoryTree(string directory)
+    {
+        var fullDirectory = Path.GetFullPath(directory);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(fullDirectory, "*", SearchOption.AllDirectories)
+                     .OrderByDescending(path => path.Length))
+        {
+            var attributes = File.GetAttributes(entry);
+            if ((attributes & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(entry, attributes & ~FileAttributes.ReadOnly);
+        }
+        var rootAttributes = File.GetAttributes(fullDirectory);
+        if ((rootAttributes & FileAttributes.ReadOnly) != 0)
+            File.SetAttributes(fullDirectory, rootAttributes & ~FileAttributes.ReadOnly);
+        Directory.Delete(fullDirectory, recursive: true);
+    }
+
+    private static async Task<ProcessResult> InvokeExternalProcessAsync(
+        string executable,
+        string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment,
+        params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            CreateNoWindow = true
+        };
+        foreach (var argument in arguments)
+            startInfo.ArgumentList.Add(argument);
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+                startInfo.Environment[name] = value;
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Could not start external process '{executable}'.");
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        using var cancellation = new CancellationTokenSource(ProcessTimeout);
+        try
+        {
+            await process.WaitForExitAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            await process.WaitForExitAsync();
+            throw new TimeoutException($"External process '{executable}' exceeded {ProcessTimeout}.");
+        }
+
+        return new ProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
+    }
+
     private static async Task TestPathDependencyLockLifecycle(Harness harness)
     {
         const string consumerManifest = "name = \"lock-consumer\"\n"
@@ -7255,7 +7945,11 @@ internal static class IntegrationTests
         var firstLock = Encoding.UTF8.GetString(firstLockBytes);
         using (var document = JsonDocument.Parse(firstLock))
         {
+            AssertEqual(2, document.RootElement.GetProperty("schema_version").GetInt32(),
+                "Package locks with source identities must use schema version 2.");
             var root = document.RootElement.GetProperty("root");
+            AssertEqual("root", root.GetProperty("source").GetProperty("kind").GetString(),
+                "The root package lock entry must identify the root source.");
             AssertEqual("../validation", root.GetProperty("dependencies").GetProperty("validation").GetString(),
                 "The root dependency path must be portable and relative to the package root.");
             var packages = document.RootElement.GetProperty("packages");
@@ -7263,6 +7957,11 @@ internal static class IntegrationTests
             var dependencyPath = packages[0].GetProperty("path").GetString() ?? string.Empty;
             AssertEqual("../validation", dependencyPath, "Package paths in lang.lock should remain relative.");
             AssertTrue(!Path.IsPathRooted(dependencyPath), "A lock package path must not be absolute.");
+            var source = packages[0].GetProperty("source");
+            AssertEqual("path", source.GetProperty("kind").GetString(),
+                "A local dependency lock entry must identify a path source.");
+            AssertEqual("../validation", source.GetProperty("path").GetString(),
+                "A path source identity must be portable and relative to the package root.");
         }
         AssertTrue(!firstLock.Contains(packageRoot, StringComparison.OrdinalIgnoreCase)
             && !firstLock.Contains(harness.TemporaryRoot, StringComparison.OrdinalIgnoreCase),
@@ -9745,6 +10444,9 @@ internal static class IntegrationTests
             && !usageLine.Contains('\n') && !usageLine.Contains('\r'), Describe(usage));
         var currentForms = new HashSet<string>(StringComparer.Ordinal)
         {
+            "new lib|cli|web NAME",
+            "add SOURCE",
+            "add PACKAGE_DIRECTORY SOURCE",
             "check FILE_OR_PACKAGE [--json]",
             "build FILE_OR_PACKAGE [--aot --rid RID]",
             "run FILE_OR_PACKAGE [-- APP_ARGS]",
@@ -9785,9 +10487,10 @@ internal static class IntegrationTests
             .Where(line => line.StartsWith("lang ", StringComparison.Ordinal))
             .Select(line => CommandName(line["lang ".Length..]))
             .ToHashSet(StringComparer.Ordinal);
-        AssertTrue(currentCommandNames.SetEquals(packageCommands),
+        var packageCommandNames = currentCommandNames.Except(["new", "add"], StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+        AssertTrue(packageCommandNames.SetEquals(packageCommands),
             "docs/grammar.md package command list must cover exactly the compiler's current commands. "
-            + $"Expected [{string.Join(", ", currentCommandNames.Order(StringComparer.Ordinal))}], "
+            + $"Expected [{string.Join(", ", packageCommandNames.Order(StringComparer.Ordinal))}], "
             + $"received [{string.Join(", ", packageCommands.Order(StringComparer.Ordinal))}].");
         AssertTrue(packageCommandBlock.Contains("lang inspect effects PACKAGE_DIRECTORY SYMBOL --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the inspect effects form.");
@@ -9795,8 +10498,12 @@ internal static class IntegrationTests
             "docs/grammar.md package command list must show the inspect api form.");
         AssertTrue(packageCommandBlock.Contains("lang audit PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the audit form.");
+        AssertTrue(grammar.Contains("lang new lib|cli|web NAME", StringComparison.Ordinal),
+            "docs/grammar.md must document package creation.");
+        AssertTrue(grammar.Contains("lang add SOURCE", StringComparison.Ordinal),
+            "docs/grammar.md must document adding a dependency from the current package directory.");
 
-        foreach (var unsupportedCommand in new[] { "fmt", "new", "add" })
+        foreach (var unsupportedCommand in new[] { "fmt" })
         {
             var unsupported = await harness.InvokeCompilerCommandAsync(unsupportedCommand);
             AssertEqual(2, unsupported.ExitCode, Describe(unsupported));
@@ -11183,7 +11890,7 @@ internal static class IntegrationTests
         var root = document.RootElement;
         AssertJsonPropertyOrder(root,
             "schema_version,build,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,audit_snapshot_sha256,artifacts");
-        AssertEqual(1, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 1.");
+        AssertEqual(2, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 2.");
         var build = root.GetProperty("build");
         AssertJsonPropertyOrder(build, "mode,framework,runtime_identifier");
         AssertEqual(expectedMode, build.GetProperty("mode").GetString(), "Unexpected build receipt mode.");
@@ -11198,13 +11905,13 @@ internal static class IntegrationTests
         foreach (var package in root.GetProperty("package_graph").EnumerateArray())
         {
             AssertJsonPropertyOrder(package, "identity,role,content_sha256,dependencies");
-            AssertJsonPropertyOrder(package.GetProperty("identity"), "name,version,path");
+            AssertPackageIdentitySource(package.GetProperty("identity"));
             AssertTrue(IsLowerSha256(package.GetProperty("content_sha256").GetString()),
                 "Package graph content hashes must be lowercase SHA-256 values.");
             foreach (var dependency in package.GetProperty("dependencies").EnumerateArray())
             {
                 AssertJsonPropertyOrder(dependency, "alias,package");
-                AssertJsonPropertyOrder(dependency.GetProperty("package"), "name,version,path");
+                AssertPackageIdentitySource(dependency.GetProperty("package"));
             }
         }
 
@@ -11225,7 +11932,7 @@ internal static class IntegrationTests
             if (input.GetProperty("package").ValueKind != JsonValueKind.Null)
             {
                 var identity = input.GetProperty("package");
-                AssertJsonPropertyOrder(identity, "name,version,path");
+                AssertPackageIdentitySource(identity);
                 packagePath = identity.GetProperty("path").GetString() ?? string.Empty;
             }
             AssertTrue(IsPortableRelativePath(input.GetProperty("path").GetString(), allowParentSegments: false),
@@ -11248,7 +11955,7 @@ internal static class IntegrationTests
             foreach (var reachable in claim.GetProperty("reachable_from").EnumerateArray())
             {
                 AssertJsonPropertyOrder(reachable, "package,module,name");
-                AssertJsonPropertyOrder(reachable.GetProperty("package"), "name,version,path");
+                AssertPackageIdentitySource(reachable.GetProperty("package"));
             }
         }
         AssertTrue(root.GetProperty("foreign_dependencies").GetRawText() == toolchain.GetProperty("foreign_dependencies").GetRawText(),
@@ -11720,14 +12427,21 @@ internal static class IntegrationTests
         public Task<ProcessResult> InvokeCompilerCommandAsync(params string[] arguments) =>
             InvokeCompilerCommandWithEnvironmentAsync(null, arguments);
 
-        public async Task<ProcessResult> InvokeCompilerCommandWithEnvironmentAsync(
+    public async Task<ProcessResult> InvokeCompilerCommandWithEnvironmentAsync(
+            IReadOnlyDictionary<string, string>? environment,
+            params string[] arguments)
+            => await InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+                repositoryRoot, environment, arguments);
+
+        public async Task<ProcessResult> InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+            string workingDirectory,
             IReadOnlyDictionary<string, string>? environment,
             params string[] arguments)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = dotnet,
-                WorkingDirectory = repositoryRoot,
+                WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

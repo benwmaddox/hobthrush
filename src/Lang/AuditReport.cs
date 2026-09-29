@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-internal sealed record AuditPackageIdentity(string Name, string Version, string Path);
+internal sealed record AuditPackageIdentity(string Name, string Version, string Path, PackageSourceIdentity Source);
 
 internal sealed record AuditFunctionIdentity(AuditPackageIdentity? Package, string Module, string Name);
 
@@ -43,7 +43,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 5;
+    private const int SchemaVersion = 6;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -73,23 +73,13 @@ internal static class AuditReport
             schema_version = SchemaVersion,
             packages = packageSnapshots.Select(package => new
             {
-                identity = new
-                {
-                    name = package.Identity.Name,
-                    version = package.Identity.Version,
-                    path = package.Identity.Path
-                },
+                identity = IdentityJson(package.Identity),
                 role = package.Role,
                 content_sha256 = package.ContentSha256,
                 dependencies = package.Dependencies.Select(dependency => new
                 {
                     alias = dependency.Alias,
-                    package = new
-                    {
-                        name = dependency.Package.Name,
-                        version = dependency.Package.Version,
-                        path = dependency.Package.Path
-                    }
+                    package = IdentityJson(dependency.Package)
                 }).ToArray(),
                 inputs = package.Inputs.Select(input => new
                 {
@@ -505,21 +495,39 @@ internal static class AuditReport
         ? new { kind = "function", module = function.Module, name = function.Name }
         : new { kind = "function", package = IdentityJson(package), module = function.Module, name = function.Name };
 
-    private static object IdentityJson(AuditPackageIdentity identity) => new
+    internal static object IdentityJson(AuditPackageIdentity identity) => new
     {
         name = identity.Name,
         version = identity.Version,
-        path = identity.Path
+        path = identity.Path,
+        source = SourceJson(identity.Source)
+    };
+
+    private static object SourceJson(PackageSourceIdentity source) => source.Kind switch
+    {
+        PackageSourceKind.Root => new { kind = "root" },
+        PackageSourceKind.Path => new { kind = "path", path = source.Path },
+        PackageSourceKind.Git => new { kind = "git", url = source.Url, commit = source.Commit },
+        _ => throw new InvalidOperationException("Unknown package source identity kind")
     };
 
     private static AuditPackageIdentity Identity(ResolvedPackage node) => new(
         node.Package.Manifest.Name,
         node.Package.Manifest.Version,
-        node.RelativePath.Length == 0 ? "." : NormalizeRelative(node.RelativePath));
+        StablePackagePath(node),
+        node.SourceIdentity);
+
+    private static string StablePackagePath(ResolvedPackage node) => node.SourceIdentity.Kind switch
+    {
+        PackageSourceKind.Root => ".",
+        PackageSourceKind.Path => NormalizeRelative(node.RelativePath),
+        PackageSourceKind.Git => PackageSourceCache.StableGitPackagePath(node.SourceIdentity.Url!, node.SourceIdentity.Commit!),
+        _ => throw new InvalidOperationException("Unknown package source identity kind")
+    };
 
     private static string FindNodeId(PackageDependencyGraph graph, string relativePath) =>
         graph.Nodes.First(node => string.Equals(
-            node.RelativePath.Length == 0 ? "." : NormalizeRelative(node.RelativePath),
+            StablePackagePath(node),
             relativePath,
             StringComparison.Ordinal)).Id;
 
