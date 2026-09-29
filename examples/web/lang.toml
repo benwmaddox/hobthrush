@@ -10,6 +10,7 @@ sqlite_schema = "db/schema.sql"
 net.listen = "allow"
 db.read = "allow"
 db.write = "allow"
+fs.write = "allow"
 
 [dependencies]
 validation = "../text-validation"

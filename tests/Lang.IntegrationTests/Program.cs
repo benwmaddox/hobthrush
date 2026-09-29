@@ -95,6 +95,9 @@ internal static class IntegrationTests
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
             ("effectful FsRead libraries build as managed DLLs", TestEffectfulLibraryBuild),
             ("async FsRead adapter maps results and honors pre-canceled tokens", TestAsyncFsReadAdapter),
+            ("async FsWrite signatures, effects, and trusted reports are checked", TestAsyncFsWriteSemantics),
+            ("async FsWrite adapter maps strict text and cancellation runtime outcomes", TestAsyncFsWriteRuntimeAdapter),
+            ("async FsWrite CLI publishes managed and NativeAOT command schemas and writes", TestAsyncFsWriteCliRuntime),
             ("managed FsWrite maps strict UTF-8 writes and filesystem errors", TestFsWriteManagedLibrary),
             ("managed build receipts bind checked inputs and artifact bytes", TestStandaloneBuildReceipt),
             ("CLI capability grants including FsWrite are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
@@ -131,7 +134,7 @@ internal static class IntegrationTests
             ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
             ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
             ("SQLite library operations build without web database configuration", TestSqliteLibraryBuild),
-            ("maintained scan CLI receives FsRead and handles typed file and normalization results", TestScanCliExample),
+            ("maintained scan CLI awaits FsRead and handles typed file and normalization results", TestScanCliExample),
             ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
             ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
@@ -1714,14 +1717,14 @@ internal static class IntegrationTests
         AssertJsonStringArray(scanReport.GetProperty("inferred_effects"), ["fs.read"]);
         AssertJsonStringArray(scanReport.GetProperty("required_capabilities"), ["fs.read"]);
         AssertJsonStringArray(scanReport.GetProperty("manifest_grants"), ["fs.read"]);
-        AssertEffectPath(scanReport, "fs.read", "app::scan::run -> fs.read_text");
+        AssertEffectPath(scanReport, "fs.read", "app::scan::run -> fs.read_text_async");
 
         var trustedOperations = scanReport.GetProperty("trusted_operations").EnumerateArray().ToArray();
         AssertEqual(3, trustedOperations.Length,
             "The scan report should identify the two CLI host operations and the FsRead adapter.");
         AssertTrustedOperation(trustedOperations[0], "cli.argument_decode", "trusted_host", []);
         AssertTrustedOperation(trustedOperations[1], "cli.output", "trusted_host", []);
-        AssertTrustedOperation(trustedOperations[2], "FsRead.read_text", "trusted_adapter", ["fs.read"]);
+        AssertTrustedOperation(trustedOperations[2], "FsRead.read_text_async", "trusted_adapter", ["fs.read"]);
 
         var repeatedScan = await harness.InvokeCompilerCommandAsync(
             "inspect", "effects", scanPackage, "self::app::scan::run", "--json");
@@ -2967,6 +2970,137 @@ internal static class IntegrationTests
         }
     }
 
+    private static async Task TestAsyncFsWriteSemantics(Harness harness)
+    {
+        const string main = """
+            module app::main;
+
+            command save {
+                help "Save UTF-8 text to a path.";
+                argument output: FilePath help "Destination path.";
+                argument value: Text help "Text to write.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+
+            pub async fn write_file(
+                writer: FsWrite,
+                path: FilePath,
+                value: Text
+            ) -> Result<bool, FsError> effects { fs.write } {
+                return await writer.write_text_async(path, value);
+            }
+
+            pub async fn run(
+                args: self::app::main::SaveArgs,
+                writer: FsWrite,
+            ) -> Result<Text, FsError> effects { fs.write } {
+                return match await self::handlers::write_file(writer, args.output, args.value) {
+                    Ok(written) => Ok("saved"),
+                    Err(error) => Err(error)
+                };
+            }
+
+            pub fn describe(error: FsError) -> Text effects {} {
+                return match error {
+                    FsError.NotFound => "not found",
+                    FsError.PermissionDenied => "permission denied",
+                    FsError.InvalidPath => "invalid path",
+                    FsError.InvalidText => "invalid text",
+                    FsError.Io => "I/O error",
+                };
+            }
+            """;
+        var packageRoot = await harness.WritePackageAsync(
+            "async-fswrite-report",
+            CliPackageManifest() + "\n[capabilities]\nfs.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("async-fswrite-report-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var apiResult = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, apiResult.ExitCode, Describe(apiResult));
+        using (var apiDocument = JsonDocument.Parse(apiResult.StandardOutput))
+        {
+            var command = apiDocument.RootElement.GetProperty("commands").EnumerateArray().Single();
+            AssertJsonStringArray(command.GetProperty("required_capabilities"), ["fs.write"]);
+            var run = apiDocument.RootElement.GetProperty("functions").EnumerateArray()
+                .Single(function => function.GetProperty("id").GetString() == "self::handlers::run");
+            AssertJsonStringArray(run.GetProperty("required_capabilities"), ["fs.write"]);
+        }
+
+        var effectResult = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::handlers::run", "--json");
+        AssertEqual(0, effectResult.ExitCode, Describe(effectResult));
+        using (var effects = JsonDocument.Parse(effectResult.StandardOutput))
+        {
+            var report = effects.RootElement;
+            AssertJsonStringArray(report.GetProperty("declared_effects"), ["fs.write"]);
+            AssertJsonStringArray(report.GetProperty("inferred_effects"), ["fs.write"]);
+            AssertJsonStringArray(report.GetProperty("required_capabilities"), ["fs.write"]);
+            var effectPath = report.GetProperty("effect_paths").EnumerateArray()
+                .Single(path => path.GetProperty("effect").GetString() == "fs.write");
+            AssertEqual("handlers::run -> handlers::write_file -> fs.write_text_async",
+                string.Join(" -> ", effectPath.GetProperty("steps").EnumerateArray()
+                    .Select(step => step.GetString() ?? string.Empty)),
+                "The async write report should preserve the transitive effect path.");
+            var operation = report.GetProperty("trusted_operations").EnumerateArray()
+                .Single(item => item.GetProperty("operation").GetString() == "FsWrite.write_text_async");
+            AssertEqual("trusted_adapter", operation.GetProperty("trust").GetString(),
+                "Async FsWrite should be identified as a trusted adapter operation.");
+            AssertJsonStringArray(operation.GetProperty("effects"), ["fs.write"]);
+        }
+
+        var auditResult = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, auditResult.ExitCode, Describe(auditResult));
+        using (var audit = JsonDocument.Parse(auditResult.StandardOutput))
+        {
+            var operation = audit.RootElement.GetProperty("trusted_claims").EnumerateArray()
+                .Single(item => item.GetProperty("operation").GetString() == "FsWrite.write_text_async");
+            AssertJsonStringArray(operation.GetProperty("effects"), ["fs.write"]);
+        }
+
+        const string unawaited = """
+            module harness::async_fswrite_unawaited;
+            pub async fn write(writer: FsWrite, path: Text, value: Text) -> Result<bool, FsError> effects { fs.write } {
+                let pending: Result<bool, FsError> = writer.write_text_async(path, value);
+                return pending;
+            }
+            """;
+        var unawaitedDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "async-fswrite-unawaited", unawaited, "E_ASYNC_CALL_UNAWAITED");
+        AssertTrue(unawaitedDiagnostics.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "An unawaited write should have its direct async-call diagnostic without a spurious effect-bound diagnostic.");
+
+        const string outsideAsync = """
+            module harness::async_fswrite_outside_async;
+            pub fn write(writer: FsWrite, path: Text, value: Text) -> Result<bool, FsError> effects { fs.write } {
+                return await writer.write_text_async(path, value);
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "async-fswrite-outside-async", outsideAsync, "E_AWAIT_CONTEXT");
+
+        const string wrongValue = """
+            module harness::async_fswrite_wrong_value;
+            pub async fn write(writer: FsWrite, path: Text, value: i32) -> Result<bool, FsError> effects {} {
+                return await writer.write_text_async(path, value);
+            }
+            """;
+        var typeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "async-fswrite-wrong-value", wrongValue, "E_TYPE_MISMATCH");
+        AssertTrue(typeDiagnostics.All(diagnostic => diagnostic.Code != "E_EFFECT_EXCEEDED"),
+            "A wrongly typed write value must not seed fs.write effect inference.");
+    }
+
     private static async Task TestHttpClientContracts(Harness harness)
     {
         const string source = """
@@ -3617,6 +3751,316 @@ internal static class IntegrationTests
         }
 
         return weakReference;
+    }
+
+    private static async Task TestAsyncFsWriteRuntimeAdapter(Harness harness)
+    {
+        const string source = "module harness::async_fs_write_library;\n"
+            + "pub async fn write(fs: FsWrite, path: Text, value: Text) -> Result<bool, FsError> effects { fs.write } { return await fs.write_text_async(path, value); }\n";
+        var check = await harness.InvokeAsync("async-fs-write-library-check", "check", source, "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+
+        var build = await harness.InvokeAsync("async-fs-write-library-build", "build", source);
+        AssertBuiltDll(build, Path.GetDirectoryName(harness.LastSourcePath)!);
+        var dllPath = ParseBuiltArtifact(build, "Built library: ");
+        var probeDirectory = Path.Combine(harness.TemporaryRoot, $"async-fs-write-runtime-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(probeDirectory);
+        try
+        {
+            var loadContext = ProbeAsyncFsWriteRuntimeMappings(dllPath, probeDirectory);
+            for (var attempt = 0; attempt < 10 && loadContext.IsAlive; attempt++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+            AssertTrue(!loadContext.IsAlive,
+                "The generated async FsWrite library's collectible load context should unload after the trusted probe.");
+        }
+        finally
+        {
+            Directory.Delete(probeDirectory, recursive: true);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ProbeAsyncFsWriteRuntimeMappings(string dllPath, string probeDirectory)
+    {
+        var loadContext = new AssemblyLoadContext($"async-fs-write-probe-{Guid.NewGuid():N}", isCollectible: true);
+        var weakReference = new WeakReference(loadContext);
+        try
+        {
+            var assembly = loadContext.LoadFromAssemblyPath(Path.GetFullPath(dllPath));
+            var moduleType = assembly.GetType("LangModule", throwOnError: true)!;
+            var fsWriteType = moduleType.GetNestedType("FsWrite", BindingFlags.Public)
+                ?? throw new InvalidOperationException("Generated async library does not expose its nested opaque FsWrite runtime type.");
+            var fsWriteConstructor = fsWriteType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                [typeof(CancellationToken)],
+                modifiers: null)
+                ?? throw new InvalidOperationException("Generated async FsWrite has no trusted cancellation-token constructor.");
+            var writeFunction = moduleType.GetMethod("Function_0", BindingFlags.Public | BindingFlags.Static)
+                ?? throw new InvalidOperationException("Generated async library does not contain Function_0.");
+            var parameters = writeFunction.GetParameters();
+            AssertEqual(4, parameters.Length, "The async FsWrite function should append one hidden cancellation-token parameter.");
+            AssertEqual(typeof(CancellationToken), parameters[^1].ParameterType,
+                "The async FsWrite function's hidden final argument should be CancellationToken.");
+
+            Task StartWrite(string path, string value, CancellationToken token)
+            {
+                var fsWrite = fsWriteConstructor.Invoke([token]);
+                return writeFunction.Invoke(null, [fsWrite, path, value, token]) as Task
+                    ?? throw new InvalidOperationException("Generated write_text_async did not return a Task.");
+            }
+
+            static object GetResult(Task task) => task.GetType().GetProperty("Result")?.GetValue(task)
+                ?? throw new InvalidOperationException("Generated write_text_async returned no Result value.");
+
+            object InvokeWrite(string path, string value, CancellationToken token = default)
+            {
+                var task = StartWrite(path, value, token);
+                task.GetAwaiter().GetResult();
+                return GetResult(task);
+            }
+
+            static void AssertSuccess(object result, string operation)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Ok", StringComparison.Ordinal),
+                    $"{operation} should map to Result.Ok, got {result.GetType().FullName}.");
+                AssertEqual(true, result.GetType().GetProperty("Value")?.GetValue(result) as bool?,
+                    $"{operation} should return true in Result.Ok.");
+            }
+
+            static void AssertError(object result, string expectedVariant, string operation)
+            {
+                AssertTrue(result.GetType().Name.StartsWith("Err", StringComparison.Ordinal),
+                    $"{operation} should map to Result.Err, got {result.GetType().FullName}.");
+                var error = result.GetType().GetProperty("Error")?.GetValue(result)
+                    ?? throw new InvalidOperationException($"{operation} did not expose its FsError value.");
+                AssertTrue(error.GetType().Name.StartsWith(expectedVariant, StringComparison.Ordinal),
+                    $"{operation} should map to FsError.{expectedVariant}, got {error.GetType().FullName}.");
+            }
+
+            void AssertNoTemporaryFiles(string operation)
+            {
+                AssertTrue(!Directory.EnumerateFiles(probeDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+                    $"{operation} must not leave a temporary file beside the destination.");
+            }
+
+            var destination = Path.Combine(probeDirectory, "target.txt");
+            const string unicodeText = "async strict UTF-8 λ 😀";
+            AssertSuccess(InvokeWrite(destination, unicodeText), "Async create");
+            var expectedBytes = new UTF8Encoding(false, true).GetBytes(unicodeText);
+            AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(expectedBytes),
+                "Async FsWrite should create exact strict UTF-8 bytes without a BOM.");
+            AssertNoTemporaryFiles("A successful async create");
+
+            AssertSuccess(InvokeWrite(destination, "short λ"), "Async overwrite");
+            var overwrittenBytes = new UTF8Encoding(false, true).GetBytes("short λ");
+            AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(overwrittenBytes),
+                "Async FsWrite should truncate longer destination contents on overwrite.");
+            AssertNoTemporaryFiles("A successful async overwrite");
+
+            AssertSuccess(InvokeWrite(destination, string.Empty), "Async empty write");
+            AssertEqual(0L, new FileInfo(destination).Length, "An empty Text value should create or overwrite with an empty file.");
+            AssertNoTemporaryFiles("A successful async empty write");
+
+            AssertSuccess(InvokeWrite(destination, "preserved"), "Async restore before error mapping");
+            var preservedBytes = File.ReadAllBytes(destination);
+            AssertError(InvokeWrite(destination, "\uD800"), "InvalidText", "An unpaired surrogate async write");
+            AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(preservedBytes),
+                "Invalid UTF-16 input must fail before changing the existing destination.");
+            AssertNoTemporaryFiles("An invalid-text async write");
+
+            var missingParentPath = Path.Combine(probeDirectory, "missing-parent", "child.txt");
+            AssertError(InvokeWrite(missingParentPath, "value"), "NotFound", "An async write to a missing parent directory");
+            AssertTrue(!Directory.Exists(Path.GetDirectoryName(missingParentPath)),
+                "An async write to a missing parent must not create directories.");
+            AssertError(InvokeWrite(string.Empty, "value"), "InvalidPath", "An empty async destination path");
+            AssertError(InvokeWrite("invalid\0path", "value"), "InvalidPath", "A NUL async destination path");
+            AssertNoTemporaryFiles("Async filesystem error mappings");
+
+            using (var canceledBeforeStart = new CancellationTokenSource())
+            {
+                canceledBeforeStart.Cancel();
+                var observed = false;
+                try
+                {
+                    _ = InvokeWrite(destination, "must not replace", canceledBeforeStart.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    observed = true;
+                }
+                catch (TargetInvocationException exception) when (exception.InnerException is OperationCanceledException)
+                {
+                    observed = true;
+                }
+                AssertTrue(observed, "A pre-canceled async FsWrite token should propagate OperationCanceledException.");
+                AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(preservedBytes),
+                    "A pre-canceled async write must leave the destination unchanged.");
+                AssertNoTemporaryFiles("A pre-canceled async write");
+            }
+
+            var previousContext = SynchronizationContext.Current;
+            using (var synchronizationContext = new QueuedSynchronizationContext())
+            using (var cancelAfterTempCreation = new CancellationTokenSource())
+            {
+                Task? pending = null;
+                try
+                {
+                    SynchronizationContext.SetSynchronizationContext(synchronizationContext);
+                    pending = StartWrite(destination, "must not commit", cancelAfterTempCreation.Token);
+                    AssertTrue(synchronizationContext.HasPendingCallbacks,
+                        "The async write should queue its continuation after temporary-file creation to the captured synchronization context.");
+                    var stagedFiles = Directory.EnumerateFiles(probeDirectory, "*.tmp", SearchOption.TopDirectoryOnly).ToArray();
+                    AssertEqual(1, stagedFiles.Length,
+                        "The deterministic cancellation point should have exactly one same-directory temporary file created.");
+                    AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(preservedBytes),
+                        "The destination must retain its old bytes until the write commits.");
+
+                    cancelAfterTempCreation.Cancel();
+                    synchronizationContext.RunUntilCompleted(pending, TimeSpan.FromSeconds(5));
+                    var observed = false;
+                    try
+                    {
+                        pending.GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        observed = true;
+                    }
+                    AssertTrue(observed, "Cancellation after temporary-file creation should propagate OperationCanceledException.");
+                    AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(preservedBytes),
+                        "Cancellation after temporary-file creation must leave the destination unchanged.");
+                    AssertNoTemporaryFiles("A write canceled after temporary-file creation");
+                }
+                finally
+                {
+                    SynchronizationContext.SetSynchronizationContext(previousContext);
+                }
+            }
+        }
+        finally
+        {
+            loadContext.Unload();
+        }
+
+        return weakReference;
+    }
+
+    private static async Task TestAsyncFsWriteCliRuntime(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64
+            || (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("The async FsWrite NativeAOT CLI smoke test targets Windows x64 and Linux x64 hosts.");
+
+        const string main = "module app::main;\n"
+            + "command save { help \"Save UTF-8 text.\"; argument output: FilePath help \"Destination.\"; argument value: Text help \"Contents.\"; handler: self::handlers::run; error: self::handlers::describe; }\n";
+        const string handlers = "module handlers;\n"
+            + "pub async fn run(args: self::app::main::SaveArgs, writer: FsWrite) -> Result<Text, FsError> effects { fs.write } {\n"
+            + "    return match await writer.write_text_async(args.output, args.value) {\n"
+            + "        Ok(written) => Ok(\"saved\"),\n"
+            + "        Err(error) => Err(error)\n"
+            + "    };\n"
+            + "}\n"
+            + "pub fn describe(error: FsError) -> Text effects {} { return match error {\n"
+            + "    FsError.NotFound => \"not found\", FsError.PermissionDenied => \"permission denied\",\n"
+            + "    FsError.InvalidPath => \"invalid path\", FsError.InvalidText => \"invalid text\", FsError.Io => \"I/O error\"\n"
+            + "}; }\n";
+        var packageRoot = await harness.WritePackageAsync(
+            "async-fs-write-cli",
+            CliPackageManifest() + "\n[capabilities]\nfs.write = \"allow\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = main,
+                ["src/handlers.lang"] = handlers
+            });
+
+        var check = await harness.InvokePackageDirectoryAsync("async-fs-write-cli-check", packageRoot, "check", "--json");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
+        var build = await harness.InvokePackageDirectoryAsync("async-fs-write-cli-managed-build", packageRoot, "build");
+        var managedExecutable = ParseBuiltArtifact(build, "Built executable: ");
+        var managedOutputDirectory = Path.GetDirectoryName(managedExecutable)!;
+        var managedSchemaPath = Path.Combine(managedOutputDirectory, "command-schema.json");
+        AssertTrue(File.Exists(managedSchemaPath), $"Expected managed command schema at {managedSchemaPath}.");
+        var managedSchemaBytes = await File.ReadAllBytesAsync(managedSchemaPath);
+        using (var schema = JsonDocument.Parse(managedSchemaBytes))
+        {
+            AssertEqual(4, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "Async FsWrite managed CLI builds must preserve command schema version 4.");
+            var command = schema.RootElement.GetProperty("commands").EnumerateArray().Single();
+            AssertEqual("save", command.GetProperty("name").GetString(), "The async FsWrite command schema should retain its name.");
+            AssertJsonStringArray(command.GetProperty("capabilities"), ["fs.write"]);
+        }
+
+        var destinationDirectory = Path.Combine(harness.TemporaryRoot, $"async-fs-write-cli-files-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(destinationDirectory);
+        var destination = Path.Combine(destinationDirectory, "managed.txt");
+        const string firstValue = "managed async FsWrite λ 😀";
+        var firstRun = await harness.InvokePackageDirectoryAsync(
+            "async-fs-write-cli-create", packageRoot, "run", "--", "save", destination, firstValue);
+        AssertRunOutput("saved" + Environment.NewLine, firstRun);
+        AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(new UTF8Encoding(false, true).GetBytes(firstValue)),
+            "The managed async CLI should create exact UTF-8 bytes without a BOM.");
+        AssertTrue(!Directory.EnumerateFiles(destinationDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+            "A successful managed async CLI write must leave no temporary file.");
+
+        const string replacement = "short λ";
+        var overwrite = await harness.InvokePackageDirectoryAsync(
+            "async-fs-write-cli-overwrite", packageRoot, "run", "--", "save", destination, replacement);
+        AssertRunOutput("saved" + Environment.NewLine, overwrite);
+        AssertTrue(File.ReadAllBytes(destination).AsSpan().SequenceEqual(new UTF8Encoding(false, true).GetBytes(replacement)),
+            "The managed async CLI should truncate an existing longer file to exact replacement bytes.");
+        AssertTrue(!Directory.EnumerateFiles(destinationDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+            "A successful managed async CLI overwrite must leave no temporary file.");
+
+        var nativeBuild = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "async-fs-write-cli-aot-build",
+            packageRoot,
+            "build",
+            AotPublishTimeout,
+            "--aot",
+            "--rid",
+            CurrentHostAotRid());
+        AssertEqual(0, nativeBuild.ExitCode, Describe(nativeBuild));
+        const string nativePrefix = "Built native executable: ";
+        AssertTrue(nativeBuild.StandardOutput.StartsWith(nativePrefix, StringComparison.Ordinal), Describe(nativeBuild));
+        AssertTrue(nativeBuild.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(nativeBuild));
+        var nativeExecutable = nativeBuild.StandardOutput[nativePrefix.Length..^Environment.NewLine.Length];
+        AssertTrue(Path.IsPathFullyQualified(nativeExecutable) && File.Exists(nativeExecutable),
+            $"Expected async FsWrite NativeAOT executable at {nativeExecutable}.");
+        var nativeOutputDirectory = Path.GetDirectoryName(nativeExecutable)!;
+        var nativeSchemaPath = Path.Combine(nativeOutputDirectory, "command-schema.json");
+        AssertTrue(File.Exists(nativeSchemaPath), $"Expected NativeAOT command schema at {nativeSchemaPath}.");
+        var nativeSchemaBytes = await File.ReadAllBytesAsync(nativeSchemaPath);
+        AssertTrue(managedSchemaBytes.AsSpan().SequenceEqual(nativeSchemaBytes),
+            "Managed and NativeAOT async FsWrite command schemas must be byte-for-byte identical.");
+        using var receipt = await AssertBuildReceiptAsync(
+            nativeOutputDirectory,
+            "native_aot",
+            CurrentHostAotRid(),
+            [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
+            packageRoot);
+        AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async FsWrite NativeAOT builds must preserve build receipt schema version 1.");
+
+        var nativeDestination = Path.Combine(destinationDirectory, "native.txt");
+        const string nativeValue = "native async FsWrite λ 😀";
+        var nativeRun = await ExecuteNativeAsync(
+            nativeExecutable,
+            TimeSpan.FromSeconds(30),
+            "save",
+            nativeDestination,
+            nativeValue);
+        AssertRunOutput("saved" + Environment.NewLine, nativeRun);
+        AssertTrue(File.ReadAllBytes(nativeDestination).AsSpan().SequenceEqual(new UTF8Encoding(false, true).GetBytes(nativeValue)),
+            "The NativeAOT async CLI should create exact UTF-8 bytes without a BOM.");
+        AssertTrue(!Directory.EnumerateFiles(destinationDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+            "A successful NativeAOT async CLI write must leave no temporary file.");
     }
 
     private static async Task TestCliCapabilityManifestAndLock(Harness harness)
@@ -7217,9 +7661,9 @@ internal static class IntegrationTests
             && normalizedManifest.Contains("sqlite_schema = \"db/schema.sql\"", StringComparison.Ordinal),
             "The maintained web sample must declare package-relative SQLite paths.");
         AssertTrue(normalizedManifest.Contains(
-                "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"",
+                "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\nfs.write = \"allow\"",
                 StringComparison.Ordinal),
-            "The maintained web sample must explicitly grant listening and both database capabilities.");
+            "The maintained web sample must explicitly grant listening, both database capabilities, and filesystem writes.");
         AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
             "The maintained web sample must consume the shared validation package.");
         AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
@@ -7244,8 +7688,10 @@ internal static class IntegrationTests
             && source.Contains("tx.execute", StringComparison.Ordinal)
             && source.Contains("DbError.Statement", StringComparison.Ordinal)
             && source.Contains("DbError.RowShape", StringComparison.Ordinal)
+            && source.Contains("await writer.write_text_async", StringComparison.Ordinal)
+            && source.Contains("route POST \"/api/note\"", StringComparison.Ordinal)
             && source.Contains("route GET \"/health\"", StringComparison.Ordinal),
-            "The maintained web sample must read SQLite, write in a transaction, match typed database errors, and declare /health.");
+            "The maintained web sample must exercise transactional SQLite writes, typed database errors, an async filesystem write route, and /health.");
 
         var check = await harness.InvokePackageDirectoryAsync("maintained-web-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -7272,6 +7718,16 @@ internal static class IntegrationTests
                 "OpenAPI 205 responses should not advertise a response body.");
             AssertTrue(paths.TryGetProperty("/health", out _),
                 "OpenAPI should include the ordinary declared health route.");
+            AssertTrue(paths.TryGetProperty("/api/note", out var openApiNotePath),
+                "OpenAPI should include the async note POST route.");
+            AssertTrue(openApiNotePath.TryGetProperty("post", out var notePost),
+                "OpenAPI should expose a POST operation for the async note route.");
+            AssertTrue(notePost.TryGetProperty("requestBody", out var noteBody)
+                && noteBody.GetProperty("required").GetBoolean(),
+                "OpenAPI should describe the async note POST route and its required request body.");
+            AssertTrue(notePost.GetProperty("responses").TryGetProperty("204", out var noteSaved)
+                && !noteSaved.TryGetProperty("content", out _),
+                "The async note route's successful 204 response should not advertise a body.");
         }
 
         var secondBuild = await harness.InvokePackageDirectoryAsync("maintained-web-build-second", packageRoot, "build");
@@ -7339,11 +7795,19 @@ internal static class IntegrationTests
         {
             ["LANG_SQLITE_PATH"] = databasePath
         };
+        var runtimeCopyRoot = Path.Combine(harness.TemporaryRoot, $"maintained-web-runtime-{Guid.NewGuid():N}");
+        var runtimePackageRoot = Path.Combine(runtimeCopyRoot, "web");
+        var runtimeDependencyRoot = Path.Combine(runtimeCopyRoot, "text-validation");
+        CopyMaintainedPackageInputs(packageRoot, runtimePackageRoot, includeSqliteSchema: true);
+        CopyMaintainedPackageInputs(Path.Combine(harness.RepositoryRoot, "examples", "text-validation"), runtimeDependencyRoot);
         var port = GetUnusedLoopbackPort();
         var baseAddress = new Uri($"http://127.0.0.1:{port}");
         var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(4) };
+        var noteDirectory = Path.Combine(runtimePackageRoot, "data");
+        Directory.CreateDirectory(noteDirectory);
+        var notePath = Path.Combine(noteDirectory, "async-note.txt");
         using var process = harness.StartWebPackageProcessWithEnvironment(
-            "maintained-web-run", packageRoot, databaseEnvironment, "--urls", baseAddress.ToString().TrimEnd('/'));
+            "maintained-web-run", runtimePackageRoot, databaseEnvironment, "--urls", baseAddress.ToString().TrimEnd('/'));
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         var assertionsCompleted = false;
@@ -7369,6 +7833,24 @@ internal static class IntegrationTests
                 AssertEqual(0, (await health.Content.ReadAsByteArrayAsync()).Length,
                     "The health route should not return an undeclared body.");
             }
+
+            const string initialNote = "web async FsWrite λ 😀";
+            using (var saved = await client.PostAsync("/api/note", JsonBody(JsonSerializer.Serialize(new { content = initialNote }))))
+                AssertEqual(HttpStatusCode.NoContent, saved.StatusCode,
+                    "The async note route should return its declared 204 after writing.");
+            var initialNoteBytes = new UTF8Encoding(false, true).GetBytes(initialNote);
+            AssertTrue(File.ReadAllBytes(notePath).AsSpan().SequenceEqual(initialNoteBytes),
+                "The async note route should persist exact UTF-8 bytes without a BOM.");
+
+            const string shorterNote = "shorter λ";
+            using (var saved = await client.PostAsync("/api/note", JsonBody(JsonSerializer.Serialize(new { content = shorterNote }))))
+                AssertEqual(HttpStatusCode.NoContent, saved.StatusCode,
+                    "The async note route should overwrite an existing destination.");
+            var preservedNoteBytes = new UTF8Encoding(false, true).GetBytes(shorterNote);
+            AssertTrue(File.ReadAllBytes(notePath).AsSpan().SequenceEqual(preservedNoteBytes),
+                "The async note route should truncate longer prior contents on overwrite.");
+            AssertTrue(!Directory.EnumerateFiles(noteDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+                "Successful async web writes must leave no temporary files beside the destination.");
 
             using (var get = await client.GetAsync("/api/greeting"))
             {
@@ -7556,6 +8038,7 @@ internal static class IntegrationTests
 
             await Task.WhenAll(stdoutTask, stderrTask);
             await AssertLoopbackPortReleasedAsync(port);
+            if (Directory.Exists(runtimeCopyRoot)) Directory.Delete(runtimeCopyRoot, recursive: true);
         }
 
         var restartedPort = GetUnusedLoopbackPort();
@@ -8577,6 +9060,33 @@ internal static class IntegrationTests
         throw new TimeoutException("The maintained web host did not become ready within 30 seconds.");
     }
 
+    private static void CopyMaintainedPackageInputs(string sourceRoot, string destinationRoot, bool includeSqliteSchema = false)
+    {
+        Directory.CreateDirectory(destinationRoot);
+        foreach (var name in new[] { "lang.toml", "lang.lock" })
+        {
+            var sourcePath = Path.Combine(sourceRoot, name);
+            if (File.Exists(sourcePath))
+                File.Copy(sourcePath, Path.Combine(destinationRoot, name));
+        }
+
+        CopyTree(Path.Combine(sourceRoot, "src"), Path.Combine(destinationRoot, "src"));
+        if (includeSqliteSchema && Directory.Exists(Path.Combine(sourceRoot, "db")))
+            CopyTree(Path.Combine(sourceRoot, "db"), Path.Combine(destinationRoot, "db"));
+
+        static void CopyTree(string sourceDirectory, string destinationDirectory)
+        {
+            if (!Directory.Exists(sourceDirectory))
+                return;
+
+            Directory.CreateDirectory(destinationDirectory);
+            foreach (var sourcePath in Directory.EnumerateFiles(sourceDirectory))
+                File.Copy(sourcePath, Path.Combine(destinationDirectory, Path.GetFileName(sourcePath)));
+            foreach (var childDirectory in Directory.EnumerateDirectories(sourceDirectory))
+                CopyTree(childDirectory, Path.Combine(destinationDirectory, Path.GetFileName(childDirectory)));
+        }
+    }
+
     private static async Task AssertLoopbackPortReleasedAsync(int port)
     {
         var deadline = Stopwatch.StartNew();
@@ -8682,6 +9192,10 @@ internal static class IntegrationTests
             "The maintained scanner must explicitly grant fs.read to its CLI application.");
         AssertTrue(normalizedManifest.Contains("[dependencies]\nvalidation = \"../text-validation\"", StringComparison.Ordinal),
             "The scanner must use text-validation through its local dependency alias.");
+        var source = await File.ReadAllTextAsync(Path.Combine(packageRoot, "src", "app", "scan.lang"));
+        AssertTrue(source.Contains("pub async fn run", StringComparison.Ordinal)
+            && source.Contains("await fs.read_text_async(args.input)", StringComparison.Ordinal),
+            "The maintained scanner must use the cancellation-aware async FsRead adapter.");
         AssertTrue(File.Exists(Path.Combine(packageRoot, "lang.lock")),
             "The maintained scanner path dependency should have a canonical lockfile.");
 
@@ -10827,6 +11341,53 @@ internal static class IntegrationTests
     {
         AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
             "JSON property order should match the serialized contract.");
+    }
+
+    private sealed class QueuedSynchronizationContext : SynchronizationContext, IDisposable
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> callbacks = new();
+        private readonly AutoResetEvent posted = new(false);
+
+        public bool HasPendingCallbacks => !callbacks.IsEmpty;
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            callbacks.Enqueue((callback, state));
+            posted.Set();
+        }
+
+        public void RunUntilCompleted(Task task, TimeSpan timeout)
+        {
+            _ = task.ContinueWith(
+                _ => posted.Set(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            var deadline = Stopwatch.StartNew();
+            while (!task.IsCompleted)
+            {
+                if (!callbacks.TryDequeue(out var work))
+                {
+                    var remaining = timeout - deadline.Elapsed;
+                    if (remaining <= TimeSpan.Zero || !posted.WaitOne(remaining))
+                        throw new TimeoutException($"The generated async write did not finish within {timeout}.");
+                    continue;
+                }
+
+                var previous = Current;
+                SetSynchronizationContext(this);
+                try
+                {
+                    work.Callback(work.State);
+                }
+                finally
+                {
+                    SetSynchronizationContext(previous);
+                }
+            }
+        }
+
+        public void Dispose() => posted.Dispose();
     }
 
     private sealed class Harness(string repositoryRoot, string compilerDll, string dotnet, string temporaryRoot)

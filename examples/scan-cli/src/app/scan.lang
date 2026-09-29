@@ -1,10 +1,10 @@
 module app::scan;
 
-pub fn run(
+pub async fn run(
     args: self::app::main::ScanArgs,
     fs: FsRead,
 ) -> Result<Text, self::app::main::ScanError> effects { fs.read } {
-    return match fs.read_text(args.input) {
+    return match await fs.read_text_async(args.input) {
         Ok(contents) => self::app::scan::process_contents(contents, args.normalize, args.first_line),
         Err(error) => Err(self::app::scan::map_fs_error(error)),
     };
