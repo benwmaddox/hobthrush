@@ -1,0 +1,9 @@
+module fixture::map_arity;
+
+fn invalidType(values: Map<Text>) -> i32 effects {} {
+    return values.length;
+}
+
+pub fn invalidEmpty() -> Map<Text, i32> effects {} {
+    return Map.empty(1);
+}

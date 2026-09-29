@@ -13,6 +13,7 @@ internal enum LangTypeKind
     Struct,
     Option,
     List,
+    Map,
     Result,
     FsRead,
     FsWrite,
@@ -79,6 +80,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsDbWrite => Kind == LangTypeKind.DbWrite;
     public bool IsTransaction => Kind == LangTypeKind.Transaction;
     public bool IsList => Kind == LangTypeKind.List;
+    public bool IsMap => Kind == LangTypeKind.Map;
     public bool IsDbError => Kind == LangTypeKind.DbError;
     internal int UnionId { get; }
     internal int StructId { get; }
@@ -116,6 +118,8 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
     internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
     internal static LangType List(LangType item) => new(LangTypeKind.List, $"List<{item.DisplayName}>", arguments: [item]);
+    internal static LangType Map(LangType key, LangType value) =>
+        new(LangTypeKind.Map, $"Map<{key.DisplayName}, {value.DisplayName}>", arguments: [key, value]);
     internal static LangType Result(LangType ok, LangType error) => new(LangTypeKind.Result, $"Result<{ok.DisplayName}, {error.DisplayName}>", arguments: [ok, error]);
 
     public bool Equals(LangType? other)
@@ -334,6 +338,16 @@ internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr
 internal sealed record TypedListLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedListGetExpr(LangType Type, TypedExpr Target, TypedExpr Index, Token At) : TypedExpr(Type, At);
 internal sealed record TypedListAppendExpr(LangType Type, TypedExpr Target, TypedExpr Value, Token At) : TypedExpr(Type, At);
+internal sealed record TypedMapEmptyExpr(LangType Type, Token At) : TypedExpr(Type, At);
+internal sealed record TypedMapSetExpr(
+    LangType Type,
+    TypedExpr Target,
+    TypedExpr Key,
+    TypedExpr Value,
+    Token At) : TypedExpr(Type, At);
+internal sealed record TypedMapGetExpr(LangType Type, TypedExpr Target, TypedExpr Key, Token At) : TypedExpr(Type, At);
+internal sealed record TypedMapKeysExpr(TypedExpr Target, Token At) : TypedExpr(LangType.List(LangType.Text), At);
+internal sealed record TypedMapLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedCallExpr(
     LangType Type,
     int FunctionId,
@@ -681,8 +695,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<CheckedRoute> _routes = [];
     private readonly HashSet<int> _activeTransactionLocals = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
+    private readonly HashSet<(string File, int Line, int Column)> _resourceMapDiagnosticLocations = [];
     private bool[] _resourceReachableDeclarations = [];
     private bool[] _illegalListReachableDeclarations = [];
+    private bool[] _illegalMapReachableDeclarations = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
@@ -2688,11 +2704,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void ValidateResourceListType(LangType type, Token at)
     {
-        if (!ContainsIllegalResourceList(type))
-            return;
-
-        if (_resourceListDiagnosticLocations.Add((at.File, at.Line, at.Column)))
+        if (ContainsIllegalResourceList(type) &&
+            _resourceListDiagnosticLocations.Add((at.File, at.Line, at.Column)))
             Add("E_RESOURCE_ESCAPE", "Lists cannot contain resource handles, directly or through nested types", at);
+
+        if (ContainsIllegalResourceMap(type) &&
+            _resourceMapDiagnosticLocations.Add((at.File, at.Line, at.Column)))
+            Add("E_RESOURCE_ESCAPE", "Maps cannot contain resource handles in values, directly or through nested types", at);
     }
 
     private void BuildResourceGraphSummaries()
@@ -2708,6 +2726,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var listElementTypes = Enumerable.Range(0, declarationCount)
             .Select(_ => new List<LangType>())
             .ToArray();
+        var mapValueTypes = Enumerable.Range(0, declarationCount)
+            .Select(_ => new List<LangType>())
+            .ToArray();
 
         foreach (var structure in _structs)
         foreach (var field in structure.Fields)
@@ -2716,7 +2737,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 structure.Id,
                 dependents,
                 directlyContainsResource,
-                listElementTypes);
+                listElementTypes,
+                mapValueTypes);
 
         foreach (var union in _unions)
         foreach (var variant in union.Variants)
@@ -2726,7 +2748,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 _structs.Count + union.Id,
                 dependents,
                 directlyContainsResource,
-                listElementTypes);
+                listElementTypes,
+                mapValueTypes);
 
         for (var source = 0; source < dependents.Length; source++)
         foreach (var target in dependents[source])
@@ -2749,6 +2772,20 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         _illegalListReachableDeclarations = ComputeReverseReachability(
             directlyContainsIllegalList,
             reverseDependents);
+
+        var directlyContainsIllegalMap = new bool[declarationCount];
+        for (var declaration = 0; declaration < declarationCount; declaration++)
+        foreach (var valueType in mapValueTypes[declaration])
+        {
+            if (!ContainsResourceHandle(valueType, _resourceReachableDeclarations))
+                continue;
+            directlyContainsIllegalMap[declaration] = true;
+            break;
+        }
+
+        _illegalMapReachableDeclarations = ComputeReverseReachability(
+            directlyContainsIllegalMap,
+            reverseDependents);
     }
 
     private void CollectResourceGraphFacts(
@@ -2756,7 +2793,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         int sourceDeclaration,
         HashSet<int>[] dependents,
         bool[] directlyContainsResource,
-        List<LangType>[] listElementTypes)
+        List<LangType>[] listElementTypes,
+        List<LangType>[] mapValueTypes)
     {
         var pending = new Stack<LangType>();
         pending.Push(root);
@@ -2770,6 +2808,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             if (type.IsList)
                 listElementTypes[sourceDeclaration].Add(type.Arguments[0]);
+            if (type.IsMap)
+                mapValueTypes[sourceDeclaration].Add(type.Arguments[1]);
 
             if (type.Kind == LangTypeKind.Struct)
             {
@@ -2818,6 +2858,29 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             if (TryGetDeclarationNode(current, out var declaration)
                 && _illegalListReachableDeclarations[declaration])
+                return true;
+
+            if (current.Kind is LangTypeKind.Struct or LangTypeKind.Union)
+                continue;
+
+            foreach (var argument in current.Arguments)
+                pending.Push(argument);
+        }
+
+        return false;
+    }
+
+    private bool ContainsIllegalResourceMap(LangType type)
+    {
+        var pending = new Stack<LangType>();
+        pending.Push(type);
+        while (pending.TryPop(out var current))
+        {
+            if (current.IsMap && ContainsResourceHandle(current.Arguments[1], _resourceReachableDeclarations))
+                return true;
+
+            if (TryGetDeclarationNode(current, out var declaration)
+                && _illegalMapReachableDeclarations[declaration])
                 return true;
 
             if (current.Kind is LangTypeKind.Struct or LangTypeKind.Union)
@@ -2911,6 +2974,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             case TypedListAppendExpr append:
                 ValidateResourceListExpression(append.Target);
                 ValidateResourceListExpression(append.Value);
+                break;
+            case TypedMapEmptyExpr:
+                break;
+            case TypedMapSetExpr set:
+                ValidateResourceListExpression(set.Target);
+                ValidateResourceListExpression(set.Key);
+                ValidateResourceListExpression(set.Value);
+                break;
+            case TypedMapGetExpr get:
+                ValidateResourceListExpression(get.Target);
+                ValidateResourceListExpression(get.Key);
+                break;
+            case TypedMapKeysExpr keys:
+                ValidateResourceListExpression(keys.Target);
+                break;
+            case TypedMapLengthExpr length:
+                ValidateResourceListExpression(length.Target);
                 break;
             case TypedIntrinsicCallExpr intrinsic:
                 foreach (var argument in intrinsic.Arguments)
@@ -3402,12 +3482,28 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (expression.Target is NameExpr mapName &&
+            mapName.Name == "Map" &&
+            !locals.ContainsKey(mapName.Name) &&
+            !CurrentModule.DeclaredFunctions.ContainsKey(mapName.Name))
+        {
+            Add("E_FIELD_UNKNOWN", $"Map has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         var target = CheckExpr(expression.Target, null, locals, depth);
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
             return new TypedTextLengthExpr(target, expression.At);
         if (target.Type.IsList && expression.Field == "length")
             return new TypedListLengthExpr(target, expression.At);
+        if (target.Type.IsMap && expression.Field == "length")
+            return new TypedMapLengthExpr(target, expression.At);
+        if (target.Type.IsMap)
+        {
+            Add("E_FIELD_UNKNOWN", $"Map has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
         if (target.Type.IsHttpResponse)
         {
             if (expression.Field == "status")
@@ -3621,6 +3717,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
+            if (targetName.Name == "Map" && !CurrentModule.DeclaredFunctions.ContainsKey(targetName.Name))
+                return CheckMapStaticMemberCall(expression, expected, locals, depth);
+
             if (targetName.Name == "html" && IsHtmlBuilderMember(expression.Member))
                 return CheckHtmlBuilderIntrinsic(expression, locals, depth);
 
@@ -3882,6 +3981,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (receiver.Type.IsMap)
+            return CheckMapMemberCall(expression, receiver, locals, depth);
+
         if (receiver.Type.IsList && expression.Member is ("get" or "append"))
         {
             var get = expression.Member == "get";
@@ -4142,6 +4244,97 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             : $"Member calls on values are not implemented for '{targetDescription}.{expression.Member}'";
         Add("E_UNSUPPORTED", unsupportedMessage, expression.MemberAt);
         return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckMapStaticMemberCall(
+        MemberCallExpr expression,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (expression.Member != "empty")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_FIELD_UNKNOWN", $"Map has no member '{expression.Member}'", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Arguments.Count != 0)
+        {
+            Add("E_TYPE_MISMATCH", $"Map.empty expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expected is null)
+        {
+            Add("E_TYPE_MISMATCH", "Map.empty() requires an expected type of Map<Text, V>", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+        if (expected.IsError || ContainsError(expected))
+            return new TypedErrorExpr(expression.At);
+        if (!expected.IsMap)
+        {
+            Add("E_TYPE_MISMATCH", $"Map.empty() requires an expected type of Map<Text, V>, found '{expected.DisplayName}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        return new TypedMapEmptyExpr(expected, expression.At);
+    }
+
+    private TypedExpr CheckMapMemberCall(
+        MemberCallExpr expression,
+        TypedExpr receiver,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        LangType[]? expectedTypes = expression.Member switch
+        {
+            "set" => new[] { LangType.Text, receiver.Type.Arguments[1] },
+            "get" => [LangType.Text],
+            "keys" => Array.Empty<LangType>(),
+            _ => null
+        };
+
+        if (expectedTypes is null)
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_FIELD_UNKNOWN", $"Map has no member '{expression.Member}'", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Arguments.Count != expectedTypes.Length)
+        {
+            var expectedArgumentCount = expectedTypes.Length == 1
+                ? "1 argument"
+                : $"{expectedTypes.Length} arguments";
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Map.{expression.Member} expects {expectedArgumentCount}, got {expression.Arguments.Count}",
+                expression.MemberAt);
+            for (var index = 0; index < expression.Arguments.Count; index++)
+                _ = CheckExpr(
+                    expression.Arguments[index],
+                    index < expectedTypes.Length ? expectedTypes[index] : null,
+                    locals,
+                    depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var arguments = new TypedExpr[expectedTypes.Length];
+        for (var index = 0; index < expectedTypes.Length; index++)
+            arguments[index] = CheckExpr(expression.Arguments[index], expectedTypes[index], locals, depth);
+
+        return expression.Member switch
+        {
+            "set" => new TypedMapSetExpr(receiver.Type, receiver, arguments[0], arguments[1], expression.At),
+            "get" => new TypedMapGetExpr(LangType.Option(receiver.Type.Arguments[1]), receiver, arguments[0], expression.At),
+            "keys" => new TypedMapKeysExpr(receiver, expression.At),
+            _ => throw new InvalidOperationException("Unknown map member")
+        };
     }
 
     private TypedExpr CheckConfigCapabilityIntrinsic(
@@ -4953,7 +5146,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return previous == actual;
         }
 
-        if (formal.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Result)
+        if (formal.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Map or LangTypeKind.Result)
         {
             if (formal.Kind != actual.Kind || formal.Arguments.Count != actual.Arguments.Count)
                 return false;
@@ -4973,6 +5166,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return LangType.Option(SubstituteType(type.Arguments[0], bindings));
         if (type.Kind == LangTypeKind.List)
             return LangType.List(SubstituteType(type.Arguments[0], bindings));
+        if (type.Kind == LangTypeKind.Map)
+            return LangType.Map(
+                SubstituteType(type.Arguments[0], bindings),
+                SubstituteType(type.Arguments[1], bindings));
         if (type.Kind == LangTypeKind.Result)
             return LangType.Result(
                 SubstituteType(type.Arguments[0], bindings),
@@ -5083,6 +5280,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 }
                 var listItemType = ResolveType(syntax.Args[0], depth + 1, typeParameters);
                 return LangType.List(listItemType);
+            case "Map":
+                if (syntax.Args.Count != 2)
+                {
+                    Add("E_TYPE_MISMATCH", $"Type 'Map' expects 2 type arguments, got {syntax.Args.Count}", syntax.At);
+                    return LangType.Error;
+                }
+
+                var mapKeyType = ResolveType(syntax.Args[0], depth + 1, typeParameters);
+                var mapValueType = ResolveType(syntax.Args[1], depth + 1, typeParameters);
+                if (mapKeyType.IsError || mapValueType.IsError)
+                    return LangType.Error;
+                if (!mapKeyType.IsText)
+                {
+                    Add("E_TYPE_MISMATCH", $"Map keys must have type Text, found '{mapKeyType.DisplayName}'", syntax.Args[0].At);
+                    return LangType.Error;
+                }
+                return LangType.Map(mapKeyType, mapValueType);
             case "Result":
                 if (syntax.Args.Count != 2)
                 {

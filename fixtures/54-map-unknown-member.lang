@@ -1,0 +1,6 @@
+module fixture::map_unknown_member;
+
+pub fn invalid(values: Map<Text, i32>) -> bool effects {} {
+    let contains: bool = values.contains("key");
+    return values.is_empty;
+}

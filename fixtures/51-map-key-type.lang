@@ -1,0 +1,5 @@
+module fixture::map_key_type;
+
+pub fn invalid(values: Map<i32, Text>) -> i32 effects {} {
+    return values.length;
+}

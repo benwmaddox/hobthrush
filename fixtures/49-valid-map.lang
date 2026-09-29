@@ -1,0 +1,28 @@
+module fixture::maps;
+
+pub struct Map { value: i32 }
+
+fn lookup<T>(values: Map<Text, T>, key: Text) -> Option<T> effects {} {
+    return values.get(key);
+}
+
+fn store<T>(values: Map<Text, T>, key: Text, value: T) -> Map<Text, T> effects {} {
+    return values.set(key, value);
+}
+
+fn contextualLocal() -> i32 effects {} {
+    let Map: Map<Text, i32> = Map.empty();
+    return Map.length;
+}
+
+pub fn valid(values: Map<Text, i32>) -> bool effects {} {
+    let updated: Map<Text, i32> = self::fixture::maps::store(values, "key", 5);
+    return match self::fixture::maps::lookup(updated, "key") {
+        Some(value) => value == 5,
+        None => false,
+    };
+}
+
+pub fn qualifiedNameCollision() -> self::fixture::maps::Map effects {} {
+    return self::fixture::maps::Map { value: 7 };
+}

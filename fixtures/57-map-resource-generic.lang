@@ -1,0 +1,10 @@
+module fixture::map_resource_generic;
+
+fn singleton<T>(value: T) -> Map<Text, T> effects {} {
+    let empty: Map<Text, T> = Map.empty();
+    return empty.set("resource", value);
+}
+
+pub fn generic(fs: FsRead) -> i32 effects {} {
+    return self::fixture::map_resource_generic::singleton(fs).length;
+}
