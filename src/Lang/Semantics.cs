@@ -334,6 +334,7 @@ internal enum BuiltinIntrinsic
     FsReadText,
     FsReadTextAsync,
     FsWriteText,
+    FsWriteTextAsync,
     HttpGetTextAsync,
     ConfigGetText,
     ConfigGetSecretText,
@@ -2669,7 +2670,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var diagnosticsBeforeOperand = diagnostics.Count;
         var value = CheckExpr(expression.Value, null, locals, depth, isAwaitOperand: true);
         if (value is TypedCallExpr { IsAsync: true } or
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync })
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.FsWriteTextAsync or
+                BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync })
             return new TypedAwaitExpr(value.Type, value, expression.At);
 
         if (value.Type.IsError)
@@ -3312,6 +3314,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "fs" && expression.Member == "write_text_async")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'fs.write_text_async' requires a local or parameter of type 'FsWrite'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "db" && IsDatabaseMember(expression.Member))
             {
                 foreach (var argument in expression.Arguments)
@@ -3586,6 +3596,54 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 expression.At);
         }
 
+        if (receiver.Type.IsFsWrite && expression.Member == "write_text_async")
+        {
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 2;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text_async' expects 2 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+
+            var arguments = new List<TypedExpr> { receiver };
+            var hasSupportedPathType = false;
+            if (expression.Arguments.Count > 0)
+            {
+                var path = CheckExpr(expression.Arguments[0], null, locals, depth);
+                hasSupportedPathType = path.Type.IsText || path.Type.IsFilePath;
+                if (!path.Type.IsError && !hasSupportedPathType)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text_async' expects a Text or FilePath path, found '{path.Type.DisplayName}'", expression.Arguments[0].At);
+                arguments.Add(path);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+
+            var hasTextValue = false;
+            if (expression.Arguments.Count > 1)
+            {
+                var value = CheckExpr(expression.Arguments[1], null, locals, depth);
+                hasTextValue = value.Type.IsText;
+                if (!value.Type.IsError && !hasTextValue)
+                    Add("E_TYPE_MISMATCH", $"Intrinsic 'fs.write_text_async' expects a Text value, found '{value.Type.DisplayName}'", expression.Arguments[1].At);
+                arguments.Add(value);
+            }
+            else
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+
+            for (var i = 2; i < expression.Arguments.Count; i++)
+                _ = CheckExpr(expression.Arguments[i], null, locals, depth);
+
+            var resultType = LangType.Result(LangType.Bool, LangType.FsError);
+            var callIsValid = hasCorrectArity && hasSupportedPathType && hasTextValue && diagnostics.Count == diagnosticsBeforeCall;
+            if (!isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'fs.write_text_async' must be called with 'await'", expression.At);
+            if (callIsValid)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("fs.write", "fs.write_text_async", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                resultType,
+                BuiltinIntrinsic.FsWriteTextAsync,
+                ReadOnly(arguments),
+                expression.At);
+        }
+
         if ((receiver.Type.IsDbRead && expression.Member == "query_one") ||
             (receiver.Type.IsDbWrite && expression.Member == "execute"))
         {
@@ -3604,7 +3662,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        if (expression.Member is "read_text" or "read_text_async")
+        if (expression.Member is "read_text" or "read_text_async" or "write_text_async")
         {
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);

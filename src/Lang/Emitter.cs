@@ -407,7 +407,7 @@ internal static class Emitter
                 if (UsesDatabase)
                     _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
-            if (UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText)
+            if (UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText || UsesFsWriteTextAsync)
             {
                 if (!webHost) _source.AppendLine("using System.IO;");
                 _source.AppendLine("using System.Security;");
@@ -446,6 +446,7 @@ internal static class Emitter
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesFsReadTextAsync) EmitFsReadTextAsyncHelper();
             if (UsesFsWriteText) EmitFsWriteTextHelper();
+            if (UsesFsWriteTextAsync) EmitFsWriteTextAsyncHelper();
             if (UsesHttpGetTextAsync) EmitHttpGetTextAsyncHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesListGet) EmitListGetHelper();
@@ -680,7 +681,9 @@ internal static class Emitter
         {
             _source.AppendLine("    public sealed class FsWrite");
             _source.AppendLine("    {");
-            _source.AppendLine("        internal FsWrite() { }");
+            _source.AppendLine("        internal FsWrite() : this(System.Threading.CancellationToken.None) { }");
+            _source.AppendLine("        internal FsWrite(System.Threading.CancellationToken cancellationToken) => CancellationToken = cancellationToken;");
+            _source.AppendLine("        internal System.Threading.CancellationToken CancellationToken { get; }");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1288,7 +1291,8 @@ internal static class Emitter
             TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
             TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
             TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
-            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.FsWriteTextAsync or
+                BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedAwaitExpr awaited => EmitAwait(awaited),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
@@ -1354,6 +1358,8 @@ internal static class Emitter
             TypedCallExpr { IsAsync: true } call => "await " + EmitCall(call),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync } intrinsic =>
                 "await " + EmitIntrinsicCall(intrinsic),
+            TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsWriteTextAsync } intrinsic =>
+                "await " + EmitIntrinsicCall(intrinsic),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.HttpGetTextAsync } intrinsic =>
                 "await " + EmitIntrinsicCall(intrinsic),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.ProcessRunTextAsync } intrinsic =>
@@ -1383,6 +1389,10 @@ internal static class Emitter
                 EmitFsWriteText(expression),
             BuiltinIntrinsic.FsWriteText =>
                 throw new InvalidOperationException("FsWrite.write_text requires a receiver, path, and value"),
+            BuiltinIntrinsic.FsWriteTextAsync when expression.Arguments.Count == 3 =>
+                EmitFsWriteTextAsync(expression),
+            BuiltinIntrinsic.FsWriteTextAsync =>
+                throw new InvalidOperationException("FsWrite.write_text_async requires a receiver, path, and value"),
             BuiltinIntrinsic.ConfigGetText => EmitConfigRead(expression, ConfigFieldKind.Text),
             BuiltinIntrinsic.ConfigGetSecretText => EmitConfigRead(expression, ConfigFieldKind.SecretText),
             BuiltinIntrinsic.SecretsRevealText when expression.Arguments.Count == 2 =>
@@ -1461,6 +1471,16 @@ internal static class Emitter
                 ? "(" + EmitExpr(path) + ").Value"
                 : EmitExpr(path);
             return "WriteText(" + receiver + ", " + emittedPath + ", " + EmitExpr(expression.Arguments[2]) + ")";
+        }
+
+        private string EmitFsWriteTextAsync(TypedIntrinsicCallExpr expression)
+        {
+            var receiver = EmitExpr(expression.Arguments[0]);
+            var path = expression.Arguments[1];
+            var emittedPath = path.Type.IsFilePath
+                ? "(" + EmitExpr(path) + ").Value"
+                : EmitExpr(path);
+            return "WriteTextAsync(" + receiver + ", " + emittedPath + ", " + EmitExpr(expression.Arguments[2]) + ")";
         }
 
         private string EmitHttpGetTextAsync(TypedIntrinsicCallExpr expression) =>
@@ -1768,6 +1788,96 @@ internal static class Emitter
             _source.AppendLine("                stream.Write(bytes, 0, bytes.Length);");
             _source.AppendLine("                stream.Flush(true);");
             _source.AppendLine("            }");
+            _source.AppendLine("            File.Move(temporaryPath, fullPath, overwrite: true);");
+            _source.AppendLine("            temporaryPath = null;");
+            _source.AppendLine("            return new Result<bool, FsError>.Ok(true);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (EncoderFallbackException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidText());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (FileNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (DirectoryNotFoundException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.NotFound());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (SecurityException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (UnauthorizedAccessException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.PermissionDenied());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (ArgumentException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (NotSupportedException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (PathTooLongException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (IOException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return new Result<bool, FsError>.Err(new FsError.Io());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        finally");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (temporaryPath is not null)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                try { File.Delete(temporaryPath); }");
+            _source.AppendLine("                catch (IOException) { }");
+            _source.AppendLine("                catch (UnauthorizedAccessException) { }");
+            _source.AppendLine("                catch (SecurityException) { }");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitFsWriteTextAsyncHelper()
+        {
+            _source.AppendLine("    // Paths use the host OS filesystem resolution rules. FsWrite does not confine writes to a package root or provide a filesystem sandbox.");
+            _source.AppendLine("    // The temporary file is staged beside the destination and renamed over its directory entry where the host OS supports replacement.");
+            _source.AppendLine("    private static async global::System.Threading.Tasks.Task<Result<bool, FsError>> WriteTextAsync(FsWrite receiver, string path, string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        ArgumentNullException.ThrowIfNull(receiver);");
+            _source.AppendLine("        string? temporaryPath = null;");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            if (path.IndexOf('\\0') >= 0)");
+            _source.AppendLine("                return new Result<bool, FsError>.Err(new FsError.InvalidPath());");
+            _source.AppendLine("            var fullPath = Path.GetFullPath(path);");
+            _source.AppendLine("            var directory = Path.GetDirectoryName(fullPath) ?? throw new ArgumentException(\"Destination has no parent directory\", nameof(path));");
+            _source.AppendLine("            var fileName = Path.GetFileName(fullPath);");
+            _source.AppendLine("            var temporaryName = \".\" + (fileName.Length == 0 ? \"lang\" : fileName) + \".\" + Guid.NewGuid().ToString(\"N\") + \".tmp\";");
+            _source.AppendLine("            temporaryPath = Path.Combine(directory, temporaryName);");
+            _source.AppendLine("            await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))");
+            _source.AppendLine("            {");
+            _source.AppendLine("                await global::System.Threading.Tasks.Task.Yield();");
+            _source.AppendLine("                receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                var bytes = new UTF8Encoding(false, true).GetBytes(value);");
+            _source.AppendLine("                receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                const int chunkSize = 65536;");
+            _source.AppendLine("                for (var offset = 0; offset < bytes.Length; offset += chunkSize)");
+            _source.AppendLine("                {");
+            _source.AppendLine("                    receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                    var count = Math.Min(chunkSize, bytes.Length - offset);");
+            _source.AppendLine("                    await stream.WriteAsync(bytes.AsMemory(offset, count), receiver.CancellationToken);");
+            _source.AppendLine("                }");
+            _source.AppendLine("                await stream.FlushAsync(receiver.CancellationToken);");
+            _source.AppendLine("                receiver.CancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("                stream.Flush(flushToDisk: true);");
+            _source.AppendLine("            }");
+            _source.AppendLine("            receiver.CancellationToken.ThrowIfCancellationRequested();");
             _source.AppendLine("            File.Move(temporaryPath, fullPath, overwrite: true);");
             _source.AppendLine("            temporaryPath = null;");
             _source.AppendLine("            return new Result<bool, FsError>.Ok(true);");
@@ -2606,7 +2716,9 @@ internal static class Emitter
 
                 yield return capability.Kind switch
                 {
-                    CheckedCapabilityKind.FsWrite => "new FsWrite()",
+                    CheckedCapabilityKind.FsWrite => route.HandlerIsAsync
+                        ? "new FsWrite(context.RequestAborted)"
+                        : "new FsWrite()",
                     CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
                     CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
                     CheckedCapabilityKind.HttpClient => "new HttpClientCapability(" + HttpOriginLiteral + ", context.RequestAborted)",
@@ -2996,7 +3108,9 @@ internal static class Emitter
                     CheckedCapabilityKind.FsRead => command.HandlerIsAsync
                         ? ", new FsRead(cancellationToken)"
                         : ", new FsRead(System.Threading.CancellationToken.None)",
-                    CheckedCapabilityKind.FsWrite => ", new FsWrite()",
+                    CheckedCapabilityKind.FsWrite => command.HandlerIsAsync
+                        ? ", new FsWrite(cancellationToken)"
+                        : ", new FsWrite()",
                     CheckedCapabilityKind.HttpClient => command.HandlerIsAsync
                         ? ", new HttpClientCapability(" + HttpOriginLiteral + ", cancellationToken)"
                         : ", new HttpClientCapability(" + HttpOriginLiteral + ", System.Threading.CancellationToken.None)",
@@ -3322,7 +3436,8 @@ internal static class Emitter
             program.Commands.Any(command => command.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite)) ||
             program.Routes.Any(route => route.Capabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite));
 
-        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText;
+        private bool NeedsFsErrorType => UsesTypeKind(LangTypeKind.FsError) || UsesFsReadText || UsesFsReadTextAsync ||
+            UsesFsWriteText || UsesFsWriteTextAsync;
 
         private bool NeedsDbReadType => UsesTypeKind(LangTypeKind.DbRead) || UsesDatabase;
 
@@ -3385,6 +3500,13 @@ internal static class Emitter
             .SelectMany(EnumerateExpressions)
             .OfType<TypedIntrinsicCallExpr>()
             .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsReadTextAsync);
+
+        private bool UsesFsWriteTextAsync => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntrinsicCallExpr>()
+            .Any(intrinsic => intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteTextAsync);
 
         private bool UsesHttpGetTextAsync => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))

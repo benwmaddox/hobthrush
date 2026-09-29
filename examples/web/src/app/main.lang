@@ -6,6 +6,7 @@ struct Greeting { message: Text, profile: self::app::main::Profile }
 struct GreetingRow { id: i32, name: Text, city: Text }
 struct GreetingLookupParameters { id: i32 }
 struct GreetingWriteParameters { id: i32, name: Text, city: Text }
+struct NoteWriteRequest { content: Text }
 
 union HomeReply { Page(Html) }
 union LookupReply { Found(self::app::main::Greeting), Missing, StorageFailure(Text) }
@@ -13,6 +14,7 @@ union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFa
 union HealthReply { Healthy }
 union FaultReply { Completed }
 union ResetReply { Reset }
+union NoteWriteReply { Saved, Failed(Text) }
 
 fn load_greeting(db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
     let result: Result<Option<self::app::main::GreetingRow>, DbError> = db.query_one(
@@ -112,6 +114,13 @@ fn reset() -> self::app::main::ResetReply effects {} {
     return self::app::main::ResetReply.Reset;
 }
 
+async fn save_note(request: self::app::main::NoteWriteRequest, writer: FsWrite) -> self::app::main::NoteWriteReply effects { fs.write } {
+    return match await writer.write_text_async("data/async-note.txt", request.content) {
+        Ok(written) => self::app::main::NoteWriteReply.Saved,
+        Err(error) => self::app::main::NoteWriteReply.Failed("Could not save the note")
+    };
+}
+
 route GET "/" {
     handler: self::app::main::home;
     response Page: 200 html;
@@ -130,6 +139,13 @@ route POST "/api/greeting" {
     response Created: 201 json self::app::main::Greeting;
     response Invalid: 400 json Text;
     response StorageFailure: 500 json Text;
+}
+
+route POST "/api/note" {
+    body: self::app::main::NoteWriteRequest;
+    handler: self::app::main::save_note;
+    response Saved: 204;
+    response Failed: 500 json Text;
 }
 
 route GET "/health" {

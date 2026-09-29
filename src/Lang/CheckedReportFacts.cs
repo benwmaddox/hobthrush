@@ -37,6 +37,7 @@ internal static class CheckedReportFacts
                 "FsRead.read_text" => "fs.read",
                 "FsRead.read_text_async" => "fs.read",
                 "FsWrite.write_text" => "fs.write",
+                "FsWrite.write_text_async" => "fs.write",
                 "DbRead.query_one" => "db.read",
                 "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => "db.write",
                 "HttpClient.get_text_async" => "net.client",
@@ -142,6 +143,8 @@ internal static class CheckedReportFacts
                         operationNames.Add("FsRead.read_text_async");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteText)
                         operationNames.Add("FsWrite.write_text");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.FsWriteTextAsync)
+                        operationNames.Add("FsWrite.write_text_async");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.HttpGetTextAsync)
                         operationNames.Add("HttpClient.get_text_async");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.ProcessRunTextAsync)
