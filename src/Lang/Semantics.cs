@@ -223,6 +223,15 @@ internal sealed record CheckedCommand(
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
+internal enum CheckedRouteBindingKind { Path, Query }
+internal sealed record CheckedRouteBinding(
+    CheckedRouteBindingKind Kind,
+    string WireName,
+    string ParameterName,
+    LangType Type,
+    bool IsOptional,
+    int HandlerParameterIndex,
+    Token At);
 internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, ProcessRunner }
 internal sealed record CheckedCapabilityParameter(
     CheckedCapabilityKind Kind,
@@ -258,6 +267,7 @@ internal sealed class CheckedRoute
         string path,
         LangType? bodyType,
         IEnumerable<CheckedStructField> bodySchema,
+        IEnumerable<CheckedRouteBinding> bindings,
         IEnumerable<CheckedCapabilityParameter> capabilities,
         int handlerFunctionId,
         string handlerReference,
@@ -276,6 +286,7 @@ internal sealed class CheckedRoute
         Path = path;
         BodyType = bodyType;
         BodySchema = Array.AsReadOnly(bodySchema.ToArray());
+        Bindings = Array.AsReadOnly(bindings.ToArray());
         Capabilities = Array.AsReadOnly(capabilities.ToArray());
         HandlerFunctionId = handlerFunctionId;
         HandlerReference = handlerReference;
@@ -295,6 +306,7 @@ internal sealed class CheckedRoute
     public string Path { get; }
     public LangType? BodyType { get; }
     public IReadOnlyList<CheckedStructField> BodySchema { get; }
+    public IReadOnlyList<CheckedRouteBinding> Bindings { get; }
     public IReadOnlyList<CheckedCapabilityParameter> Capabilities { get; }
     public int HandlerFunctionId { get; }
     public string HandlerReference { get; }
@@ -635,6 +647,13 @@ internal static class Compiler
 
 internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 {
+    private sealed record RouteBindingSpec(
+        CheckedRouteBindingKind Kind,
+        string WireName,
+        LangType Type,
+        bool IsOptional,
+        Token At);
+
     private const int MaximumSemanticDepth = 192;
     private const string Sha256TextBridgeId = "lang.sha256-text.v1";
     private const string Sha256TextHashUtf8OperationId = "sha256.text.hash_utf8";
@@ -1247,12 +1266,35 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return;
         }
 
-        var routeKeys = new HashSet<(string Method, string Path)>(RouteKeyComparer.Instance);
+        var declaredRoutes = new List<RouteDecl>();
         foreach (var route in module.Program.Routes)
         {
             var diagnosticCount = diagnostics.Count;
-            if (!routeKeys.Add((route.Method, route.Path)))
-                Add("E_ROUTE_DECL", $"Route '{route.Method} {route.Path}' is already declared", route.At);
+            foreach (var previous in declaredRoutes)
+            {
+                if (StringComparer.Ordinal.Equals(previous.Method, route.Method))
+                {
+                    if (RoutePathsOverlap(previous, route) &&
+                        RouteLiteralCount(previous) == RouteLiteralCount(route))
+                    {
+                        Add(
+                            "E_ROUTE_DECL",
+                            $"Route '{route.Method} {route.Path}' overlaps with '{previous.Path}' at equal specificity",
+                            route.At);
+                        break;
+                    }
+                }
+                else if (!StringComparer.Ordinal.Equals(previous.Path, route.Path) &&
+                    RouteTemplateShapesEquivalent(previous, route))
+                {
+                    Add(
+                        "E_ROUTE_DECL",
+                        $"Route '{route.Method} {route.Path}' has an equivalent template shape to '{previous.Method} {previous.Path}'; cross-method routes must use identical path spelling",
+                        route.At);
+                    break;
+                }
+            }
+            declaredRoutes.Add(route);
 
             var checkedRoute = CheckRoute(route);
             if (checkedRoute is not null && diagnostics.Count == diagnosticCount)
@@ -1260,10 +1302,44 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
     }
 
+    private static bool RoutePathsOverlap(RouteDecl left, RouteDecl right)
+    {
+        if (left.PathSegments.Count != right.PathSegments.Count) return false;
+        for (var index = 0; index < left.PathSegments.Count; index++)
+        {
+            var leftSegment = left.PathSegments[index];
+            var rightSegment = right.PathSegments[index];
+            if (leftSegment.Placeholder is not null || rightSegment.Placeholder is not null) continue;
+            if (!StringComparer.OrdinalIgnoreCase.Equals(leftSegment.Literal, rightSegment.Literal)) return false;
+        }
+        return true;
+    }
+
+    private static int RouteLiteralCount(RouteDecl route) =>
+        route.PathSegments.Count(segment => segment.Placeholder is null);
+
+    private static bool RouteTemplateShapesEquivalent(RouteDecl left, RouteDecl right)
+    {
+        if (left.PathSegments.Count != right.PathSegments.Count) return false;
+        for (var index = 0; index < left.PathSegments.Count; index++)
+        {
+            var leftSegment = left.PathSegments[index];
+            var rightSegment = right.PathSegments[index];
+            var leftIsPlaceholder = leftSegment.Placeholder is not null;
+            var rightIsPlaceholder = rightSegment.Placeholder is not null;
+            if (leftIsPlaceholder != rightIsPlaceholder) return false;
+            if (leftIsPlaceholder) continue;
+            if (!StringComparer.OrdinalIgnoreCase.Equals(leftSegment.Literal, rightSegment.Literal)) return false;
+        }
+        return true;
+    }
+
     private CheckedRoute? CheckRoute(RouteDecl route)
     {
         var routeDiagnosticCount = diagnostics.Count;
         var bodies = route.Items.OfType<RouteBodySyntax>().ToArray();
+        var bindingSpecs = new List<RouteBindingSpec>();
+        var bindingDeclarationsValid = CheckRouteBindingDeclarations(route, bindingSpecs);
         var handlers = route.Items.OfType<RouteHandlerSyntax>().ToArray();
         var responses = route.Items.OfType<RouteResponseSyntax>().ToArray();
 
@@ -1276,8 +1352,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            if (responseStarted && item is RouteBodySyntax or RouteHandlerSyntax)
-                Add("E_ROUTE_DECL", "Route body and handler items must appear before response mappings", item.At);
+            if (responseStarted && item is RouteBodySyntax or RouteHandlerSyntax or RouteBindingSyntax)
+                Add("E_ROUTE_DECL", "Route body, binding, and handler items must appear before response mappings", item.At);
         }
 
         for (var i = 1; i < bodies.Length; i++)
@@ -1334,8 +1410,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         FunctionSymbol? handler = null;
         UnionSymbol? replyUnion = null;
+        var routeBindings = new List<CheckedRouteBinding>();
         var routeCapabilities = new List<CheckedCapabilityParameter>();
-        var handlerValid = handlers.Length == 1;
+        var handlerValid = handlers.Length == 1 && bindingDeclarationsValid;
         if (handlers.Length == 1)
         {
             handler = ResolveFunctionReference(handlers[0].Reference);
@@ -1345,26 +1422,57 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
             else
             {
-                var validParameters = route.Method switch
+                var firstCapabilityParameter = route.Method == "POST" ? 1 : 0;
+                var validParameters = true;
+                var bindingParameterErrorReported = false;
+                if (route.Method == "POST" && bodyStructure is null)
                 {
-                    "GET" => CheckRouteCapabilityParameters(handler, 0, routeCapabilities),
-                    "POST" when bodyStructure is not null =>
-                        handler.Parameters.Count > 0 &&
-                        handler.Parameters[0].Type == bodyStructure.Type &&
-                        CheckRouteCapabilityParameters(handler, 1, routeCapabilities),
                     // The missing or invalid POST body already has a route declaration diagnostic.
-                    "POST" => true,
-                    _ => false
-                };
+                    handlerValid = false;
+                }
+                else if (!bindingDeclarationsValid)
+                {
+                    // Binding declaration diagnostics are sufficient; do not cascade into handler layout checks.
+                    handlerValid = false;
+                }
+                else
+                {
+                    var bodyParameterCount = route.Method == "POST" ? 1 : 0;
+                    var bodyParameterValid = bodyParameterCount == 0 ||
+                        (handler.Parameters.Count > 0 && handler.Parameters[0].Type == bodyStructure!.Type);
+                    if (!bodyParameterValid)
+                    {
+                        validParameters = false;
+                    }
+                    else
+                    {
+                        var bindingsValid = CheckRouteBindingParameters(
+                            handler,
+                            bindingSpecs,
+                            bodyParameterCount,
+                            handlers[0].Reference.At,
+                            routeBindings,
+                            out bindingParameterErrorReported);
+                        validParameters = bindingsValid;
+                        if (bindingsValid)
+                        {
+                            firstCapabilityParameter = bodyParameterCount + bindingSpecs.Count;
+                            validParameters = CheckRouteCapabilityParameters(
+                                handler,
+                                firstCapabilityParameter,
+                                routeCapabilities);
+                        }
+                    }
+                }
                 var validReturn = handler.ReturnType.IsError || handler.ReturnType.Kind == LangTypeKind.Union;
                 var validGenericity = handler.TypeParameters.Count == 0;
 
                 if (!validParameters || !validReturn || !validGenericity)
                 {
-                    var firstCapabilityParameter = route.Method == "POST" ? 1 : 0;
-                    var hasFsWrite = handler.Parameters.Any(parameter => parameter.Type.IsFsWrite);
-                    var hasHttpClient = handler.Parameters.Any(parameter => parameter.Type.IsHttpClient);
-                    var capabilityOrder = HasConfigCapability(handler, firstCapabilityParameter)
+                    var capabilityScanStart = route.Method == "POST" ? 1 : 0;
+                    var hasFsWrite = handler.Parameters.Skip(capabilityScanStart).Any(parameter => parameter.Type.IsFsWrite);
+                    var hasHttpClient = handler.Parameters.Skip(capabilityScanStart).Any(parameter => parameter.Type.IsHttpClient);
+                    var capabilityOrder = HasConfigCapability(handler, capabilityScanStart)
                         ? "FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, and Logger"
                         : hasHttpClient
                             ? hasFsWrite ? "FsWrite, DbRead, DbWrite, and HttpClient" : "DbRead, DbWrite, and HttpClient"
@@ -1372,7 +1480,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     var expectation = route.Method == "GET"
                         ? $"a non-generic function taking optional {capabilityOrder} capabilities in that order, and returning a declared union"
                         : $"a non-generic function taking the route body type followed by optional {capabilityOrder} capabilities in that order, and returning a declared union";
-                    Add("E_ROUTE_HANDLER", $"Route handler must be {expectation}", handlers[0].Reference.At);
+                    if (!bindingParameterErrorReported)
+                        Add("E_ROUTE_HANDLER", $"Route handler must be {expectation}", handlers[0].Reference.At);
                     handlerValid = false;
                 }
 
@@ -1428,6 +1537,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             route.Path,
             bodyStructure?.Type,
             bodyStructure?.Fields ?? [],
+            routeBindings,
             routeCapabilities,
             handler.Id,
             FormatReference(handlers[0].Reference),
@@ -1440,6 +1550,205 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             route.PathAt,
             bodies.FirstOrDefault()?.At,
             bodies.FirstOrDefault()?.Type.At);
+    }
+
+    private bool CheckRouteBindingDeclarations(RouteDecl route, List<RouteBindingSpec> bindings)
+    {
+        var valid = true;
+        var declarationsByName = new Dictionary<string, RouteBindingSyntax>(StringComparer.OrdinalIgnoreCase);
+        var uniqueDeclarations = new List<RouteBindingSyntax>();
+        var pathDeclarationsByName = new Dictionary<string, RouteBindingSyntax>(StringComparer.OrdinalIgnoreCase);
+        var declarationsWithSupportedTypes = new Dictionary<RouteBindingSyntax, LangType>(ReferenceEqualityComparer.Instance);
+        var conflictedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var declaration in route.Items.OfType<RouteBindingSyntax>())
+        {
+            if (declarationsByName.TryGetValue(declaration.NameAt.Text, out var previous))
+            {
+                var conflict = previous.Kind != declaration.Kind;
+                Add(
+                    "E_ROUTE_BINDING",
+                    conflict
+                        ? $"Route path and query bindings cannot both declare '{declaration.NameAt.Text}'"
+                        : $"Route {declaration.Kind.ToString().ToLowerInvariant()} binding '{declaration.NameAt.Text}' is declared more than once",
+                    declaration.NameAt);
+                conflictedNames.Add(declaration.NameAt.Text);
+                valid = false;
+                continue;
+            }
+
+            declarationsByName.Add(declaration.NameAt.Text, declaration);
+            uniqueDeclarations.Add(declaration);
+            if (declaration.Kind == RouteBindingSyntaxKind.Path)
+                pathDeclarationsByName.Add(declaration.NameAt.Text, declaration);
+
+            var type = ResolveRouteBindingType(declaration);
+            if (type is null)
+            {
+                valid = false;
+                continue;
+            }
+
+            declarationsWithSupportedTypes.Add(declaration, type);
+        }
+
+        var placeholderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var segment in route.PathSegments)
+        {
+            if (segment.Placeholder is not { } placeholder) continue;
+            if (!placeholderNames.Add(placeholder))
+            {
+                Add("E_ROUTE_BINDING", $"Route path placeholder '{placeholder}' is repeated", segment.At);
+                valid = false;
+                continue;
+            }
+
+            if (conflictedNames.Contains(placeholder)) continue;
+            if (!pathDeclarationsByName.TryGetValue(placeholder, out var declaration))
+            {
+                Add("E_ROUTE_BINDING", $"Route path placeholder '{placeholder}' requires exactly one path declaration", segment.At);
+                valid = false;
+                continue;
+            }
+
+            if (!StringComparer.Ordinal.Equals(declaration.NameAt.Text, placeholder))
+            {
+                Add(
+                    "E_ROUTE_BINDING",
+                    $"Route path placeholder '{placeholder}' must match its path declaration spelling exactly",
+                    declaration.NameAt);
+                valid = false;
+                continue;
+            }
+
+            if (declarationsWithSupportedTypes.TryGetValue(declaration, out var type))
+            {
+                bindings.Add(new RouteBindingSpec(
+                    CheckedRouteBindingKind.Path,
+                    placeholder,
+                    type,
+                    IsOptional: false,
+                    declaration.NameAt));
+            }
+        }
+
+        foreach (var declaration in uniqueDeclarations)
+        {
+            if (declaration.Kind == RouteBindingSyntaxKind.Path &&
+                !conflictedNames.Contains(declaration.NameAt.Text) &&
+                !placeholderNames.Contains(declaration.NameAt.Text))
+            {
+                Add(
+                    "E_ROUTE_BINDING",
+                    $"Path binding '{declaration.NameAt.Text}' is not used by the route template",
+                    declaration.NameAt);
+                valid = false;
+            }
+        }
+
+        foreach (var declaration in uniqueDeclarations)
+        {
+            if (declaration.Kind != RouteBindingSyntaxKind.Query ||
+                !declarationsWithSupportedTypes.TryGetValue(declaration, out var type))
+                continue;
+
+            bindings.Add(new RouteBindingSpec(
+                CheckedRouteBindingKind.Query,
+                declaration.NameAt.Text,
+                type,
+                IsOptional: type.Kind == LangTypeKind.Option,
+                declaration.NameAt));
+        }
+
+        return valid;
+    }
+
+    private LangType? ResolveRouteBindingType(RouteBindingSyntax binding)
+    {
+        if (TryResolveRouteScalarType(binding.Type, out var scalarType))
+            return scalarType;
+
+        if (binding.Kind == RouteBindingSyntaxKind.Query &&
+            IsUnqualifiedTypeNamed(binding.Type, "Option") &&
+            binding.Type.Args.Count == 1 &&
+            TryResolveRouteScalarType(binding.Type.Args[0], out scalarType))
+            return LangType.Option(scalarType);
+
+        Add(
+            "E_ROUTE_BINDING",
+            binding.Kind == RouteBindingSyntaxKind.Path
+                ? "Path bindings support only Text and i32"
+                : "Query bindings support only Text, i32, Option<Text>, and Option<i32>",
+            binding.Type.At);
+        return null;
+    }
+
+    private static bool TryResolveRouteScalarType(TypeSyntax syntax, out LangType type)
+    {
+        type = LangType.Error;
+        if (!IsUnqualifiedTypeNamed(syntax, syntax.Reference.Declaration) || syntax.Args.Count != 0)
+            return false;
+
+        type = syntax.Reference.Declaration switch
+        {
+            "Text" => LangType.Text,
+            "i32" => LangType.I32,
+            _ => LangType.Error
+        };
+        return !type.IsError;
+    }
+
+    private static bool IsUnqualifiedTypeNamed(TypeSyntax syntax, string name) =>
+        !syntax.Reference.IsQualified &&
+        syntax.Reference.Module.Count == 0 &&
+        StringComparer.Ordinal.Equals(syntax.Reference.Declaration, name);
+
+    private bool CheckRouteBindingParameters(
+        FunctionSymbol handler,
+        IReadOnlyList<RouteBindingSpec> bindingSpecs,
+        int firstParameterIndex,
+        Token handlerAt,
+        List<CheckedRouteBinding> checkedBindings,
+        out bool reportedError)
+    {
+        var valid = true;
+        reportedError = false;
+        for (var bindingIndex = 0; bindingIndex < bindingSpecs.Count; bindingIndex++)
+        {
+            var binding = bindingSpecs[bindingIndex];
+            var handlerParameterIndex = firstParameterIndex + bindingIndex;
+            if (handlerParameterIndex >= handler.Parameters.Count)
+            {
+                Add(
+                    "E_ROUTE_HANDLER",
+                    $"Route handler is missing a parameter for {binding.Kind.ToString().ToLowerInvariant()} binding '{binding.WireName}' of type '{binding.Type.DisplayName}'",
+                    handlerAt);
+                reportedError = true;
+                return false;
+            }
+
+            var parameter = handler.Parameters[handlerParameterIndex];
+            if (parameter.Type != binding.Type)
+            {
+                Add(
+                    "E_ROUTE_HANDLER",
+                    $"Route {binding.Kind.ToString().ToLowerInvariant()} binding '{binding.WireName}' expects handler parameter type '{binding.Type.DisplayName}', found '{parameter.Type.DisplayName}'",
+                    parameter.At);
+                reportedError = true;
+                valid = false;
+                continue;
+            }
+
+            checkedBindings.Add(new CheckedRouteBinding(
+                binding.Kind,
+                binding.WireName,
+                parameter.Name,
+                binding.Type,
+                binding.IsOptional,
+                handlerParameterIndex,
+                binding.At));
+        }
+        return valid;
     }
 
     private bool CheckRouteCapabilityParameters(
@@ -1693,20 +2002,6 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool IsSourceDeclaredStruct(StructSymbol structure) =>
         _modulesByIdentity[structure.ModuleIdentity].Program.Structs
             .Any(declaration => ReferenceEquals(declaration, structure.Declaration));
-
-    private sealed class RouteKeyComparer : IEqualityComparer<(string Method, string Path)>
-    {
-        public static RouteKeyComparer Instance { get; } = new();
-
-        public bool Equals((string Method, string Path) left, (string Method, string Path) right) =>
-            StringComparer.Ordinal.Equals(left.Method, right.Method) &&
-            StringComparer.OrdinalIgnoreCase.Equals(left.Path, right.Path);
-
-        public int GetHashCode((string Method, string Path) route) =>
-            HashCode.Combine(
-                StringComparer.Ordinal.GetHashCode(route.Method),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(route.Path));
-    }
 
     private void PopulateUnionVariants(ModuleSymbols module)
     {

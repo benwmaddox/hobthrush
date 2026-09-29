@@ -106,6 +106,30 @@ internal static class Emitter
     private static void WriteOpenApiOperation(Utf8JsonWriter writer, CheckedProgram program, CheckedRoute route)
     {
         writer.WriteStartObject(route.Method.ToLowerInvariant());
+        var routeBindings = route.Bindings.OrderBy(binding => binding.HandlerParameterIndex).ToArray();
+        if (routeBindings.Length != 0)
+        {
+            writer.WriteStartArray("parameters");
+            foreach (var binding in routeBindings)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name", binding.WireName);
+                writer.WriteString("in", binding.Kind switch
+                {
+                    CheckedRouteBindingKind.Path => "path",
+                    CheckedRouteBindingKind.Query => "query",
+                    _ => throw new InvalidOperationException("Unknown checked route binding kind")
+                });
+                writer.WriteBoolean("required", binding.Kind == CheckedRouteBindingKind.Path || !binding.IsOptional);
+                writer.WritePropertyName("schema");
+                var parameterType = RouteBindingValueType(binding);
+                if (parameterType.Kind is not (LangTypeKind.I32 or LangTypeKind.Text))
+                    throw new InvalidOperationException("Unsupported checked route parameter type");
+                WriteOpenApiTypeSchema(writer, parameterType);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
         if (route.BodyType is not null)
         {
             writer.WriteStartObject("requestBody");
@@ -173,6 +197,20 @@ internal static class Emitter
         }
         writer.WriteEndObject();
         writer.WriteEndObject();
+    }
+
+    private static LangType RouteBindingValueType(CheckedRouteBinding binding)
+    {
+        if (binding.IsOptional)
+        {
+            if (binding.Kind != CheckedRouteBindingKind.Query || binding.Type.Kind != LangTypeKind.Option || binding.Type.Arguments.Count != 1)
+                throw new InvalidOperationException("Invalid checked optional route binding");
+            return binding.Type.Arguments[0];
+        }
+
+        if (binding.Type.Kind == LangTypeKind.Option)
+            throw new InvalidOperationException("Required route binding has an optional type");
+        return binding.Type;
     }
 
     private static bool IsBodyForbiddenStatus(int statusCode) =>
@@ -2437,6 +2475,7 @@ internal static class Emitter
             EmitParentProcessMonitor();
             EmitStandardInputMonitor();
             EmitRequestRuntime();
+            EmitRouteBindingRuntime();
             foreach (var route in program.Routes.OrderBy(route => route.Id))
                 EmitRouteHandler(route);
             EmitJsonResponseRuntime();
@@ -2488,6 +2527,24 @@ internal static class Emitter
             _source.AppendLine("            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }");
             _source.AppendLine("            if (!cancellationToken.IsCancellationRequested) Environment.Exit(0);");
             _source.AppendLine("        });");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitRouteBindingRuntime()
+        {
+            if (!program.Routes.SelectMany(route => route.Bindings)
+                    .Any(binding => Emitter.RouteBindingValueType(binding).Kind == LangTypeKind.I32))
+                return;
+
+            _source.AppendLine("    private static int DecodeRouteI32(string value)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var digitStart = value.Length > 0 && value[0] == '-' ? 1 : 0;");
+            _source.AppendLine("        if (digitStart == value.Length) throw new BadHttpRequestException(\"Invalid route value.\");");
+            _source.AppendLine("        for (var index = digitStart; index < value.Length; index++)");
+            _source.AppendLine("            if (value[index] < '0' || value[index] > '9') throw new BadHttpRequestException(\"Invalid route value.\");");
+            _source.AppendLine("        if (!int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var result)) throw new BadHttpRequestException(\"Invalid route value.\");");
+            _source.AppendLine("        return result;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -2637,6 +2694,7 @@ internal static class Emitter
                 _source.Append("            var requestValue = DecodeJsonStruct_").Append(bodyType.StructId.ToString(CultureInfo.InvariantCulture))
                     .AppendLine("(requestJson.RootElement);");
                 var arguments = new List<string> { "requestValue" };
+                arguments.AddRange(EmitRouteBindings(route));
                 arguments.AddRange(EmitRouteCapabilities(route));
                 if (route.HandlerIsAsync) arguments.Add("context.RequestAborted");
                 _source.Append("            var reply = ");
@@ -2646,8 +2704,9 @@ internal static class Emitter
             }
             else
             {
-                var arguments = EmitRouteCapabilities(route);
-                if (route.HandlerIsAsync) arguments = arguments.Append("context.RequestAborted");
+                var arguments = EmitRouteBindings(route);
+                arguments.AddRange(EmitRouteCapabilities(route));
+                if (route.HandlerIsAsync) arguments.Add("context.RequestAborted");
                 _source.Append("            var reply = ");
                 if (route.HandlerIsAsync) _source.Append("await ");
                 _source.Append("Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
@@ -2724,6 +2783,83 @@ internal static class Emitter
             _source.AppendLine("    }");
             _source.AppendLine();
         }
+
+        private List<string> EmitRouteBindings(CheckedRoute route)
+        {
+            var arguments = new List<string>();
+            foreach (var binding in route.Bindings.OrderBy(binding => binding.HandlerParameterIndex))
+            {
+                var index = binding.HandlerParameterIndex.ToString(CultureInfo.InvariantCulture);
+                var argumentName = "routeArg_" + index;
+                var valueType = Emitter.RouteBindingValueType(binding);
+
+                if (binding.Kind == CheckedRouteBindingKind.Path)
+                {
+                    if (binding.IsOptional)
+                        throw new InvalidOperationException("Path route bindings cannot be optional");
+                    var rawName = "routeRaw_" + index;
+                    var textName = "routeText_" + index;
+                    _source.Append("            if (!context.Request.RouteValues.TryGetValue(")
+                        .Append(JsonSerializer.Serialize(binding.WireName)).Append(", out var ").Append(rawName)
+                        .Append(") || ").Append(rawName).Append(" is not string ").Append(textName)
+                        .AppendLine(") throw new BadHttpRequestException(\"Missing route value.\");");
+                    _source.Append("            var ").Append(argumentName).Append(" = ")
+                        .Append(DecodeRouteBindingValue(valueType, textName)).AppendLine(";");
+                }
+                else if (binding.Kind == CheckedRouteBindingKind.Query)
+                {
+                    var valuesName = "queryValues_" + index;
+                    var textName = "queryText_" + index;
+                    if (binding.IsOptional)
+                    {
+                        var innerType = EmitType(valueType);
+                        _source.Append("            ").Append(EmitType(binding.Type)).Append(' ').Append(argumentName).AppendLine(";");
+                        _source.Append("            if (!context.Request.Query.TryGetValue(")
+                            .Append(JsonSerializer.Serialize(binding.WireName)).Append(", out var ").Append(valuesName)
+                            .Append(") || ").Append(valuesName).AppendLine(".Count == 0)");
+                        _source.AppendLine("            {");
+                        _source.Append("                ").Append(argumentName).Append(" = new Option<").Append(innerType).AppendLine(">.None();");
+                        _source.Append("            } else if (").Append(valuesName).AppendLine(".Count != 1)");
+                        _source.AppendLine("            {");
+                        _source.AppendLine("                throw new BadHttpRequestException(\"Invalid query value.\");");
+                        _source.AppendLine("            }");
+                        _source.AppendLine("            else");
+                        _source.AppendLine("            {");
+                        _source.Append("                var ").Append(textName).Append(" = ").Append(valuesName)
+                            .AppendLine("[0] ?? throw new BadHttpRequestException(\"Invalid query value.\");");
+                        _source.Append("                ").Append(argumentName).Append(" = new Option<").Append(innerType).Append(">.Some(")
+                            .Append(DecodeRouteBindingValue(valueType, textName)).AppendLine(");");
+                        _source.AppendLine("            }");
+                    }
+                    else
+                    {
+                        _source.Append("            if (!context.Request.Query.TryGetValue(")
+                            .Append(JsonSerializer.Serialize(binding.WireName)).Append(", out var ").Append(valuesName)
+                            .Append(") || ").Append(valuesName).AppendLine(".Count != 1)");
+                        _source.AppendLine("                throw new BadHttpRequestException(\"Invalid query value.\");");
+                        _source.Append("            var ").Append(textName).Append(" = ").Append(valuesName)
+                            .AppendLine("[0] ?? throw new BadHttpRequestException(\"Invalid query value.\");");
+                        _source.Append("            var ").Append(argumentName).Append(" = ")
+                            .Append(DecodeRouteBindingValue(valueType, textName)).AppendLine(";");
+                    }
+                }
+                else
+                {
+                    throw new InvalidOperationException("Unknown checked route binding kind");
+                }
+
+                arguments.Add(argumentName);
+            }
+
+            return arguments;
+        }
+
+        private static string DecodeRouteBindingValue(LangType type, string value) => type.Kind switch
+        {
+            LangTypeKind.I32 => "DecodeRouteI32(" + value + ")",
+            LangTypeKind.Text => value,
+            _ => throw new InvalidOperationException("Unsupported checked route parameter type")
+        };
 
         private IEnumerable<string> EmitRouteCapabilities(CheckedRoute route)
         {

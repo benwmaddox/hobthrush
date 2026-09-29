@@ -8,12 +8,15 @@ database file.
 | --- | --- | --- |
 | GET | `/health` | 200, no body |
 | GET | `/api/greeting` | 200 JSON when saved; otherwise 404 |
+| GET | `/api/greeting/{id}?name=…&city=…` | 200 JSON when ID/name and optional city match; otherwise 404; 400 for missing or invalid input |
 | POST | `/api/greeting` | 201 JSON when saved; 400 when name or city is blank after trimming |
 | GET | `/` | 200 HTML showing the saved greeting or an empty-state message |
 
 Posting a new valid greeting replaces the existing one. The record is stored
 in SQLite and survives a server restart. Names and cities are trimmed before
-storage. The page uses safe HTML builders, which escape user text.
+storage. The parameterized greeting lookup reads the path ID and required
+`name` query value; the optional `city` query value filters only when present.
+The page uses safe HTML builders, which escape user text.
 
 The package requires `net.listen`, `db.read`, and `db.write`. Its compiler
 reports describe checked facts and trust claims; they do not prove adapter

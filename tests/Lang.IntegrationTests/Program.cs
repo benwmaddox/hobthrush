@@ -71,6 +71,9 @@ internal static partial class IntegrationTests
             ("await diagnostics identify invalid targets without cascades", TestAsyncDiagnostics),
             ("static GET and POST routes produce checked route IR", TestStaticRouteDeclarations),
             ("route signatures, mappings, codecs, names, and placement are checked", TestRouteContractDiagnostics),
+            ("typed route bindings preserve path, query, request-body, and capability handler order", TestRouteBindingCompiler),
+            ("route templates reject malformed, ambiguous, unsupported, and misbound inputs", TestRouteBindingDiagnostics),
+            ("typed route bindings strictly decode values through a live ASP.NET host", TestRouteBindingRuntime),
             ("opaque Html signatures build as managed libraries", TestHtmlManagedLibraryBuild),
             ("public APIs reject nested private struct types", TestStructVisibility),
             ("deep field chains produce a structured diagnostic", TestDeepStructFieldChain),
@@ -2212,7 +2215,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(5, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
+        AssertEqual(6, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2354,11 +2357,13 @@ internal static partial class IntegrationTests
             pub struct Request { id: i32, name: Text }
             pub struct Record { id: i32, name: Text }
             pub union Reply { Created(self::app::main::Record), Invalid(Text), Failed(Text), Empty }
-            async fn create(request: self::app::main::Request, db: DbRead, writer: DbWrite) -> self::app::main::Reply effects {} {
+            async fn create(request: self::app::main::Request, id: i32, q: Option<Text>, db: DbRead, writer: DbWrite) -> self::app::main::Reply effects {} {
                 return self::app::main::Reply.Empty;
             }
-            route POST "/records" {
+            route POST "/records/{id}" {
                 body: self::app::main::Request;
+                path id: i32;
+                query q: Option<Text>;
                 handler: self::app::main::create;
                 response Created: 201 json self::app::main::Record;
                 response Invalid: 400 json Text;
@@ -2366,30 +2371,29 @@ internal static partial class IntegrationTests
                 response Empty: 204;
             }
             """;
-        var packageRoot = await harness.WritePackageAsync(
-            "inspect-api-web",
-            "name = \"inspect-api-web\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
-                + "sqlite_path = \"data/api.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
-                + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n",
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["src/app/main.lang"] = source,
-                ["db/schema.sql"] = "CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n"
-            });
+        const string manifest = "name = \"inspect-api-web\"\nversion = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+            + "sqlite_path = \"data/api.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
+            + "\n[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\n";
+        var files = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = source,
+            ["db/schema.sql"] = "CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n"
+        };
+        var packageRoot = await harness.WritePackageAsync("inspect-api-web", manifest, files);
         var result = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
         AssertEqual(0, result.ExitCode, Describe(result));
         AssertEqual(string.Empty, result.StandardError, Describe(result));
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(5, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
+        AssertEqual(6, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
         AssertEqual(0, api.GetProperty("commands").GetArrayLength(), "Web packages should not invent CLI commands.");
         var route = api.GetProperty("routes").EnumerateArray().Single();
         AssertEqual("POST", route.GetProperty("method").GetString(), "Route methods should retain checked source values.");
-        AssertEqual("/records", route.GetProperty("path").GetString(), "Route paths should retain checked source values.");
+        AssertEqual("/records/{id}", route.GetProperty("path").GetString(), "Route paths should retain checked source templates.");
         AssertEqual("nominal", route.GetProperty("body_type").GetProperty("kind").GetString(),
             "POST routes should expose their checked body type.");
         AssertEqual("self::app::main::Request", route.GetProperty("body_type").GetProperty("source_id").GetString(),
@@ -2398,6 +2402,27 @@ internal static partial class IntegrationTests
             "Route handler references should use source-facing IDs.");
         AssertTrue(route.GetProperty("handler_is_async").GetBoolean(), "The API should project the route handler's async marker.");
         AssertJsonStringArray(route.GetProperty("handler_source_ids"), ["self::app::main::create"]);
+        var routeParameters = route.GetProperty("parameters").EnumerateArray().ToArray();
+        AssertEqual(2, routeParameters.Length, "The API should project each checked path and query binding.");
+        AssertJsonPropertyOrder(routeParameters[0], "name,in,required,type,handler_parameter_index");
+        AssertEqual("id", routeParameters[0].GetProperty("name").GetString(), "Path binding wire name mismatch.");
+        AssertEqual("path", routeParameters[0].GetProperty("in").GetString(), "Path binding location mismatch.");
+        AssertTrue(routeParameters[0].GetProperty("required").GetBoolean(), "Path bindings are always required.");
+        AssertEqual(1, routeParameters[0].GetProperty("handler_parameter_index").GetInt32(),
+            "POST path binding indexes must account for the request body at handler position 0.");
+        AssertEqual("primitive", routeParameters[0].GetProperty("type").GetProperty("kind").GetString(),
+            "Path binding types should use the structured API primitive type shape.");
+        AssertEqual("i32", routeParameters[0].GetProperty("type").GetProperty("name").GetString(),
+            "Path binding type name mismatch.");
+        AssertEqual("q", routeParameters[1].GetProperty("name").GetString(), "Query binding wire name mismatch.");
+        AssertEqual("query", routeParameters[1].GetProperty("in").GetString(), "Query binding location mismatch.");
+        AssertTrue(!routeParameters[1].GetProperty("required").GetBoolean(), "Option query bindings should be optional.");
+        AssertEqual(2, routeParameters[1].GetProperty("handler_parameter_index").GetInt32(),
+            "Query binding indexes must follow the POST body and preceding path bindings.");
+        AssertEqual("option", routeParameters[1].GetProperty("type").GetProperty("kind").GetString(),
+            "Option query binding types should preserve their option wrapper in inspect-api.");
+        AssertEqual("Text", routeParameters[1].GetProperty("type").GetProperty("item").GetProperty("name").GetString(),
+            "Option query binding item type mismatch.");
         var responseType = route.GetProperty("response_type");
         AssertEqual("nominal", responseType.GetProperty("kind").GetString(),
             "Route response unions should use the structured nominal type shape.");
@@ -2426,6 +2451,12 @@ internal static partial class IntegrationTests
         AssertEqual(JsonValueKind.Null, responses[3].GetProperty("payload_type").ValueKind,
             "A bodyless response should project a null payload type.");
         AssertApiPortable(result.StandardOutput, api, harness.TemporaryRoot);
+
+        var relocatedRoot = await harness.WritePackageAsync("inspect-api-web-relocated", manifest, files);
+        var relocated = await harness.InvokeCompilerCommandAsync("inspect", "api", relocatedRoot, "--json");
+        AssertEqual(0, relocated.ExitCode, Describe(relocated));
+        AssertEqual(result.StandardOutput, relocated.StandardOutput,
+            "Equivalent inspect-api reports with dynamic route parameters must be independent of package location.");
     }
 
     private static async Task TestAuditPackage(Harness harness)
@@ -2820,7 +2851,8 @@ internal static partial class IntegrationTests
             "kind,item",
             "kind,ok,error",
             "kind,declaration_kind,source_id,source_ids,package,module,name",
-            "method,path,body_type,handler,handler_is_async,response_type,handler_source_ids,responses,required_capabilities,capability_parameters",
+            "method,path,body_type,handler,handler_is_async,response_type,handler_source_ids,parameters,responses,required_capabilities,capability_parameters",
+            "name,in,required,type,handler_parameter_index",
             "variant,status,content_type,payload_type",
             "name,capability"
         };
@@ -3388,8 +3420,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(5, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 5.");
+            AssertEqual(6, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 6.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3454,8 +3486,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(5, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 5.");
+            AssertEqual(6, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 6.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -5291,7 +5323,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
+            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6055,7 +6087,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5 with pinned process metadata.");
+            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -8396,8 +8428,12 @@ internal static partial class IntegrationTests
             && source.Contains("DbError.RowShape", StringComparison.Ordinal)
             && source.Contains("await writer.write_text_async", StringComparison.Ordinal)
             && source.Contains("route POST \"/api/note\"", StringComparison.Ordinal)
+            && source.Contains("route GET \"/api/greeting/{id}\"", StringComparison.Ordinal)
+            && source.Contains("path id: i32;", StringComparison.Ordinal)
+            && source.Contains("query name: Text;", StringComparison.Ordinal)
+            && source.Contains("query city: Option<Text>;", StringComparison.Ordinal)
             && source.Contains("route GET \"/health\"", StringComparison.Ordinal),
-            "The maintained web sample must exercise transactional SQLite writes, typed database errors, an async filesystem write route, and /health.");
+            "The maintained web sample must exercise typed dynamic SQLite lookup bindings, transactional writes, typed database errors, an async filesystem write route, and /health.");
 
         var check = await harness.InvokePackageDirectoryAsync("maintained-web-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
@@ -8417,6 +8453,15 @@ internal static partial class IntegrationTests
                 "OpenAPI should describe the SQLite-backed greeting route.");
             AssertTrue(greetingPath.TryGetProperty("get", out _) && greetingPath.TryGetProperty("post", out _),
                 "OpenAPI should describe both GET and POST mappings at the shared static path.");
+            AssertTrue(paths.TryGetProperty("/api/greeting/{id}", out var dynamicGreetingPath),
+                "OpenAPI should describe the dynamic SQLite-backed greeting lookup route.");
+            var dynamicGreetingGet = dynamicGreetingPath.GetProperty("get");
+            var greetingParameters = dynamicGreetingGet.GetProperty("parameters").EnumerateArray().ToArray();
+            AssertEqual(3, greetingParameters.Length,
+                "The dynamic greeting route should publish its path, required query, and optional query parameters.");
+            AssertOpenApiParameter(greetingParameters[0], "id", "path", true, "integer", "int32");
+            AssertOpenApiParameter(greetingParameters[1], "name", "query", true, "string", null);
+            AssertOpenApiParameter(greetingParameters[2], "city", "query", false, "string", null);
             AssertTrue(paths.TryGetProperty("/reset", out var resetPath)
                 && resetPath.TryGetProperty("get", out var resetOperation)
                 && resetOperation.GetProperty("responses").TryGetProperty("205", out var resetResponse)
@@ -8590,6 +8635,32 @@ internal static partial class IntegrationTests
                 AssertEqual("Paris", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
                     "The POST route should preserve its nested JSON request and response values.");
             }
+
+            using (var lookupWithoutOptionalCity = await client.GetAsync("/api/greeting/1?name=Ada"))
+            {
+                AssertEqual(HttpStatusCode.OK, lookupWithoutOptionalCity.StatusCode,
+                    "A required path i32 and query Text should match when the optional city query is absent.");
+                using var response = JsonDocument.Parse(await lookupWithoutOptionalCity.Content.ReadAsStringAsync());
+                AssertEqual("Ada", response.RootElement.GetProperty("message").GetString(),
+                    "The dynamic route should load the record selected by its path binding.");
+                AssertEqual("Paris", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
+                    "An absent optional city query should be passed as None to the lookup handler.");
+            }
+
+            using (var lookupWithOptionalCity = await client.GetAsync("/api/greeting/1?name=Ada&city=Paris"))
+                AssertEqual(HttpStatusCode.OK, lookupWithOptionalCity.StatusCode,
+                    "A matching present optional city query should select the Found response.");
+            using (var lookupWithEmptyCity = await client.GetAsync("/api/greeting/1?name=Ada&city="))
+                AssertEqual(HttpStatusCode.NotFound, lookupWithEmptyCity.StatusCode,
+                    "A present empty Option<Text> query should reach the handler as Some(empty text).");
+            using (var lookupWithNonmatchingValues = await client.GetAsync("/api/greeting/1?name=Grace&city=Paris"))
+                AssertEqual(HttpStatusCode.NotFound, lookupWithNonmatchingValues.StatusCode,
+                    "Nonmatching present query values should select the declared Missing response.");
+            await AssertRouteBindingBadRequestAsync(client, "/api/greeting/1");
+            await AssertRouteBindingBadRequestAsync(client, "/api/greeting/1?name=Ada&name=Grace");
+            await AssertRouteBindingBadRequestAsync(client, "/api/greeting/1?name=Ada&city=Paris&city=Rome");
+            await AssertRouteBindingBadRequestAsync(client, "/api/greeting/not-an-integer?name=Ada");
+            await AssertRouteBindingBadRequestAsync(client, "/api/greeting/2147483648?name=Ada");
 
             const string maliciousName = "' OR 1=1; DROP TABLE greeting; -- <script>alert('x')</script>";
             var maliciousBody = JsonSerializer.Serialize(new
@@ -10652,7 +10723,7 @@ internal static partial class IntegrationTests
         var cases = new (string Name, string Source, string Code)[]
         {
             ("route-invalid-method", Add(header, "route PUT \"/items\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
-            ("route-invalid-path", Add(header, "route GET \"/items/{id}\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-invalid-path", Add(header, "route GET \"/items/{id}\" { handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_BINDING"),
             ("route-unknown-item", Add(header, "route GET \"/items\" { unknown; }"), "E_ROUTE_DECL"),
             ("route-invalid-status", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 600 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
             ("route-get-body", Add(header + "\nstruct Body { value: i32 }", "route GET \"/items\" { body: self::harness::route_contract::Body; handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
@@ -11003,7 +11074,8 @@ internal static partial class IntegrationTests
         var compilerType = assembly.GetType("Compiler", throwOnError: true)!;
         var checkPackage = compilerType.GetMethods(BindingFlags.Public | BindingFlags.Static)
             .Single(method => method.Name == "CheckPackage" && method.GetParameters().Length == 7);
-        var result = checkPackage.Invoke(null, [moduleInputs, "root", "app::main", null, false, true, null])
+        var routeCapabilities = new HashSet<string>(["db.read", "db.write"], StringComparer.Ordinal);
+        var result = checkPackage.Invoke(null, [moduleInputs, "root", "app::main", routeCapabilities, false, true, null])
             ?? throw new InvalidOperationException("Compiler.CheckPackage returned no result.");
         var resultDiagnostics = result.GetType().GetProperty("Diagnostics")!.GetValue(result)
             ?? throw new InvalidOperationException("Compiler.CheckPackage returned no diagnostics list.");

@@ -48,7 +48,7 @@
     },
     {
       "id": "web-greeting",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "candidate_root": "eval/reference/web-greeting",
       "task_file": "eval/scenarios/web-greeting/TASK.md",
       "smoke": {
@@ -88,6 +88,7 @@
         "web-greeting.check-clean",
         "web-greeting.openapi",
         "web-greeting.api-routes",
+        "web-greeting.route-bindings",
         "web-greeting.trim-and-persistence",
         "web-greeting.safe-html",
         "web-greeting.docs-table"

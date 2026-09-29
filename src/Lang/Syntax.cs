@@ -45,8 +45,15 @@ internal sealed record CommandTextLiteralSyntax(Token At, string Value) : Comman
 internal sealed record CommandIntegerLiteralSyntax(Token At, int Value) : CommandLiteralSyntax(At);
 internal sealed record CommandBooleanLiteralSyntax(Token At, bool Value) : CommandLiteralSyntax(At);
 internal sealed record CommandDecl(string Name, IReadOnlyList<CommandEntrySyntax> Entries, Token At);
+internal enum RouteBindingSyntaxKind { Path, Query }
+internal sealed record RoutePathSegmentSyntax(Token At, string? Literal, string? Placeholder);
 internal abstract record RouteItemSyntax(Token At);
 internal sealed record RouteBodySyntax(Token At, TypeSyntax Type) : RouteItemSyntax(At);
+internal sealed record RouteBindingSyntax(
+    Token At,
+    Token NameAt,
+    RouteBindingSyntaxKind Kind,
+    TypeSyntax Type) : RouteItemSyntax(At);
 internal sealed record RouteHandlerSyntax(Token At, SourceDeclarationRefSyntax Reference) : RouteItemSyntax(At);
 internal sealed record RouteResponseSyntax(
     Token At,
@@ -63,6 +70,7 @@ internal sealed record RouteDecl(
     string Method,
     Token PathAt,
     string Path,
+    IReadOnlyList<RoutePathSegmentSyntax> PathSegments,
     IReadOnlyList<RouteItemSyntax> Items);
 internal sealed record FunctionDecl(
     string Name,
