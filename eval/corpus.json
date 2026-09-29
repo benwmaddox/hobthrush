@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "cli-policy",
+      "version": "1.0.0",
+      "candidate_root": "eval/reference/cli-policy",
+      "task_file": "eval/scenarios/cli-policy/TASK.md",
+      "smoke": {
+        "kind": "cli",
+        "run_args": ["decide", "samples/policy.txt"]
+      },
+      "mutations": [
+        {
+          "id": "revoke-precedence-bug",
+          "kind": "semantic",
+          "expected_check_id": "cli-policy.priority-order",
+          "files": ["src/app/policy.lang"],
+          "replace_exactly": [
+            {
+              "path": "src/app/policy.lang",
+              "old": "    if revoked {\n        return Ok(\"REVOKED\");\n    }\n    if granted {\n        return Ok(\"GRANTED\");\n    }\n    return Ok(\"UNDECIDED\");",
+              "new": "    if granted {\n        return Ok(\"GRANTED\");\n    }\n    if revoked {\n        return Ok(\"REVOKED\");\n    }\n    return Ok(\"UNDECIDED\");"
+            }
+          ]
+        },
+        {
+          "id": "false-decision-table-row",
+          "kind": "documentation",
+          "expected_check_id": "cli-policy.docs-table",
+          "files": ["README.md"],
+          "replace_exactly": [
+            {
+              "path": "README.md",
+              "old": "| Contains `REVOKE`, with or without `GRANT` | `REVOKED` |",
+              "new": "| Contains `REVOKE`, with or without `GRANT` | `GRANTED` |"
+            }
+          ]
+        }
+      ],
+      "check_ids": [
+        "cli-policy.check-clean",
+        "cli-policy.command-schema",
+        "cli-policy.priority-order",
+        "cli-policy.runtime",
+        "cli-policy.docs-table"
+      ]
+    },
+    {
+      "id": "web-greeting",
+      "version": "1.0.0",
+      "candidate_root": "eval/reference/web-greeting",
+      "task_file": "eval/scenarios/web-greeting/TASK.md",
+      "smoke": {
+        "kind": "web",
+        "health_path": "/health",
+        "host_args": ["--urls", "<loopback>"]
+      },
+      "mutations": [
+        {
+          "id": "untrimmed-city",
+          "kind": "semantic",
+          "expected_check_id": "web-greeting.trim-and-persistence",
+          "files": ["src/app/main.lang"],
+          "replace_exactly": [
+            {
+              "path": "src/app/main.lang",
+              "old": "    let city: Text = request.city.trim();",
+              "new": "    let city: Text = request.city;"
+            }
+          ]
+        },
+        {
+          "id": "false-post-status-row",
+          "kind": "documentation",
+          "expected_check_id": "web-greeting.docs-table",
+          "files": ["README.md"],
+          "replace_exactly": [
+            {
+              "path": "README.md",
+              "old": "| POST | `/api/greeting` | 201 JSON when saved; 400 when name or city is blank after trimming |",
+              "new": "| POST | `/api/greeting` | 200 JSON when saved; 400 when name or city is blank after trimming |"
+            }
+          ]
+        }
+      ],
+      "check_ids": [
+        "web-greeting.check-clean",
+        "web-greeting.openapi",
+        "web-greeting.api-routes",
+        "web-greeting.trim-and-persistence",
+        "web-greeting.safe-html",
+        "web-greeting.docs-table"
+      ]
+    },
+    {
+      "id": "audit-repair",
+      "version": "1.0.0",
+      "candidate_root": "eval/reference/audit-repair",
+      "starter_root": "eval/scenarios/audit-repair/starter",
+      "task_file": "eval/scenarios/audit-repair/TASK.md",
+      "smoke": {
+        "kind": "cli",
+        "run_args": ["first", "samples/records.txt"],
+        "inspect_symbol": "self::app::reader::run"
+      },
+      "mutations": [
+        {
+          "id": "missing-fs-read-grant-and-effect-bound",
+          "kind": "constraint",
+          "expected_check_id": "audit-repair.expected-diagnostics",
+          "files": ["lang.toml", "src/app/reader.lang"],
+          "replace_exactly": [
+            {
+              "path": "lang.toml",
+              "old": "fs.read = \"allow\"\n",
+              "new": ""
+            },
+            {
+              "path": "src/app/reader.lang",
+              "old": ") -> Result<Text, self::app::main::ReadFailure> effects { fs.read } {",
+              "new": ") -> Result<Text, self::app::main::ReadFailure> effects {} {"
+            }
+          ]
+        },
+        {
+          "id": "false-audit-assurance-claim",
+          "kind": "documentation",
+          "expected_check_id": "audit-repair.docs-claims",
+          "files": ["README.md"],
+          "replace_exactly": [
+            {
+              "path": "README.md",
+              "old": "Its assurance is `claim_only`: it does not prove adapter behavior or\nprovide an operating-system sandbox.",
+              "new": "Its assurance is `claim_only` and proves adapter behavior and provides an operating-system sandbox."
+            }
+          ]
+        }
+      ],
+      "check_ids": [
+        "audit-repair.check-clean",
+        "audit-repair.expected-diagnostics",
+        "audit-repair.inspect-effects",
+        "audit-repair.audit-v5",
+        "audit-repair.receipt-v1",
+        "audit-repair.runtime",
+        "audit-repair.docs-claims"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+module app::main;
+
+struct GreetingRequest { name: Text, city: Text }
+struct Greeting { name: Text, city: Text }
+struct GreetingRow { id: i32, name: Text, city: Text }
+struct GreetingKey { id: i32 }
+struct GreetingWrite { id: i32, name: Text, city: Text }
+
+union HealthReply { Healthy }
+union LookupReply { Found(self::app::main::Greeting), Missing, StorageFailure(Text) }
+union SaveReply { Saved(self::app::main::Greeting), Invalid(Text), StorageFailure(Text) }
+union HomeReply { Page(Html) }
+
+fn load_greeting(db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
+    let result: Result<Option<self::app::main::GreetingRow>, DbError> = db.query_one(
+        "SELECT id, name, city FROM greeting WHERE id = $id",
+        self::app::main::GreetingKey { id: 1 }
+    );
+    return result;
+}
+
+fn lookup(db: DbRead) -> self::app::main::LookupReply effects { db.read } {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    return match loaded {
+        Ok(value) => match value {
+            Some(row) => self::app::main::LookupReply.Found(self::app::main::Greeting {
+                name: row.name,
+                city: row.city
+            }),
+            None => self::app::main::LookupReply.Missing
+        },
+        Err(error) => self::app::main::LookupReply.StorageFailure("database read failed")
+    };
+}
+
+fn save(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::SaveReply effects { db.write } {
+    let name: Text = request.name.trim();
+    let city: Text = request.city.trim();
+    if name.length == 0 {
+        return self::app::main::SaveReply.Invalid("name must contain text");
+    }
+    if city.length == 0 {
+        return self::app::main::SaveReply.Invalid("city must contain text");
+    }
+
+    with db.begin() as tx {
+        let written: Result<i32, DbError> = tx.execute(
+            "INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city",
+            self::app::main::GreetingWrite { id: 1, name: name, city: city }
+        );
+        return match written {
+            Ok(count) => match tx.commit() {
+                Ok(committed) => self::app::main::SaveReply.Saved(self::app::main::Greeting {
+                    name: name,
+                    city: city
+                }),
+                Err(error) => self::app::main::SaveReply.StorageFailure("database write failed")
+            },
+            Err(error) => self::app::main::SaveReply.StorageFailure("database write failed")
+        };
+    }
+}
+
+fn home(db: DbRead) -> self::app::main::HomeReply effects { db.read } {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(db);
+    let content: Html = match loaded {
+        Ok(value) => match value {
+            Some(row) => html.concat(
+                html.heading("Saved greeting"),
+                html.concat(html.paragraph(row.name), html.paragraph(row.city))
+            ),
+            None => html.concat(html.heading("Greeting service"), html.paragraph("No greeting has been saved yet."))
+        },
+        Err(error) => html.concat(html.heading("Greeting service"), html.paragraph("The greeting is unavailable."))
+    };
+    return self::app::main::HomeReply.Page(html.document("Greeting service", content));
+}
+
+fn health() -> self::app::main::HealthReply effects {} {
+    return self::app::main::HealthReply.Healthy;
+}
+
+route GET "/" {
+    handler: self::app::main::home;
+    response Page: 200 html;
+}
+
+route GET "/api/greeting" {
+    handler: self::app::main::lookup;
+    response Found: 200 json self::app::main::Greeting;
+    response Missing: 404;
+    response StorageFailure: 500 json Text;
+}
+
+route POST "/api/greeting" {
+    body: self::app::main::GreetingRequest;
+    handler: self::app::main::save;
+    response Saved: 201 json self::app::main::Greeting;
+    response Invalid: 400 json Text;
+    response StorageFailure: 500 json Text;
+}
+
+route GET "/health" {
+    handler: self::app::main::health;
+    response Healthy: 200;
+}

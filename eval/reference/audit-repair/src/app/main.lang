@@ -1,0 +1,10 @@
+module app::main;
+
+pub union ReadFailure { Unavailable }
+
+command first {
+    help "Print the first nonempty trimmed line from a UTF-8 file.";
+    argument input: FilePath help "Path of the text file to read.";
+    handler: self::app::reader::run;
+    error: self::app::reader::describe_error;
+}
