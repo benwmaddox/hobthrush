@@ -1,6 +1,7 @@
 using System.Collections.Frozen;
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 
 internal sealed record PackageManifest(
@@ -12,6 +13,7 @@ internal sealed record PackageManifest(
     string? SqlitePath,
     string? SqliteSchema,
     string? HttpOrigin,
+    IReadOnlyList<ProcessExecutablePin> ProcessExecutables,
     IReadOnlySet<string> Capabilities,
     IReadOnlyList<ConfigField> ConfigFields,
     IReadOnlyList<PackageDependency> Dependencies)
@@ -30,6 +32,8 @@ internal sealed record ConfigField(
 
 internal sealed record PackageDependency(string Alias, string Path);
 
+internal sealed record ProcessExecutablePin(string Os, string Path, string Sha256, string? FullPath);
+
 internal sealed record PackageSource(string Module, string File, string Text);
 
 internal sealed record LoadedPackage(
@@ -39,7 +43,8 @@ internal sealed record LoadedPackage(
     PackageManifest Manifest,
     string ManifestText,
     IReadOnlyList<PackageSource> Sources,
-    WebDatabaseOptions? WebDatabaseOptions);
+    WebDatabaseOptions? WebDatabaseOptions,
+    ProcessExecutablePin? SelectedProcessExecutable);
 
 internal sealed record WebDatabaseOptions(
     string RelativePath,
@@ -97,6 +102,12 @@ internal static class PortablePackagePath
 
 internal static class PackageLoader
 {
+    private static readonly (string Os, string PathKey, string HashKey)[] ProcessExecutableKeyPairs =
+    [
+        ("windows", "process_windows_path", "process_windows_sha256"),
+        ("linux", "process_linux_path", "process_linux_sha256")
+    ];
+
     private static readonly HashSet<string> KnownKeys = new(StringComparer.Ordinal)
     {
         "name",
@@ -106,7 +117,11 @@ internal static class PackageLoader
         "entry_module",
         "sqlite_path",
         "sqlite_schema",
-        "http_origin"
+        "http_origin",
+        "process_windows_path",
+        "process_windows_sha256",
+        "process_linux_path",
+        "process_linux_sha256"
     };
 
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
@@ -171,6 +186,10 @@ internal static class PackageLoader
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
+        var processExecutables = LoadProcessExecutables(root, parsedManifest.Values, parsedManifest.Capabilities, manifestFile, diagnostics);
+        if (diagnostics.Count != 0)
+            return new PackageLoadResult(null, diagnostics);
+
         var manifest = new PackageManifest(
             parsedManifest.Values["name"],
             parsedManifest.Values["version"],
@@ -183,6 +202,7 @@ internal static class PackageLoader
                 TryNormalizeHttpOrigin(configuredHttpOrigin, out var stableHttpOrigin)
                     ? stableHttpOrigin
                     : null,
+            processExecutables,
             parsedManifest.Capabilities,
             parsedManifest.ConfigFields,
             parsedManifest.Dependencies);
@@ -235,6 +255,13 @@ internal static class PackageLoader
         if (diagnostics.Count != 0)
             return new PackageLoadResult(null, diagnostics);
 
+        var currentProcessOs = OperatingSystem.IsWindows()
+            ? "windows"
+            : OperatingSystem.IsLinux() ? "linux" : null;
+        var selectedProcessExecutable = currentProcessOs is null
+            ? null
+            : processExecutables.FirstOrDefault(pin => pin.Os == currentProcessOs);
+
         if (webDatabaseOptions is not null)
         {
             var databaseFile = ResolvePackageFilePath(root, webDatabaseOptions.RelativePath);
@@ -263,7 +290,7 @@ internal static class PackageLoader
         }
 
         return new PackageLoadResult(
-            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, manifestText, sources, webDatabaseOptions),
+            new LoadedPackage(root, manifestFile, sourceDirectory, manifest, manifestText, sources, webDatabaseOptions, selectedProcessExecutable),
             diagnostics);
     }
 
@@ -565,6 +592,16 @@ internal static class PackageLoader
             var rawValue = trimmed[(equals + 1)..].Trim();
             if (inConfig)
             {
+                if (IsProcessExecutableKey(key))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Process executable key '{key}' must be declared at the package root before any table",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
                 if (!IsConfigFieldName(key))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", "Config field names must be lower_snake language identifiers", file, lineNumber));
@@ -596,7 +633,7 @@ internal static class PackageLoader
             if (inCapabilities)
             {
                 if (key is not ("fs.read" or "fs.write" or "net.listen" or "net.client" or "db.read" or "db.write" or
-                    "env.read" or "secret.reveal" or "log.write"))
+                    "env.read" or "secret.reveal" or "log.write" or "process.spawn"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;
@@ -720,6 +757,33 @@ internal static class PackageLoader
         if (values.TryGetValue("kind", out var kind) && kind is not ("lib" or "cli" or "web"))
             diagnostics.Add(AtStart("E_MANIFEST", "kind must be \"lib\", \"cli\", or \"web\"", file));
 
+        var hasProcessConfiguration = new[]
+        {
+            "process_windows_path",
+            "process_windows_sha256",
+            "process_linux_path",
+            "process_linux_sha256"
+        }.Any(values.ContainsKey);
+        var hasProcessGrant = capabilities.Contains("process.spawn");
+        if (kind is not null && kind != "cli" && hasProcessConfiguration)
+            diagnostics.Add(AtStart("E_MANIFEST", "Process executable configuration is only valid for CLI packages", file));
+        if (kind is not null && kind != "cli" && hasProcessGrant)
+            diagnostics.Add(AtStart("E_MANIFEST", "The process.spawn capability is only valid for CLI packages", file));
+        if (hasProcessConfiguration && !hasProcessGrant)
+            diagnostics.Add(AtStart("E_MANIFEST", "Process executable configuration requires the root package's process.spawn capability grant", file));
+
+        foreach (var (_, pathKey, hashKey) in ProcessExecutableKeyPairs)
+        {
+            var hasPath = values.TryGetValue(pathKey, out var processPath);
+            var hasHash = values.TryGetValue(hashKey, out var processHash);
+            if (hasPath != hasHash)
+                diagnostics.Add(AtStart("E_MANIFEST", $"{pathKey} and {hashKey} must be declared together", file));
+            if (hasPath && !IsNormalizedPackageRelativeFilePath(processPath!))
+                diagnostics.Add(AtStart("E_MANIFEST", $"{pathKey} must be a normalized package-relative file path using forward slashes", file));
+            if (hasHash && !IsLowerHexSha256(processHash!))
+                diagnostics.Add(AtStart("E_MANIFEST", $"{hashKey} must be exactly 64 lowercase hexadecimal characters", file));
+        }
+
         if (configSectionSeen && kind == "lib")
             diagnostics.Add(AtStart("E_MANIFEST", "Library packages cannot declare a [config] section", file));
 
@@ -830,6 +894,158 @@ internal static class PackageLoader
 
         if (hasEntryModule && !IsValidModuleName(entryModule!))
             diagnostics.Add(AtStart("E_MANIFEST", "entry_module must be a valid module path using '::' separators", file));
+    }
+
+    private static IReadOnlyList<ProcessExecutablePin> LoadProcessExecutables(
+        string root,
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlySet<string> capabilities,
+        string manifestFile,
+        List<Diagnostic> diagnostics)
+    {
+        var pins = new List<ProcessExecutablePin>();
+        foreach (var (os, pathKey, hashKey) in ProcessExecutableKeyPairs)
+        {
+            if (values.TryGetValue(pathKey, out var relativePath) && values.TryGetValue(hashKey, out var sha256))
+                pins.Add(new ProcessExecutablePin(os, relativePath, sha256, null));
+        }
+
+        var currentOs = OperatingSystem.IsWindows()
+            ? "windows"
+            : OperatingSystem.IsLinux() ? "linux" : null;
+        var processFeatureConfigured = pins.Count != 0 || capabilities.Contains("process.spawn");
+        if (currentOs is null)
+        {
+            if (processFeatureConfigured)
+                diagnostics.Add(AtStart(
+                    "E_PROCESS_EXECUTABLE",
+                    "Process executable configuration requires a Windows or Linux current host",
+                    manifestFile));
+            return pins;
+        }
+
+        var currentPair = ProcessExecutableKeyPairs.First(pair => pair.Os == currentOs);
+        var currentIndex = pins.FindIndex(pin => pin.Os == currentOs);
+        if (processFeatureConfigured && currentIndex < 0)
+            diagnostics.Add(AtStart(
+                "E_PROCESS_EXECUTABLE",
+                $"Process executable configuration requires the current-host pair '{currentPair.PathKey}' and '{currentPair.HashKey}'",
+                manifestFile));
+
+        for (var index = 0; index < pins.Count; index++)
+        {
+            var pin = pins[index];
+            var pair = ProcessExecutableKeyPairs.First(item => item.Os == pin.Os);
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(Path.Combine(root, pin.Path.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(ProcessExecutableDiagnostic(
+                    $"Process executable '{pin.Path}' from '{pair.PathKey}' could not be resolved",
+                    manifestFile));
+                continue;
+            }
+
+            if (!IsWithin(root, fullPath) || string.Equals(root, fullPath, PathComparison))
+            {
+                diagnostics.Add(ProcessExecutableDiagnostic(
+                    $"Process executable '{pin.Path}' from '{pair.PathKey}' is outside the package root",
+                    manifestFile));
+                continue;
+            }
+
+            try
+            {
+                if (HasReparsePointInExistingPath(root, fullPath))
+                {
+                    diagnostics.Add(ProcessExecutableDiagnostic(
+                        $"Process executable '{pin.Path}' from '{pair.PathKey}' cannot use a symbolic link or reparse point",
+                        manifestFile));
+                    continue;
+                }
+
+                if (Directory.Exists(fullPath) || !File.Exists(fullPath))
+                {
+                    diagnostics.Add(ProcessExecutableDiagnostic(
+                        $"Process executable '{pin.Path}' from '{pair.PathKey}' must name an existing regular file",
+                        manifestFile));
+                    continue;
+                }
+
+                var attributes = File.GetAttributes(fullPath);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.Device | FileAttributes.ReparsePoint)) != 0)
+                {
+                    diagnostics.Add(ProcessExecutableDiagnostic(
+                        $"Process executable '{pin.Path}' from '{pair.PathKey}' must name an existing regular file",
+                        manifestFile));
+                    continue;
+                }
+
+                if (pin.Os == currentOs && OperatingSystem.IsLinux())
+                {
+                    const UnixFileMode executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+                    if ((File.GetUnixFileMode(fullPath) & executeBits) == 0)
+                    {
+                        diagnostics.Add(ProcessExecutableDiagnostic(
+                            $"Process executable '{pin.Path}' from '{pair.PathKey}' must have an execute permission bit",
+                            manifestFile));
+                        continue;
+                    }
+                }
+
+                using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var actualSha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                if (!string.Equals(actualSha256, pin.Sha256, StringComparison.Ordinal))
+                {
+                    diagnostics.Add(ProcessExecutableDiagnostic(
+                        $"SHA-256 for process executable '{pin.Path}' does not match '{pair.HashKey}'",
+                        manifestFile));
+                    continue;
+                }
+
+                pins[index] = pin with { FullPath = fullPath };
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(ProcessExecutableDiagnostic(
+                    $"Process executable '{pin.Path}' from '{pair.PathKey}' could not be validated",
+                    manifestFile));
+            }
+        }
+
+        return pins;
+    }
+
+    private static Diagnostic ProcessExecutableDiagnostic(string message, string file) =>
+        new("E_PROCESS_EXECUTABLE", message, file, new Range(1, 1, 1, 1));
+
+    private static bool HasReparsePointInExistingPath(string root, string path)
+    {
+        var current = root;
+        foreach (var segment in Path.GetRelativePath(root, path).Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    return true;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryNormalizeHttpOrigin(string value, out string normalized)
@@ -1108,6 +1324,12 @@ internal static class PackageLoader
         return path.Split('/').All(segment =>
             segment != ".." && PortablePackagePath.IsValidRelativeSegment(segment));
     }
+
+    private static bool IsLowerHexSha256(string value) =>
+        value.Length == 64 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsProcessExecutableKey(string key) =>
+        key is "process_windows_path" or "process_windows_sha256" or "process_linux_path" or "process_linux_sha256";
 
     private static bool IsDependencyRelativePath(string path)
     {

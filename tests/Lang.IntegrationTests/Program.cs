@@ -19,6 +19,11 @@ internal static class IntegrationTests
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan AotPublishTimeout = TimeSpan.FromMinutes(10);
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int NativeKill(int processId, int signal);
+
+    private static int KillWithSignal(int processId, int signal) => NativeKill(processId, signal);
+
     public static async Task<int> RunAsync()
     {
         var repositoryRoot = FindRepositoryRoot();
@@ -100,6 +105,8 @@ internal static class IntegrationTests
             ("typed startup config manifests, effects, reports, and redaction are checked", TestConfigManifestAndReports),
             ("CLI config defaults, empty values, explicit secret reveal, logging, and NativeAOT are checked", TestConfigCliRuntime),
             ("web config and logger injection work in an async route handler", TestConfigWebAsyncRuntime),
+            ("pinned process manifests, effects, reports, receipts, and locks are checked", TestProcessManifestAndReports),
+            ("CLI ProcessRunner preserves literal arguments, bounds I/O, isolates child context, and publishes to NativeAOT", TestProcessRunnerManagedAndAot),
             ("typed CLI command identifiers remain contextual", TestCommandContextualIdentifiers),
             ("typed CLI declarations validate entries, signatures, and parser spans", TestTypedCliCommandDiagnostics),
             ("package modules keep identically named private types isolated", TestPackagePrivateNameIsolation),
@@ -2196,7 +2203,7 @@ internal static class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(4, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
+        AssertEqual(5, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2366,7 +2373,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(4, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
+        AssertEqual(5, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -2496,7 +2503,7 @@ internal static class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(4, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 4.");
+        AssertEqual(5, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
         AssertEqual(3, packages.Length, "The root, direct, and transitive packages must each appear once.");
         AssertPackage(packages.Single(package => package.GetProperty("role").GetString() == "root"), "audit-root", ".");
@@ -2635,7 +2642,9 @@ internal static class IntegrationTests
             AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
                 "Audit JSON property order is part of the deterministic report contract.");
 
-        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,trusted_claims,foreign_dependencies");
+        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,process_executables,trusted_claims,foreign_dependencies");
+        foreach (var pin in root.GetProperty("process_executables").EnumerateArray())
+            Order(pin, "os,path,sha256");
         foreach (var field in root.GetProperty("config").EnumerateArray())
             Order(field, "name,source_type,required,has_default");
         foreach (var package in root.GetProperty("packages").EnumerateArray())
@@ -2728,7 +2737,8 @@ internal static class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,config,http_origin,functions,structs,unions,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,unions,commands,routes",
+            "os,path,sha256",
             "name,source_type,required,has_default",
             "alias,name,version",
             "name,version",
@@ -3186,8 +3196,8 @@ internal static class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(4, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 4.");
+            AssertEqual(5, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 5.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3252,8 +3262,8 @@ internal static class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(4, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 4.");
+            AssertEqual(5, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 5.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -3304,8 +3314,8 @@ internal static class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(4, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 4.");
+            AssertEqual(5, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 5.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -3706,8 +3716,8 @@ internal static class IntegrationTests
         var unusedGrantSchemaPath = Path.Combine(Path.GetDirectoryName(unusedGrantArtifact)!, "command-schema.json");
         using (var unusedGrantSchema = JsonDocument.Parse(await File.ReadAllBytesAsync(unusedGrantSchemaPath)))
         {
-            AssertEqual(3, unusedGrantSchema.RootElement.GetProperty("schema_version").GetInt32(),
-                "Command schemas with the capabilities field must use version 3.");
+            AssertEqual(4, unusedGrantSchema.RootElement.GetProperty("schema_version").GetInt32(),
+                "Command schemas with the capabilities field must use version 4.");
             AssertEqual(0, unusedGrantSchema.RootElement.GetProperty("commands")[0]
                     .GetProperty("capabilities").GetArrayLength(),
                 "Unused fs.read and fs.write grants must not appear as injected capabilities for an args-only handler.");
@@ -4124,7 +4134,7 @@ internal static class IntegrationTests
         using (var schemaDocument = JsonDocument.Parse(firstSchemaBytes))
         {
             var root = schemaDocument.RootElement;
-            AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 3 after adding capabilities.");
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "The command schema version must be 4 after adding ProcessRunner capabilities.");
             var commands = root.GetProperty("commands");
             AssertEqual(1, commands.GetArrayLength(), "The entry module should define one command.");
             var command = commands[0];
@@ -4287,8 +4297,8 @@ internal static class IntegrationTests
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
             var root = schema.RootElement;
-            AssertEqual(3, root.GetProperty("schema_version").GetInt32(),
-                "Async handlers must preserve command schema version 3.");
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(),
+                "Async handlers must preserve command schema version 4.");
             var command = root.GetProperty("commands").EnumerateArray().Single();
             AssertEqual("read", command.GetProperty("name").GetString(),
                 "The async command schema should retain its declared name.");
@@ -4385,8 +4395,8 @@ internal static class IntegrationTests
         {
             var schema = schemaDocument.RootElement;
             AssertJsonPropertyOrder(schema, "schema_version,commands");
-            AssertEqual(3, schema.GetProperty("schema_version").GetInt32(),
-                "Adding FsWrite must preserve command schema version 3.");
+            AssertEqual(4, schema.GetProperty("schema_version").GetInt32(),
+                "Adding ProcessRunner must preserve command schema version 4.");
             var command = schema.GetProperty("commands").EnumerateArray().Single();
             AssertJsonPropertyOrder(command, "name,help,handler,error_formatter,capabilities,arguments,options,flags");
             AssertEqual("save", command.GetProperty("name").GetString(), "The command schema should retain its declared name.");
@@ -4779,7 +4789,7 @@ internal static class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 4.");
+            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -4792,7 +4802,7 @@ internal static class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 4.");
+            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -4839,8 +4849,8 @@ internal static class IntegrationTests
         using (var schemaDocument = ParseConfigJson(commandSchema, "command schema"))
         {
             var root = schemaDocument.RootElement;
-            AssertEqual(3, root.GetProperty("schema_version").GetInt32(),
-                "Command schema must use version 3 for config and secret capability metadata.");
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(),
+                "Command schema must use version 4 for config, secret, and process capability metadata.");
             AssertJsonStringArray(root.GetProperty("commands")[0].GetProperty("capabilities"),
                 ["env.read", "secret.reveal", "log.write"]);
         }
@@ -5180,6 +5190,839 @@ internal static class IntegrationTests
         AssertEqual("ready", logDocument.RootElement.GetProperty("detail").GetString(), "Web logger detail mismatch.");
         AssertTrue(!string.IsNullOrWhiteSpace(logDocument.RootElement.GetProperty("request_id").GetString()),
             "Web Logger.info lines must include the trusted request identifier last.");
+    }
+
+    private static IReadOnlyDictionary<string, string> ProcessRunnerSources()
+    {
+        const string main = """
+            module app::main;
+
+            command run {
+                help "Run a pinned process fixture.";
+                argument label: Text help "Invocation label.";
+                option mode: Text = "args" help "Fixture mode.";
+                option first: Text = "" help "First literal argument.";
+                option second: Text = "" help "Second literal argument.";
+                option input: FilePath = "payload.txt" help "Input text file.";
+                option marker: Text = "child.pid" help "Child synchronization marker.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlers = """
+            module handlers;
+
+            pub union RunError { Failed }
+
+            fn error_text(error: ProcessError) -> Text effects {} {
+                return match error {
+                    ProcessError.InvalidArgument => "InvalidArgument",
+                    ProcessError.InputTooLarge => "InputTooLarge",
+                    ProcessError.OutputTooLarge => "OutputTooLarge",
+                    ProcessError.InvalidText => "InvalidText",
+                    ProcessError.StartFailed => "StartFailed",
+                    ProcessError.TimedOut => "TimedOut"
+                };
+            }
+
+            fn stdout_text(result: Result<ProcessOutput, ProcessError>) -> Text effects {} {
+                return match result {
+                    Ok(output) => output.stdout,
+                    Err(error) => self::handlers::error_text(error)
+                };
+            }
+
+            fn stderr_text(result: Result<ProcessOutput, ProcessError>) -> Text effects {} {
+                return match result {
+                    Ok(output) => output.stderr,
+                    Err(error) => self::handlers::error_text(error)
+                };
+            }
+
+            fn exit_output_text(output: ProcessOutput) -> Text effects {} {
+                if output.exit_code == 7 { return "exit=7"; }
+                return "wrong-exit";
+            }
+
+            fn exit_text(result: Result<ProcessOutput, ProcessError>) -> Text effects {} {
+                return match result {
+                    Ok(output) => self::handlers::exit_output_text(output),
+                    Err(error) => self::handlers::error_text(error)
+                };
+            }
+
+            fn read_input(fs: FsRead, path: FilePath) -> Text effects { fs.read } {
+                return match fs.read_text(path) {
+                    Ok(text) => text,
+                    Err(error) => ""
+                };
+            }
+
+            async fn invoke(runner: ProcessRunner, arguments: List<Text>, stdin: Text) -> Result<ProcessOutput, ProcessError> effects { process.spawn } {
+                return await runner.run_text_async(arguments, stdin);
+            }
+
+            pub async fn run(args: self::app::main::RunArgs, fs: FsRead, logger: Logger, runner: ProcessRunner) -> Result<Text, self::handlers::RunError> effects { fs.read, log.write, process.spawn } {
+                let logged: bool = logger.info("process.runner", "invoking pinned executable");
+
+                if args.mode == "stdin" {
+                    let payload: Text = self::handlers::read_input(fs, args.input);
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stdin"], payload);
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "stdin-exact" {
+                    let payload: Text = self::handlers::read_input(fs, args.input);
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stdin"], payload);
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "stderr" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["streams"], "");
+                    return Ok(self::handlers::stderr_text(result));
+                }
+                if args.mode == "exit" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["exit"], "");
+                    return Ok(self::handlers::exit_text(result));
+                }
+                if args.mode == "meta" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["meta"], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "stdout-exact" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stdout", "1048576"], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "stdout-over" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stdout", "1048577"], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "stderr-exact" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stderr", "1048576"], "");
+                    return Ok(self::handlers::stderr_text(result));
+                }
+                if args.mode == "stderr-over" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["stderr", "1048577"], "");
+                    return Ok(self::handlers::stderr_text(result));
+                }
+                if args.mode == "invalid-utf8" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["invalid-utf8"], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "timeout" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["timeout", args.marker], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "empty-argv" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, [], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+                if args.mode == "args" {
+                    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["args", args.first, args.second], "");
+                    return Ok(self::handlers::stdout_text(result));
+                }
+
+                // PROCESS_LIMIT_CASES
+                let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, ["args", args.first, args.second], "");
+                return Ok(self::handlers::stdout_text(result));
+            }
+
+            pub fn describe(error: self::handlers::RunError) -> Text effects {} {
+                return match error { self::handlers::RunError.Failed => "process failed" };
+            }
+            """;
+
+        var limitCases = new StringBuilder();
+        AppendCase("argc-exact", ["count", ..Enumerable.Repeat("x", 127)]);
+        AppendCase("argc-over", ["count", ..Enumerable.Repeat("x", 128)]);
+        AppendCase("argv-bytes-exact", ["size", new string('x', 16_380)]);
+        AppendCase("argv-bytes-over", ["size", new string('x', 16_381)]);
+
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = main,
+            ["src/handlers.lang"] = handlers.Replace("// PROCESS_LIMIT_CASES", limitCases.ToString().TrimEnd(), StringComparison.Ordinal)
+        };
+
+        void AppendCase(string mode, string[] arguments)
+        {
+            var renderedArguments = string.Join(", ", arguments.Select(argument => "\"" + argument + "\""));
+            limitCases.Append("if (args.mode == \"").Append(mode).AppendLine("\") {");
+            limitCases.Append("    let result: Result<ProcessOutput, ProcessError> = await self::handlers::invoke(runner, [")
+                .Append(renderedArguments).AppendLine("], \"\");");
+            limitCases.AppendLine("    return Ok(self::handlers::stdout_text(result));");
+            limitCases.AppendLine("}");
+        }
+    }
+
+    private static string ProcessRunnerTestSource() => ProcessRunnerSources()["src/handlers.lang"];
+
+    private static string ProcessCliManifest(
+        string name,
+        (string Os, string Path, string Sha256) pin,
+        bool includeProcessGrant = true,
+        string processGrantValue = "allow") =>
+        ProcessCliManifest(name, [pin], includeProcessGrant, processGrantValue);
+
+    private static string ProcessCliManifest(
+        string name,
+        (string Os, string Path, string Sha256) firstPin,
+        (string Os, string Path, string Sha256) secondPin) =>
+        ProcessCliManifest(name, [firstPin, secondPin]);
+
+    private static string ProcessCliManifest(
+        string name,
+        IReadOnlyList<(string Os, string Path, string Sha256)> pins,
+        bool includeProcessGrant = true,
+        string processGrantValue = "allow")
+    {
+        var manifest = CliPackageManifest("app::main")
+            .Replace("name = \"harness-package\"", $"name = \"{name}\"", StringComparison.Ordinal);
+        foreach (var os in new[] { "windows", "linux" })
+        {
+            var pin = pins.SingleOrDefault(candidate => candidate.Os == os);
+            if (pin.Os is null)
+                continue;
+            manifest += $"process_{os}_path = \"{pin.Path}\"\nprocess_{os}_sha256 = \"{pin.Sha256}\"\n";
+        }
+
+        manifest += "\n[capabilities]\nfs.read = \"allow\"\nlog.write = \"allow\"\n";
+        if (includeProcessGrant)
+            manifest += $"process.spawn = \"{processGrantValue}\"\n";
+        return manifest;
+    }
+
+    private static async Task InstallPinnedExecutableAsync(string packageRoot, string relativePath, string sourceExecutable)
+    {
+        var destination = Path.Combine(packageRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.Copy(sourceExecutable, destination, overwrite: true);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(destination, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+    }
+
+    private static string HashSha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static string ProcessRunnerCopyName(string assemblyName) =>
+        assemblyName + ".process-runner" + (OperatingSystem.IsWindows() ? ".exe" : string.Empty);
+
+    private static string JsonQuote(string value)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(value));
+        return document.RootElement.GetRawText();
+    }
+
+    private static void AssertProcessRunText(string expectedOutput, ProcessResult result, string context)
+    {
+        AssertEqual(0, result.ExitCode, $"{context}: generated command should return success. {Describe(result)}");
+        AssertEqual(expectedOutput, result.StandardOutput, $"{context}: ProcessRunner result text mismatch.");
+        AssertProcessLoggerLine(result.StandardError, context);
+    }
+
+    private static void AssertProcessArgumentRun(ProcessResult result, string context, params string[] expectedArguments)
+    {
+        AssertEqual(0, result.ExitCode, $"{context}: generated command should return success. {Describe(result)}");
+        using var arguments = JsonDocument.Parse(result.StandardOutput);
+        AssertEqual(JsonValueKind.Array, arguments.RootElement.ValueKind, $"{context}: helper output must be a JSON array.");
+        var actual = arguments.RootElement.EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToArray();
+        AssertTrue(expectedArguments.SequenceEqual(actual, StringComparer.Ordinal),
+            $"{context}: child arguments were changed. Expected [{string.Join(" | ", expectedArguments)}], got [{string.Join(" | ", actual)}].");
+        AssertProcessLoggerLine(result.StandardError, context);
+    }
+
+    private static void AssertProcessLoggerLine(string stderr, string context)
+    {
+        var lines = stderr.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+        AssertEqual(1, lines.Length, $"{context}: expected the handler's single structured log line.");
+        using var log = JsonDocument.Parse(lines[0]);
+        AssertJsonPropertyOrder(log.RootElement, "level,event,detail");
+        AssertEqual("info", log.RootElement.GetProperty("level").GetString(), $"{context}: log level mismatch.");
+        AssertEqual("process.runner", log.RootElement.GetProperty("event").GetString(), $"{context}: log event mismatch.");
+        AssertEqual("invoking pinned executable", log.RootElement.GetProperty("detail").GetString(), $"{context}: log detail mismatch.");
+    }
+
+    private static void AssertUnixExecutableIfRequired(string executablePath, string message)
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+        AssertTrue(File.Exists(executablePath), $"Expected generated process executable {executablePath}.");
+        const UnixFileMode executeBits = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        AssertTrue((File.GetUnixFileMode(executablePath) & executeBits) != 0, message);
+    }
+
+    private static void AssertPackageJsonDiagnostic(ProcessResult result, string expectedCode, string message)
+    {
+        AssertTrue(result.ExitCode != 0, message + " Invalid package unexpectedly succeeded. " + Describe(result));
+        AssertEqual(string.Empty, result.StandardError, Describe(result));
+        var diagnostics = ParseDiagnosticSnapshots(result.StandardOutput);
+        AssertTrue(diagnostics.Any(diagnostic => diagnostic.Code == expectedCode),
+            message + $" Expected {expectedCode}. {result.StandardOutput}");
+    }
+
+    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    {
+        if (File.Exists(path))
+            return;
+
+        var directory = Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException($"Synchronization file {path} has no parent directory.");
+        var name = Path.GetFileName(path);
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(directory, name)
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite,
+            EnableRaisingEvents = true
+        };
+        watcher.Created += (_, _) => observed.TrySetResult();
+        watcher.Changed += (_, _) => observed.TrySetResult();
+        watcher.Renamed += (_, _) => observed.TrySetResult();
+        if (File.Exists(path))
+            return;
+
+        try
+        {
+            await observed.Task.WaitAsync(timeout);
+        }
+        catch (TimeoutException)
+        {
+            if (!File.Exists(path))
+                throw new TimeoutException($"Timed out waiting for synchronization file {path}.");
+        }
+    }
+
+    private static async Task AssertProcessTreeWasReapedAsync(string markerPath)
+    {
+        AssertTrue(File.Exists(markerPath), $"The child process did not publish its PID marker: {markerPath}.");
+        AssertTrue(int.TryParse(await File.ReadAllTextAsync(markerPath), out var processId) && processId > 0,
+            $"The child PID marker was invalid: {await File.ReadAllTextAsync(markerPath)}.");
+        try
+        {
+            using var child = Process.GetProcessById(processId);
+            if (!child.HasExited)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await child.WaitForExitAsync(timeout.Token);
+            }
+            AssertTrue(child.HasExited, $"ProcessRunner left child process {processId} running after completion.");
+        }
+        catch (ArgumentException)
+        {
+            // The OS already removed the process before it could be opened.
+        }
+
+        AssertTrue(!File.Exists(markerPath + ".late"), "A killed process-tree descendant must not continue running after ProcessRunner returns.");
+    }
+
+    private static async Task TestProcessManifestAndReports(Harness harness)
+    {
+        var helperExecutable = await harness.GetProcessFixtureExecutableAsync();
+        var helperBytes = await File.ReadAllBytesAsync(helperExecutable);
+        var helperHash = HashSha256(helperBytes);
+        var alternatePinBytes = new byte[] { 0x50, 0x49, 0x4e, 0x00, 0x01 };
+        var alternatePinHash = HashSha256(alternatePinBytes);
+        var hostOs = OperatingSystem.IsWindows() ? "windows" : "linux";
+        var otherOs = hostOs == "windows" ? "linux" : "windows";
+        var rootManifest = ProcessCliManifest(
+                "process-report-root",
+                ("windows", "tools/windows-pin", hostOs == "windows" ? helperHash : alternatePinHash),
+                ("linux", "tools/linux-pin", hostOs == "linux" ? helperHash : alternatePinHash))
+            + "\n[dependencies]\nsupport = \"../support\"\n";
+        var packages = new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+        {
+            ["root"] = new PackageFixture(rootManifest, ProcessRunnerSources()),
+            ["support"] = new PackageFixture(
+                LibraryPackageManifest("process-report-support"),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/support.lang"] = "module support; pub fn value() -> i32 effects {} { return 1; }\n"
+                })
+        };
+        var packageRoot = await harness.WritePackageGraphAsync("process-report", packages);
+        await InstallPinnedExecutableAsync(packageRoot, hostOs == "windows" ? "tools/windows-pin" : "tools/linux-pin", helperExecutable);
+        var alternatePath = Path.Combine(packageRoot, hostOs == "windows" ? "tools/linux-pin" : "tools/windows-pin");
+        Directory.CreateDirectory(Path.GetDirectoryName(alternatePath)!);
+        await File.WriteAllBytesAsync(alternatePath, alternatePinBytes);
+
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("process-report-lock", packageRoot, "lock"));
+        var check = await harness.InvokePackageDirectoryAsync("process-report-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        AssertEqual(string.Empty, check.StandardError, Describe(check));
+
+        var api = await harness.InvokeCompilerCommandAsync("inspect", "api", packageRoot, "--json");
+        AssertEqual(0, api.ExitCode, Describe(api));
+        using (var apiDocument = JsonDocument.Parse(api.StandardOutput))
+        {
+            var root = apiDocument.RootElement;
+            AssertInspectApiPropertyOrder(root);
+            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 5 with pinned process metadata.");
+            var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
+            AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
+                "API process pins must be ordered Windows then Linux.");
+            for (var index = 0; index < pins.Length; index++)
+            {
+                AssertJsonPropertyOrder(pins[index], "os,path,sha256");
+                var expectedPath = index == 0 ? "tools/windows-pin" : "tools/linux-pin";
+                var expectedHash = index == 0
+                    ? (hostOs == "windows" ? helperHash : alternatePinHash)
+                    : (hostOs == "linux" ? helperHash : alternatePinHash);
+                AssertEqual(expectedPath, pins[index].GetProperty("path").GetString(), "API pins must use package-relative paths.");
+                AssertEqual(expectedHash, pins[index].GetProperty("sha256").GetString(), "API pins must retain the declared content hash.");
+            }
+            AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
+        }
+
+        var effects = await harness.InvokeCompilerCommandAsync(
+            "inspect", "effects", packageRoot, "self::handlers::run", "--json");
+        AssertEqual(0, effects.ExitCode, Describe(effects));
+        using (var effectsDocument = JsonDocument.Parse(effects.StandardOutput))
+        {
+            var root = effectsDocument.RootElement;
+            AssertEqual(1, root.GetProperty("schema_version").GetInt32(), "Inspect-effects schema stays at version 1.");
+            var processPath = root.GetProperty("effect_paths").EnumerateArray()
+                .Single(path => path.GetProperty("effect").GetString() == "process.spawn");
+            var steps = processPath.GetProperty("steps").EnumerateArray().Select(step => step.GetString() ?? string.Empty).ToArray();
+            AssertTrue(steps.Any(step => step.Contains("invoke", StringComparison.Ordinal))
+                && steps.Any(step => step.Contains("run_text_async", StringComparison.Ordinal)),
+                $"Process effects should show the transitive helper and intrinsic path. {effects.StandardOutput}");
+        }
+
+        var audit = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(0, audit.ExitCode, Describe(audit));
+        using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
+        {
+            var root = auditDocument.RootElement;
+            AssertAuditPropertyOrder(root);
+            AssertEqual(5, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 5 with pinned process metadata.");
+            var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
+            AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
+                "Audit process pins must use deterministic OS ordering.");
+            var rootPackage = root.GetProperty("packages").EnumerateArray().Single(package => package.GetProperty("role").GetString() == "root");
+            var processInputs = rootPackage.GetProperty("inputs").EnumerateArray()
+                .Where(input => input.GetProperty("kind").GetString() == "process_executable")
+                .ToArray();
+            AssertEqual(2, processInputs.Length, "Audit inputs must include every declared OS executable pin.");
+            AssertTrue(processInputs.Any(input => input.GetProperty("path").GetString() == "tools/windows-pin"
+                    && input.GetProperty("sha256").GetString() == (hostOs == "windows" ? helperHash : alternatePinHash))
+                && processInputs.Any(input => input.GetProperty("path").GetString() == "tools/linux-pin"
+                    && input.GetProperty("sha256").GetString() == (hostOs == "linux" ? helperHash : alternatePinHash)),
+                "Audit process executable inputs must use the relative pin paths and validated content hashes.");
+            AssertTrue(!audit.StandardOutput.Contains(harness.TemporaryRoot, StringComparison.OrdinalIgnoreCase),
+                "Audit output must not expose the temporary package path.");
+        }
+
+        var repeatedAudit = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertEqual(audit.StandardOutput, repeatedAudit.StandardOutput, "Repeated process audit output must be byte-identical.");
+
+        var relocatedRoot = await harness.WritePackageGraphAsync("process-report-relocated", packages);
+        await InstallPinnedExecutableAsync(relocatedRoot, hostOs == "windows" ? "tools/windows-pin" : "tools/linux-pin", helperExecutable);
+        var relocatedAlternate = Path.Combine(relocatedRoot, hostOs == "windows" ? "tools/linux-pin" : "tools/windows-pin");
+        Directory.CreateDirectory(Path.GetDirectoryName(relocatedAlternate)!);
+        await File.WriteAllBytesAsync(relocatedAlternate, alternatePinBytes);
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync("process-report-relocated-lock", relocatedRoot, "lock"));
+        var relocatedApi = await harness.InvokeCompilerCommandAsync("inspect", "api", relocatedRoot, "--json");
+        AssertEqual(api.StandardOutput, relocatedApi.StandardOutput,
+            "The process API projection must remain byte-identical after package relocation.");
+        var relocatedAudit = await harness.InvokeCompilerCommandAsync("audit", relocatedRoot, "--json");
+        AssertEqual(audit.StandardOutput, relocatedAudit.StandardOutput,
+            "The process audit projection must remain byte-identical after package relocation.");
+
+        var build = await harness.InvokePackageDirectoryAsync("process-report-build", packageRoot, "build");
+        var managedArtifact = ParseBuiltArtifact(build, "Built executable: ");
+        var outputDirectory = Path.GetDirectoryName(managedArtifact)!;
+        var processCopyName = ProcessRunnerCopyName("process-report-root");
+        var processCopyPath = Path.Combine(outputDirectory, processCopyName);
+        AssertTrue(File.Exists(processCopyPath), $"Managed package build should include the pinned runner copy at {processCopyPath}.");
+        AssertTrue((await File.ReadAllBytesAsync(processCopyPath)).SequenceEqual(helperBytes),
+            "The managed artifact runner copy must be byte-identical to the declared executable.");
+        AssertUnixExecutableIfRequired(processCopyPath, "Managed process runner copies must be executable on Linux.");
+        var commandSchemaPath = Path.Combine(outputDirectory, "command-schema.json");
+        using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(commandSchemaPath)))
+        {
+            AssertEqual(4, schema.RootElement.GetProperty("schema_version").GetInt32(), "Process commands require schema version 4.");
+            var capabilities = schema.RootElement.GetProperty("commands")[0].GetProperty("capabilities");
+            AssertJsonStringArray(capabilities, ["fs.read", "log.write", "process.spawn"]);
+        }
+        using (var receipt = await AssertBuildReceiptAsync(
+                   outputDirectory,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(outputDirectory, managedArtifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json", processCopyName],
+                   packageRoot))
+        {
+            AssertEqual(1, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts remain schema version 1.");
+            AssertTrue(receipt.RootElement.GetProperty("inputs").EnumerateArray().Any(input =>
+                    input.GetProperty("kind").GetString() == "process_executable"
+                    && input.GetProperty("sha256").GetString() == helperHash),
+                "The build receipt must bind the pinned executable as a checked package input.");
+        }
+
+        var unusedPinPackage = await harness.WritePackageAsync(
+            "process-unused-pin",
+            ProcessCliManifest("process-unused", (hostOs, "tools/runner", helperHash)),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        await InstallPinnedExecutableAsync(unusedPinPackage, "tools/runner", helperExecutable);
+        var unusedPinBuild = await harness.InvokePackageDirectoryAsync("process-unused-pin-build", unusedPinPackage, "build");
+        var unusedPinArtifact = ParseBuiltArtifact(unusedPinBuild, "Built executable: ");
+        var unusedPinCopy = Path.Combine(Path.GetDirectoryName(unusedPinArtifact)!, ProcessRunnerCopyName("process-unused"));
+        AssertTrue(File.Exists(unusedPinCopy),
+            "A configured selected process pin must be copied into a build even when no handler injects ProcessRunner.");
+        AssertTrue(HashSha256(await File.ReadAllBytesAsync(unusedPinCopy)) == helperHash,
+            "An unused selected pin must retain its declared bytes in the managed artifact.");
+
+        var changedPinBytes = (byte[])alternatePinBytes.Clone();
+        changedPinBytes[0] ^= 0x01;
+        await File.WriteAllBytesAsync(alternatePath, changedPinBytes);
+        var changedManifest = rootManifest.Replace(
+            $"{(hostOs == "windows" ? "process_linux_sha256" : "process_windows_sha256")} = \"{alternatePinHash}\"",
+            $"{(hostOs == "windows" ? "process_linux_sha256" : "process_windows_sha256")} = \"{HashSha256(changedPinBytes)}\"",
+            StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "lang.toml"), changedManifest);
+        var staleLock = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
+        AssertPackageJsonDiagnostic(staleLock, "E_LOCK", "Changing a declared process pin must stale the dependency lock snapshot.");
+
+        await AssertProcessManifestDiagnosticsAsync(harness, helperExecutable, helperHash, ProcessRunnerSources());
+    }
+
+    private static async Task TestProcessRunnerManagedAndAot(Harness harness)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            throw new IntegrationTestSkippedException("The ProcessRunner native helper and package smoke test target x64 hosts only.");
+
+        var helperExecutable = await harness.GetProcessFixtureExecutableAsync();
+        var helperBytes = await File.ReadAllBytesAsync(helperExecutable);
+        var helperHash = HashSha256(helperBytes);
+        var hostOs = OperatingSystem.IsWindows() ? "windows" : "linux";
+        var packageRoot = await harness.WritePackageAsync(
+            "process-runner-runtime",
+            ProcessCliManifest("process-runtime", (hostOs, "tools/runner", helperHash)),
+            ProcessRunnerSources());
+        await InstallPinnedExecutableAsync(packageRoot, "tools/runner", helperExecutable);
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "payload.txt"), "small stdin λ", new UTF8Encoding(false, true));
+
+        var check = await harness.InvokePackageDirectoryAsync("process-runner-runtime-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var managedBuild = await harness.InvokePackageDirectoryAsync("process-runner-managed-build", packageRoot, "build");
+        var managedArtifact = ParseBuiltArtifact(managedBuild, "Built executable: ");
+        var managedDirectory = Path.GetDirectoryName(managedArtifact)!;
+        var managedCopy = Path.Combine(managedDirectory, ProcessRunnerCopyName("process-runtime"));
+        AssertUnixExecutableIfRequired(managedCopy, "The copied managed build runner must preserve executable permissions on Linux.");
+        var managedSchema = await File.ReadAllBytesAsync(Path.Combine(managedDirectory, "command-schema.json"));
+
+        var literalOne = "space and ; shell $(literal) `ticks`";
+        var literalTwo = "quote \" slash \\ λ";
+        var argvRun = await harness.RunManagedArtifactAsync(
+            managedArtifact,
+            packageRoot,
+            "run", "process-test", "--mode", "args", "--first", literalOne, "--second", literalTwo);
+        AssertProcessArgumentRun(argvRun, "literal argument handling", literalOne, literalTwo);
+
+        var stdinRun = await harness.RunManagedArtifactAsync(
+            managedArtifact, packageRoot, "run", "process-test", "--mode", "stdin");
+        AssertProcessRunText("small stdin λ" + Environment.NewLine, stdinRun, "stdin forwarding");
+
+        var stderrRun = await harness.RunManagedArtifactAsync(
+            managedArtifact, packageRoot, "run", "process-test", "--mode", "stderr");
+        AssertProcessRunText("child stderr λ" + Environment.NewLine, stderrRun, "stderr capture");
+
+        var nonzeroRun = await harness.RunManagedArtifactAsync(
+            managedArtifact, packageRoot, "run", "process-test", "--mode", "exit");
+        AssertProcessRunText("exit=7" + Environment.NewLine, nonzeroRun, "nonzero child exit");
+
+        var markerName = "LANG_PROCESS_TEST_CANARY";
+        var markerValue = "inherited-parent-only";
+        var metaRun = await harness.RunManagedArtifactWithEnvironmentAsync(
+            managedArtifact,
+            packageRoot,
+            new Dictionary<string, string>(StringComparer.Ordinal) { [markerName] = markerValue },
+            "run", "process-test", "--mode", "meta");
+        AssertEqual(0, metaRun.ExitCode, Describe(metaRun));
+        using (var meta = JsonDocument.Parse(metaRun.StandardOutput))
+        {
+            AssertEqual(Path.GetFullPath(managedDirectory), meta.RootElement.GetProperty("cwd").GetString(),
+                "The child working directory must be the generated artifact directory.");
+            AssertEqual("<missing>", meta.RootElement.GetProperty("marker").GetString(),
+                "Pinned children must receive an empty environment rather than inheriting application variables.");
+        }
+        AssertProcessLoggerLine(metaRun.StandardError, "empty child environment and artifact cwd");
+
+        foreach (var (mode, expectedText) in new[]
+                 {
+                     ("argc-exact", "127" + Environment.NewLine),
+                     ("argv-bytes-exact", "16384" + Environment.NewLine),
+                     ("stdin-exact", string.Empty),
+                     ("stdout-exact", string.Empty),
+                     ("stderr-exact", string.Empty)
+                 })
+        {
+            if (mode == "stdin-exact")
+                await File.WriteAllTextAsync(Path.Combine(packageRoot, "payload.txt"), new string('x', 1_048_576), new UTF8Encoding(false, true));
+            else if (mode is "stdout-exact" or "stderr-exact")
+                await File.WriteAllTextAsync(Path.Combine(packageRoot, "payload.txt"), string.Empty, new UTF8Encoding(false, true));
+            var exact = await harness.RunManagedArtifactAsync(managedArtifact, packageRoot, "run", "process-test", "--mode", mode);
+            if (mode == "stdin-exact")
+                AssertProcessRunText(new string('x', 1_048_576) + Environment.NewLine, exact, "exact stdin and stdout limits");
+            else if (mode == "stdout-exact")
+                AssertProcessRunText(new string('x', 1_048_576) + Environment.NewLine, exact, "exact stdout limit");
+            else if (mode == "stderr-exact")
+                AssertProcessRunText(new string('e', 1_048_576) + Environment.NewLine, exact, "exact stderr limit");
+            else
+                AssertProcessRunText(expectedText, exact, $"{mode} limit");
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "payload.txt"), new string('x', 1_048_577), new UTF8Encoding(false, true));
+        AssertProcessRunText("InputTooLarge" + Environment.NewLine,
+            await harness.RunManagedArtifactAsync(managedArtifact, packageRoot, "run", "process-test", "--mode", "stdin"),
+            "stdin over limit");
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "payload.txt"), string.Empty, new UTF8Encoding(false, true));
+
+        foreach (var mode in new[] { "argc-over", "argv-bytes-over", "stdout-over", "stderr-over", "invalid-utf8" })
+        {
+            var result = await harness.RunManagedArtifactAsync(managedArtifact, packageRoot, "run", "process-test", "--mode", mode);
+            var expected = mode switch
+            {
+                "argc-over" or "argv-bytes-over" => "InvalidArgument",
+                "stdout-over" or "stderr-over" => "OutputTooLarge",
+                _ => "InvalidText"
+            };
+            AssertProcessRunText(expected + Environment.NewLine, result, $"{mode} boundary");
+        }
+        AssertProcessArgumentRun(
+            await harness.RunManagedArtifactAsync(managedArtifact, packageRoot, "run", "process-test", "--mode", "empty-argv"),
+            "empty argument list");
+
+        var markerPath = Path.Combine(harness.TemporaryRoot, $"process-timeout-{Guid.NewGuid():N}.pid");
+        var timeoutRun = await harness.RunManagedArtifactWithTimeoutAsync(
+            managedArtifact,
+            packageRoot,
+            TimeSpan.FromSeconds(20),
+            "run", "process-test", "--mode", "timeout", "--marker", markerPath);
+        AssertProcessRunText("TimedOut" + Environment.NewLine, timeoutRun, "fixed process timeout");
+        await AssertProcessTreeWasReapedAsync(markerPath);
+
+        var managedProcessCopyHash = HashSha256(await File.ReadAllBytesAsync(managedCopy));
+        AssertEqual(helperHash, managedProcessCopyHash, "Managed builds must carry an unchanged pinned process executable.");
+        var tamperedCopy = (await File.ReadAllBytesAsync(managedCopy)).ToArray();
+        tamperedCopy[0] ^= 0x01;
+        await File.WriteAllBytesAsync(managedCopy, tamperedCopy);
+        AssertProcessRunText("StartFailed" + Environment.NewLine,
+            await harness.RunManagedArtifactAsync(managedArtifact, packageRoot, "run", "process-test", "--mode", "args"),
+            "copied runner tamper rejection");
+        await File.WriteAllBytesAsync(managedCopy, helperBytes);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(managedCopy, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        var badExecutableBytes = Encoding.UTF8.GetBytes("not a native executable\n");
+        var badPackage = await harness.WritePackageAsync(
+            "process-runner-start-failure",
+            ProcessCliManifest("process-start-failure", (hostOs, "tools/bad-runner", HashSha256(badExecutableBytes))),
+            ProcessRunnerSources());
+        var badExecutablePath = Path.Combine(badPackage, "tools", "bad-runner");
+        Directory.CreateDirectory(Path.GetDirectoryName(badExecutablePath)!);
+        await File.WriteAllBytesAsync(badExecutablePath, badExecutableBytes);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(badExecutablePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var badBuild = await harness.InvokePackageDirectoryAsync("process-runner-start-failure-build", badPackage, "build");
+        var badArtifact = ParseBuiltArtifact(badBuild, "Built executable: ");
+        AssertProcessRunText("StartFailed" + Environment.NewLine,
+            await harness.RunManagedArtifactAsync(badArtifact, badPackage, "run", "process-test", "--mode", "args"),
+            "incompatible process executable without shell fallback");
+
+        if (OperatingSystem.IsLinux())
+        {
+            var cancellableMarker = Path.Combine(harness.TemporaryRoot, $"process-cancel-{Guid.NewGuid():N}.pid");
+            using var process = harness.StartManagedArtifactProcess(
+                managedArtifact,
+                packageRoot,
+                null,
+                "run", "process-test", "--mode", "timeout", "--marker", cancellableMarker);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            await WaitForFileAsync(cancellableMarker, TimeSpan.FromSeconds(5));
+            AssertEqual(0, KillWithSignal(process.Id, 2), "Could not send SIGINT to the async command for ProcessRunner cancellation.");
+            using var cancellationWait = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            await process.WaitForExitAsync(cancellationWait.Token);
+            await stdoutTask;
+            await stderrTask;
+            AssertEqual(130, process.ExitCode, "Host cancellation should propagate after the ProcessRunner child tree is reaped.");
+            await AssertProcessTreeWasReapedAsync(cancellableMarker);
+        }
+
+        var nativeBuild = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "process-runner-native-build", packageRoot, "build", AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        var nativeExecutable = ParseBuiltArtifact(nativeBuild, "Built native executable: ");
+        var nativeDirectory = Path.GetDirectoryName(nativeExecutable)!;
+        var nativeCopy = Path.Combine(nativeDirectory, ProcessRunnerCopyName("process-runtime"));
+        AssertTrue(File.Exists(nativeCopy), $"NativeAOT output must include its process runner copy at {nativeCopy}.");
+        AssertUnixExecutableIfRequired(nativeCopy, "NativeAOT process runner copies must be executable on Linux.");
+        var nativeSchema = await File.ReadAllBytesAsync(Path.Combine(nativeDirectory, "command-schema.json"));
+        AssertTrue(managedSchema.SequenceEqual(nativeSchema), "Managed and NativeAOT process command schemas must be byte-identical.");
+        var nativeRun = await ExecuteNativeWithEnvironmentAsync(
+            nativeExecutable,
+            TimeSpan.FromSeconds(30),
+            new Dictionary<string, string>(StringComparer.Ordinal) { [markerName] = markerValue },
+            "run", "process-test", "--mode", "args", "--first", literalOne, "--second", literalTwo);
+        AssertProcessArgumentRun(nativeRun, "NativeAOT literal argument handling", literalOne, literalTwo);
+        using (var nativeReceipt = await AssertBuildReceiptAsync(
+                   nativeDirectory,
+                   "native_aot",
+                   CurrentHostAotRid(),
+                   [Path.GetRelativePath(nativeDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json", Path.GetFileName(nativeCopy)],
+                   packageRoot))
+            AssertTrue(nativeReceipt.RootElement.GetProperty("inputs").EnumerateArray().Any(input =>
+                    input.GetProperty("kind").GetString() == "process_executable"
+                    && input.GetProperty("sha256").GetString() == helperHash),
+                "NativeAOT receipts must bind the declared process executable input.");
+    }
+
+    private static async Task AssertProcessManifestDiagnosticsAsync(
+        Harness harness,
+        string helperExecutable,
+        string helperHash,
+        IReadOnlyDictionary<string, string> sourceFiles)
+    {
+        var hostOs = OperatingSystem.IsWindows() ? "windows" : "linux";
+        var processKey = hostOs == "windows" ? "process_windows_path" : "process_linux_path";
+        var hashKey = hostOs == "windows" ? "process_windows_sha256" : "process_linux_sha256";
+        var processPair = (hostOs, "tools/runner", helperHash);
+        var validManifest = ProcessCliManifest("process-diagnostic", processPair);
+
+        foreach (var (name, manifest, code) in new[]
+                 {
+                     ("incomplete", CliPackageManifest() + $"{processKey} = \"tools/runner\"\n", "E_MANIFEST"),
+                     ("malformed-hash", CliPackageManifest() + $"{processKey} = \"tools/runner\"\n{hashKey} = \"BAD\"\n\n[capabilities]\nprocess.spawn = \"allow\"\n", "E_MANIFEST"),
+                     ("traversal", ProcessCliManifest("process-traversal", (hostOs, "../runner", helperHash)), "E_MANIFEST"),
+                     ("missing-grant", ProcessCliManifest("process-no-grant", processPair, includeProcessGrant: false), "E_MANIFEST"),
+                     ("missing-pin", CliPackageManifest() + "\n[capabilities]\nprocess.spawn = \"allow\"\n", "E_PROCESS_EXECUTABLE"),
+                     ("wrong-grant", ProcessCliManifest("process-wrong-grant", processPair, processGrantValue: "deny"), "E_MANIFEST"),
+                     ("wrong-section", CliPackageManifest() + "\n[capabilities]\nprocess.spawn = \"allow\"\n" + $"{processKey} = \"tools/runner\"\n{hashKey} = \"{helperHash}\"\n", "E_MANIFEST"),
+                 })
+        {
+            var result = await harness.InvokePackageAsync(
+                $"process-manifest-{name}", "check", manifest, sourceFiles, "--json");
+            AssertPackageJsonDiagnostic(result, code, $"Process manifest case '{name}' must report {code}.");
+        }
+
+        var missingFilePackage = await harness.WritePackageAsync(
+            "process-manifest-missing-file", ProcessCliManifest("process-missing-file", (hostOs, "tools/missing", helperHash)), sourceFiles);
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-manifest-missing-file-check", missingFilePackage, "check", "--json"),
+            "E_PROCESS_EXECUTABLE", "A declared process pin must resolve to an existing file.");
+
+        var mismatchPackage = await harness.WritePackageAsync(
+            "process-manifest-mismatched-hash", ProcessCliManifest("process-mismatch", (hostOs, "tools/runner", new string('0', 64))), sourceFiles);
+        await InstallPinnedExecutableAsync(mismatchPackage, "tools/runner", helperExecutable);
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-manifest-mismatched-hash-check", mismatchPackage, "check", "--json"),
+            "E_PROCESS_EXECUTABLE", "A process pin with a mismatched SHA-256 must be rejected.");
+
+        var unsupportedOrder = ProcessRunnerTestSource().Replace(
+            "fs: FsRead, logger: Logger, runner: ProcessRunner",
+            "fs: FsRead, runner: ProcessRunner, logger: Logger",
+            StringComparison.Ordinal);
+        AssertTrue(unsupportedOrder != ProcessRunnerTestSource(), "The ProcessRunner capability order fixture must be modified.");
+        var orderFiles = sourceFiles.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        orderFiles["src/handlers.lang"] = unsupportedOrder;
+        var orderPackage = await harness.WritePackageAsync(
+            "process-manifest-wrong-order", validManifest, orderFiles);
+        await InstallPinnedExecutableAsync(orderPackage, "tools/runner", helperExecutable);
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-manifest-wrong-order-check", orderPackage, "check", "--json"),
+            "E_COMMAND_HANDLER", "ProcessRunner must be injected after Logger in command handler order.");
+
+        const string noGrantSource = """
+            module handlers;
+            pub union RunError { Failed }
+            pub async fn run(args: self::app::main::RunArgs, runner: ProcessRunner) -> Result<Text, self::handlers::RunError> effects { process.spawn } {
+                let result: Result<ProcessOutput, ProcessError> = await runner.run_text_async([], "");
+                return match result { Ok(output) => Ok(output.stdout), Err(error) => Ok("process-error") };
+            }
+            pub fn describe(error: self::handlers::RunError) -> Text effects {} { return match error { self::handlers::RunError.Failed => "failed" }; }
+            """;
+        var noGrantPackage = await harness.WritePackageAsync(
+            "process-semantic-missing-grant",
+            CliPackageManifest("app::main"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = "module app::main; command run { help \"Run a process.\"; argument label: Text help \"Invocation label.\"; handler: self::handlers::run; error: self::handlers::describe; }\n",
+                ["src/handlers.lang"] = noGrantSource
+            });
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-semantic-missing-grant-check", noGrantPackage, "check", "--json"),
+            "E_CAPABILITY_MISSING", "ProcessRunner use without a process.spawn grant must be rejected by source checking.");
+
+        var unawaitedSource = ProcessRunnerTestSource().Replace(
+            "return await runner.run_text_async(arguments, stdin);",
+            "return runner.run_text_async(arguments, stdin);",
+            StringComparison.Ordinal);
+        var unawaitedFiles = new Dictionary<string, string>(sourceFiles, StringComparer.Ordinal)
+        {
+            ["src/handlers.lang"] = unawaitedSource[unawaitedSource.IndexOf("module handlers;", StringComparison.Ordinal)..]
+        };
+        var unawaitedPackage = await harness.WritePackageAsync(
+            "process-semantic-unawaited", validManifest, unawaitedFiles);
+        await InstallPinnedExecutableAsync(unawaitedPackage, "tools/runner", helperExecutable);
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-semantic-unawaited-check", unawaitedPackage, "check", "--json"),
+            "E_ASYNC_CALL_UNAWAITED", "ProcessRunner async calls must be awaited.");
+
+        var wrongTypeSource = ProcessRunnerTestSource().Replace(
+            "[\"args\", args.first, args.second]",
+            "[\"args\", 1, args.second]",
+            StringComparison.Ordinal);
+        var wrongTypeFiles = sourceFiles.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        wrongTypeFiles["src/handlers.lang"] = wrongTypeSource;
+        var wrongTypePackage = await harness.WritePackageAsync(
+            "process-semantic-wrong-type", validManifest, wrongTypeFiles);
+        await InstallPinnedExecutableAsync(wrongTypePackage, "tools/runner", helperExecutable);
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-semantic-wrong-type-check", wrongTypePackage, "check", "--json"),
+            "E_TYPE_MISMATCH", "ProcessRunner argument lists must be typed as List<Text>.");
+
+        var libraryPackage = await harness.WritePackageAsync(
+            "process-library-scope",
+            LibraryPackageManifest("process-library-scope"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/lib.lang"] = "module lib; pub fn escape(runner: ProcessRunner) -> i32 effects {} { return 1; }\n"
+            });
+        AssertPackageJsonDiagnostic(
+            await harness.InvokePackageDirectoryAsync("process-library-scope-check", libraryPackage, "check", "--json"),
+            "E_CAPABILITY_SCOPE", "ProcessRunner types must stay out of libraries.");
+
+        if (OperatingSystem.IsLinux())
+        {
+            var nonExecutablePackage = await harness.WritePackageAsync(
+                "process-linux-non-executable",
+                ProcessCliManifest("process-linux-mode", processPair),
+                sourceFiles);
+            await InstallPinnedExecutableAsync(nonExecutablePackage, "tools/runner", helperExecutable);
+            File.SetUnixFileMode(
+                Path.Combine(nonExecutablePackage, "tools", "runner"),
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            AssertPackageJsonDiagnostic(
+                await harness.InvokePackageDirectoryAsync("process-linux-non-executable-check", nonExecutablePackage, "check", "--json"),
+                "E_PROCESS_EXECUTABLE", "A selected Linux pin must have an execute permission bit.");
+        }
+
+        var symlinkPackage = await harness.WritePackageAsync(
+            "process-symlink-pin", ProcessCliManifest("process-symlink", processPair), sourceFiles);
+        var symlinkPath = Path.Combine(symlinkPackage, "tools", "runner");
+        Directory.CreateDirectory(Path.GetDirectoryName(symlinkPath)!);
+        try
+        {
+            File.CreateSymbolicLink(symlinkPath, helperExecutable);
+            AssertPackageJsonDiagnostic(
+                await harness.InvokePackageDirectoryAsync("process-symlink-pin-check", symlinkPackage, "check", "--json"),
+                "E_PROCESS_EXECUTABLE", "A process pin must not follow a symbolic link.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException or NotSupportedException)
+        {
+            // Symbolic-link creation is not available in some Windows environments without Developer Mode.
+        }
     }
 
     private static void AssertConfigCliLog(string stderr, string context)
@@ -7857,7 +8700,7 @@ internal static class IntegrationTests
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
             var root = schema.RootElement;
-            AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "Scan CLI schema version mismatch.");
+            AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Scan CLI schema version mismatch.");
             var command = root.GetProperty("commands")[0];
             AssertEqual("scan", command.GetProperty("name").GetString(), "Scan CLI command schema name mismatch.");
             var capabilities = command.GetProperty("capabilities");
@@ -9497,8 +10340,8 @@ internal static class IntegrationTests
             "A typed-command NativeAOT receipt should identify its root package.");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
-            AssertEqual(3, schema.RootElement.GetProperty("schema_version").GetInt32(),
-                "The AOT command schema version must be 3.");
+            AssertEqual(4, schema.RootElement.GetProperty("schema_version").GetInt32(),
+                "The AOT command schema version must be 4.");
             AssertEqual("scan", schema.RootElement.GetProperty("commands")[0].GetProperty("name").GetString(),
                 "The AOT command schema should retain its command declaration.");
             AssertJsonStringArray(schema.RootElement.GetProperty("commands")[0].GetProperty("capabilities"), ["net.client"]);
@@ -9550,7 +10393,7 @@ internal static class IntegrationTests
         AssertTrue(File.Exists(schemaPath), $"Expected scan CLI AOT schema beside the executable: {schemaPath}");
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
-            AssertEqual(3, schema.RootElement.GetProperty("schema_version").GetInt32(),
+            AssertEqual(4, schema.RootElement.GetProperty("schema_version").GetInt32(),
                 "AOT scan command schema version mismatch.");
             var command = schema.RootElement.GetProperty("commands")[0];
             AssertEqual("scan", command.GetProperty("name").GetString(), "AOT scan schema command mismatch.");
@@ -9988,6 +10831,8 @@ internal static class IntegrationTests
 
     private sealed class Harness(string repositoryRoot, string compilerDll, string dotnet, string temporaryRoot)
     {
+        private Task<string>? processFixtureBuild;
+
         public string RepositoryRoot => repositoryRoot;
         public string LastSourcePath { get; private set; } = string.Empty;
 
@@ -10055,6 +10900,258 @@ internal static class IntegrationTests
         }
 
         public string TemporaryRoot => temporaryRoot;
+
+        public Task<string> GetProcessFixtureExecutableAsync() =>
+            processFixtureBuild ??= BuildProcessFixtureExecutableAsync();
+
+        private async Task<string> BuildProcessFixtureExecutableAsync()
+        {
+            if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+                throw new IntegrationTestSkippedException("The generated native process fixture targets x64 hosts only.");
+
+            var sourceDirectory = Path.Combine(temporaryRoot, "process-fixture-source");
+            var outputDirectory = Path.Combine(temporaryRoot, "process-fixture-publish");
+            Directory.CreateDirectory(sourceDirectory);
+            await File.WriteAllTextAsync(Path.Combine(sourceDirectory, "process-fixture.csproj"), """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <ImplicitUsings>enable</ImplicitUsings>
+                    <Nullable>enable</Nullable>
+                    <PublishAot>true</PublishAot>
+                    <StripSymbols>true</StripSymbols>
+                  </PropertyGroup>
+                </Project>
+                """);
+            await File.WriteAllTextAsync(Path.Combine(sourceDirectory, "Program.cs"), ProcessFixtureProgramSource);
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                WorkingDirectory = sourceDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            };
+            foreach (var argument in new[]
+                     {
+                         "publish", "process-fixture.csproj", "-c", "Release", "-r", CurrentHostAotRid(),
+                         "--self-contained", "true", "--nologo", "-v:q", "-p:RestoreIgnoreFailedSources=true",
+                         "-o", outputDirectory
+                     })
+                startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["LANG_DOTNET"] = dotnet;
+            startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+
+            using var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+                throw new InvalidOperationException("Could not start the temporary NativeAOT ProcessRunner helper build.");
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            using var timeout = new CancellationTokenSource(AotPublishTimeout);
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+                await process.WaitForExitAsync();
+                throw new TimeoutException($"NativeAOT ProcessRunner helper publish exceeded {AotPublishTimeout}.");
+            }
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException($"Temporary NativeAOT ProcessRunner helper build failed ({process.ExitCode}). stdout=<{stdout}> stderr=<{stderr}>");
+
+            var executable = Path.Combine(outputDirectory, OperatingSystem.IsWindows() ? "process-fixture.exe" : "process-fixture");
+            if (!File.Exists(executable))
+                throw new InvalidOperationException($"Temporary NativeAOT ProcessRunner helper was not published at {executable}. stdout=<{stdout}> stderr=<{stderr}>");
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+            return executable;
+        }
+
+        private const string ProcessFixtureProgramSource = """
+            using System.Diagnostics;
+            using System.Text;
+
+            if (args.Length == 0)
+            {
+                Console.WriteLine("[]");
+                return 0;
+            }
+
+            return await RunAsync(args);
+
+            static async Task<int> RunAsync(string[] arguments)
+            {
+                Console.InputEncoding = new UTF8Encoding(false, true);
+                Console.OutputEncoding = new UTF8Encoding(false);
+                var mode = arguments[0];
+                switch (mode)
+                {
+                    case "args":
+                        Console.WriteLine("[" + string.Join(",", arguments.Skip(1).Select(JsonQuote)) + "]");
+                        return 0;
+                    case "count":
+                        Console.Write(arguments.Length - 1);
+                        return 0;
+                    case "size":
+                        Console.Write(arguments.Sum(value => Encoding.UTF8.GetByteCount(value)));
+                        return 0;
+                    case "stdin":
+                        Console.Out.Write(await Console.In.ReadToEndAsync());
+                        return 0;
+                    case "streams":
+                        Console.Out.Write("child stdout λ");
+                        Console.Error.Write("child stderr λ");
+                        return 0;
+                    case "exit":
+                        Console.Out.Write("child exited nonzero");
+                        Console.Error.Write("child exit diagnostic");
+                        return 7;
+                    case "meta":
+                        Console.WriteLine("{\"cwd\":" + JsonQuote(Environment.CurrentDirectory)
+                            + ",\"marker\":" + JsonQuote(Environment.GetEnvironmentVariable("LANG_PROCESS_TEST_CANARY") ?? "<missing>") + "}");
+                        return 0;
+                    case "stdout":
+                        Console.Out.Write(new string('x', int.Parse(arguments[1], System.Globalization.CultureInfo.InvariantCulture)));
+                        return 0;
+                    case "stderr":
+                        Console.Error.Write(new string('e', int.Parse(arguments[1], System.Globalization.CultureInfo.InvariantCulture)));
+                        return 0;
+                    case "invalid-utf8":
+                        await Console.OpenStandardOutput().WriteAsync(new byte[] { 0xff }, 0, 1);
+                        return 0;
+                    case "timeout":
+                        var childStart = new ProcessStartInfo
+                        {
+                            FileName = Environment.ProcessPath ?? throw new InvalidOperationException("Native helper process path is unavailable."),
+                            UseShellExecute = false
+                        };
+                        childStart.ArgumentList.Add("child");
+                        childStart.ArgumentList.Add(arguments[1]);
+                        using (var child = Process.Start(childStart) ?? throw new InvalidOperationException("Could not start the descendant fixture."))
+                            await File.WriteAllTextAsync(arguments[1], child.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        await Task.Delay(Timeout.InfiniteTimeSpan);
+                        return 0;
+                    case "child":
+                        await Task.Delay(TimeSpan.FromMinutes(2));
+                        await File.WriteAllTextAsync(arguments[1] + ".late", "descendant survived");
+                        return 0;
+                    default:
+                        return 64;
+                }
+            }
+
+            static string JsonQuote(string value) => "\"" + value
+                .Replace("\\", "\\\\", StringComparison.Ordinal)
+                .Replace("\"", "\\\"", StringComparison.Ordinal)
+                .Replace("\r", "\\r", StringComparison.Ordinal)
+                .Replace("\n", "\\n", StringComparison.Ordinal)
+                .Replace("\t", "\\t", StringComparison.Ordinal) + "\"";
+            """;
+
+        public async Task<ProcessResult> RunManagedArtifactAsync(
+            string artifactPath,
+            string workingDirectory,
+            params string[] arguments) =>
+            await RunManagedArtifactWithTimeoutAsync(artifactPath, workingDirectory, ProcessTimeout, arguments);
+
+        public Task<ProcessResult> RunManagedArtifactWithEnvironmentAsync(
+            string artifactPath,
+            string workingDirectory,
+            IReadOnlyDictionary<string, string>? environment,
+            params string[] arguments) =>
+            RunManagedArtifactWithTimeoutAndEnvironmentAsync(artifactPath, workingDirectory, ProcessTimeout, environment, arguments);
+
+        public Task<ProcessResult> RunManagedArtifactWithTimeoutAsync(
+            string artifactPath,
+            string workingDirectory,
+            TimeSpan timeout,
+            params string[] arguments) =>
+            RunManagedArtifactWithTimeoutAndEnvironmentAsync(artifactPath, workingDirectory, timeout, null, arguments);
+
+        private async Task<ProcessResult> RunManagedArtifactWithTimeoutAndEnvironmentAsync(
+            string artifactPath,
+            string workingDirectory,
+            TimeSpan timeout,
+            IReadOnlyDictionary<string, string>? environment,
+            string[] arguments)
+        {
+            using var process = StartManagedArtifactProcess(artifactPath, workingDirectory, environment, arguments);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            using var cancellation = new CancellationTokenSource(timeout);
+            try
+            {
+                await process.WaitForExitAsync(cancellation.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+                await process.WaitForExitAsync();
+                throw new TimeoutException($"Managed artifact {artifactPath} did not exit within {timeout}.");
+            }
+
+            return new ProcessResult(process.ExitCode, await stdoutTask, await stderrTask);
+        }
+
+        public Process StartManagedArtifactProcess(
+            string artifactPath,
+            string workingDirectory,
+            IReadOnlyDictionary<string, string>? environment,
+            params string[] arguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = dotnet,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add(artifactPath);
+            foreach (var argument in arguments)
+                startInfo.ArgumentList.Add(argument);
+            startInfo.Environment["LANG_DOTNET"] = dotnet;
+            RemoveConfigEnvironment(startInfo);
+            if (environment is not null)
+            {
+                foreach (var (name, value) in environment)
+                    startInfo.Environment[name] = value;
+            }
+
+            var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                process.Dispose();
+                throw new InvalidOperationException($"Could not start managed artifact {artifactPath}.");
+            }
+            return process;
+        }
 
         public Task<ProcessResult> InvokeAsync(string caseName, string command, string source, params string[] additionalArguments) =>
             InvokeWithTimeoutAsync(caseName, command, source, ProcessTimeout, additionalArguments);

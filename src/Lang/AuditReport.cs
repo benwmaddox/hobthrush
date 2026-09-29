@@ -43,7 +43,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -102,6 +102,7 @@ internal static class AuditReport
             manifest_grants = grants,
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
+            process_executables = ProcessExecutableMetadata(graph.Root.Package.Manifest.ProcessExecutables),
             trusted_claims = claims.Select(claim => new
             {
                 operation = claim.Operation,
@@ -151,6 +152,7 @@ internal static class AuditReport
             manifest_grants = Array.Empty<string>(),
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = (string?)null,
+            process_executables = Array.Empty<object>(),
             trusted_claims = claims.Select(claim => new
             {
                 operation = claim.Operation,
@@ -286,10 +288,18 @@ internal static class AuditReport
 
             inputTexts.Sort((left, right) => StringComparer.Ordinal.Compare(left.Path, right.Path));
             var inputs = inputTexts.Select(input => new AuditPackageInputRecord(
-                identity,
-                input.Kind,
-                input.Path,
-                HashNormalizedText(input.Text))).ToArray();
+                    identity,
+                    input.Kind,
+                    input.Path,
+                    HashNormalizedText(input.Text)))
+                .Concat(node.Package.Manifest.ProcessExecutables.Select(pin => new AuditPackageInputRecord(
+                    identity,
+                    "process_executable",
+                    pin.Path,
+                    pin.Sha256)))
+                .OrderBy(input => input.Path, StringComparer.Ordinal)
+                .ThenBy(input => input.Kind, StringComparer.Ordinal)
+                .ToArray();
             var dependencies = node.DependencyIds
                 .OrderBy(dependency => dependency.Key, StringComparer.Ordinal)
                 .Select(dependency => new AuditPackageDependency(
@@ -303,7 +313,7 @@ internal static class AuditReport
             result.Add(new AuditPackageSnapshot(
                 identity,
                 role,
-                HashPackageContent(inputTexts),
+                HashPackageContent(inputTexts, node.Package.Manifest.ProcessExecutables),
                 inputs,
                 dependencies));
         }
@@ -513,7 +523,9 @@ internal static class AuditReport
             relativePath,
             StringComparison.Ordinal)).Id;
 
-    private static string HashPackageContent(IReadOnlyList<(string Kind, string Path, string Text)> entries)
+    private static string HashPackageContent(
+        IReadOnlyList<(string Kind, string Path, string Text)> entries,
+        IEnumerable<ProcessExecutablePin>? processExecutables = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(ContentHashDomain);
@@ -522,6 +534,13 @@ internal static class AuditReport
         {
             AppendField(entry.Path);
             AppendField(NormalizeLineEndings(entry.Text));
+        }
+        foreach (var executable in (processExecutables ?? [])
+                     .OrderBy(pin => pin.Os == "windows" ? 0 : 1))
+        {
+            AppendField("process_executable");
+            AppendField(executable.Path);
+            AppendField(executable.Sha256);
         }
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
 
@@ -533,6 +552,16 @@ internal static class AuditReport
             hash.AppendData(bytes);
         }
     }
+
+    private static object[] ProcessExecutableMetadata(IEnumerable<ProcessExecutablePin> pins) => pins
+        .OrderBy(pin => pin.Os == "windows" ? 0 : 1)
+        .Select(pin => (object)new
+        {
+            os = pin.Os,
+            path = pin.Path,
+            sha256 = pin.Sha256
+        })
+        .ToArray();
 
     private static byte[] Serialize<T>(T value)
     {
