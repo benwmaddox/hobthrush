@@ -6,7 +6,7 @@ using System.Text.Json;
 internal static class PackageLock
 {
     private const string FileName = "lang.lock";
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly byte[] ContentHashDomain = Encoding.UTF8.GetBytes("LANG-PACKAGE-CONTENT\0v1");
     private static readonly HashSet<string> ReservedDependencyAliases = new(StringComparer.Ordinal)
@@ -31,6 +31,7 @@ internal static class PackageLock
             writer.WriteString("name", graph.Root.Package.Manifest.Name);
             writer.WriteString("version", graph.Root.Package.Manifest.Version);
             writer.WriteString("manifest_sha256", HashNormalizedText(graph.Root.Package.ManifestText));
+            WriteSourceIdentity(writer, graph.Root.SourceIdentity);
             WriteDependencies(writer, graph, graph.Root);
             writer.WriteEndObject();
 
@@ -44,6 +45,7 @@ internal static class PackageLock
                 writer.WriteString("path", package.RelativePath);
                 writer.WriteString("name", package.Package.Manifest.Name);
                 writer.WriteString("version", package.Package.Manifest.Version);
+                WriteSourceIdentity(writer, package.SourceIdentity);
                 writer.WriteString("content_sha256", HashPackageContent(package.Package));
                 WriteDependencies(writer, graph, package);
                 writer.WriteEndObject();
@@ -181,6 +183,31 @@ internal static class PackageLock
         writer.WriteEndObject();
     }
 
+    private static void WriteSourceIdentity(Utf8JsonWriter writer, PackageSourceIdentity sourceIdentity)
+    {
+        writer.WritePropertyName("source");
+        writer.WriteStartObject();
+        switch (sourceIdentity.Kind)
+        {
+            case PackageSourceKind.Root:
+                writer.WriteString("kind", "root");
+                break;
+            case PackageSourceKind.Path:
+                writer.WriteString("kind", "path");
+                writer.WriteString("path", sourceIdentity.Path);
+                break;
+            case PackageSourceKind.Git:
+                writer.WriteString("kind", "git");
+                writer.WriteString("url", sourceIdentity.Url);
+                writer.WriteString("commit", sourceIdentity.Commit);
+                break;
+            default:
+                throw new InvalidOperationException("Unknown package source identity kind");
+        }
+
+        writer.WriteEndObject();
+    }
+
     private static string HashPackageContent(LoadedPackage package)
     {
         var entries = new List<(string Path, string Text)>
@@ -242,10 +269,11 @@ internal static class PackageLock
                 return false;
 
             var root = documentRoot.GetProperty("root");
-            if (!HasExactProperties(root, ["name", "version", "manifest_sha256", "dependencies"]) ||
+            if (!HasExactProperties(root, ["name", "version", "manifest_sha256", "source", "dependencies"]) ||
                 !IsString(root.GetProperty("name")) ||
                 !IsString(root.GetProperty("version")) ||
                 !IsHash(root.GetProperty("manifest_sha256")) ||
+                !HasSourceIdentity(root.GetProperty("source")) ||
                 !HasSortedDependencies(root.GetProperty("dependencies")))
                 return false;
 
@@ -257,20 +285,22 @@ internal static class PackageLock
             string? previousPath = null;
             foreach (var package in packages.EnumerateArray())
             {
-                if (!HasExactProperties(package, ["path", "name", "version", "content_sha256", "dependencies"]))
+                if (!HasExactProperties(package, ["path", "name", "version", "source", "content_sha256", "dependencies"]))
                     return false;
 
                 var pathElement = package.GetProperty("path");
                 if (!IsString(pathElement))
                     return false;
                 var path = pathElement.GetString()!;
-                if (!IsPortableRelativePath(path) || !seenPaths.Add(path) ||
+                var source = package.GetProperty("source");
+                if (!IsStablePackageReference(path) || !IsPackagePathForSource(path, source) || !seenPaths.Add(path) ||
                     (previousPath is not null && StringComparer.Ordinal.Compare(previousPath, path) >= 0))
                     return false;
                 previousPath = path;
 
                 if (!IsString(package.GetProperty("name")) ||
                     !IsString(package.GetProperty("version")) ||
+                    !HasSourceIdentity(source) ||
                     !IsHash(package.GetProperty("content_sha256")) ||
                     !HasSortedDependencies(package.GetProperty("dependencies")))
                     return false;
@@ -301,6 +331,36 @@ internal static class PackageLock
         return index == expected.Length;
     }
 
+    private static bool HasSourceIdentity(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty("kind", out var kindElement) ||
+            !IsString(kindElement))
+            return false;
+
+        switch (kindElement.GetString())
+        {
+            case "root":
+                return HasExactProperties(element, ["kind"]);
+            case "path":
+                return HasExactProperties(element, ["kind", "path"]) &&
+                       IsString(element.GetProperty("path")) &&
+                       IsPortableRelativePath(element.GetProperty("path").GetString()!);
+            case "git":
+                if (!HasExactProperties(element, ["kind", "url", "commit"]) ||
+                    !IsString(element.GetProperty("url")) || !IsString(element.GetProperty("commit")))
+                    return false;
+
+                var url = element.GetProperty("url").GetString()!;
+                var commit = element.GetProperty("commit").GetString()!;
+                return PackageDependencySpec.TryParseManifest($"git+{url}#{commit}", out var spec, out _) &&
+                       spec is { Kind: PackageDependencyKind.Git } &&
+                       string.Equals(spec.Url, url, StringComparison.Ordinal) &&
+                       string.Equals(spec.Commit, commit, StringComparison.Ordinal);
+            default:
+                return false;
+        }
+    }
+
     private static bool HasSortedDependencies(JsonElement element)
     {
         if (element.ValueKind != JsonValueKind.Object)
@@ -312,7 +372,7 @@ internal static class PackageLock
         {
             if (!IsDependencyAlias(property.Name) || !seen.Add(property.Name) || !IsString(property.Value) ||
                 (previousAlias is not null && StringComparer.Ordinal.Compare(previousAlias, property.Name) >= 0) ||
-                !IsPortableRelativePath(property.Value.GetString()!))
+                !IsStablePackageReference(property.Value.GetString()!))
                 return false;
             previousAlias = property.Name;
         }
@@ -326,6 +386,29 @@ internal static class PackageLock
             return false;
 
         return path.Split('/').All(PortablePackagePath.IsValidRelativeSegment);
+    }
+
+    private static bool IsStablePackageReference(string path) =>
+        IsPortableRelativePath(path) ||
+        (path.Length == 68 && path.StartsWith("git:", StringComparison.Ordinal) &&
+         path.AsSpan(4).ToArray().All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+
+    private static bool IsPackagePathForSource(string path, JsonElement source)
+    {
+        if (!HasSourceIdentity(source))
+            return false;
+
+        return source.GetProperty("kind").GetString() switch
+        {
+            "path" => string.Equals(path, source.GetProperty("path").GetString(), StringComparison.Ordinal),
+            "git" => string.Equals(
+                path,
+                PackageSourceCache.StableGitPackagePath(
+                    source.GetProperty("url").GetString()!,
+                    source.GetProperty("commit").GetString()!),
+                StringComparison.Ordinal),
+            _ => false
+        };
     }
 
     private static bool IsIdentifier(string identifier) =>

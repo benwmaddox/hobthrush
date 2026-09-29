@@ -141,8 +141,8 @@
         "audit-repair.check-clean",
         "audit-repair.expected-diagnostics",
         "audit-repair.inspect-effects",
-        "audit-repair.audit-v5",
-        "audit-repair.receipt-v1",
+        "audit-repair.audit-v6",
+        "audit-repair.receipt-v2",
         "audit-repair.runtime",
         "audit-repair.docs-claims"
       ]

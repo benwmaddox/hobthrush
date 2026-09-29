@@ -30,6 +30,29 @@ internal static class Driver
         if (args.Length == 1 && args[0] == "test")
             return TestFixtures();
 
+        if (args.Length != 0 && args[0] == "new")
+        {
+            if (args.Length != 3 || args[1] is not ("lib" or "cli" or "web"))
+            {
+                PrintUsage();
+                return 2;
+            }
+
+            return ReportProjectWorkflow(ProjectWorkflow.Create(args[1], args[2], Environment.CurrentDirectory));
+        }
+
+        if (args.Length != 0 && args[0] == "add")
+        {
+            if (args.Length == 2)
+                return ReportProjectWorkflow(ProjectWorkflow.Add(Environment.CurrentDirectory, args[1]));
+
+            if (args.Length == 3)
+                return ReportProjectWorkflow(ProjectWorkflow.Add(args[1], args[2]));
+
+            PrintUsage();
+            return 2;
+        }
+
         if (args.Length != 0 && args[0] == "lock")
             return RunLock(args);
 
@@ -215,7 +238,7 @@ internal static class Driver
             return 1;
         }
 
-        var resolved = PackageLoader.ResolveGraph(packageDirectory);
+        var resolved = PackageLoader.ResolveGraph(packageDirectory, PackageResolutionMode.AllowFetch);
         if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
         {
             List<Diagnostic> diagnostics = resolved.Diagnostics.Count != 0
@@ -230,6 +253,13 @@ internal static class Driver
         if (writeDiagnostics.Count != 0)
         {
             PrintDiagnostics(writeDiagnostics, json: false);
+            return 1;
+        }
+
+        var validationDiagnostics = PackageLock.Validate(graph);
+        if (validationDiagnostics.Count != 0)
+        {
+            PrintDiagnostics(validationDiagnostics, json: false);
             return 1;
         }
 
@@ -1136,7 +1166,16 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang audit PACKAGE_DIRECTORY --json | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang inspect api PACKAGE_DIRECTORY --json | lang test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: lang new lib|cli|web NAME | lang add SOURCE | lang add PACKAGE_DIRECTORY SOURCE | lang check FILE_OR_PACKAGE [--json] | lang build FILE_OR_PACKAGE [--aot --rid RID] | lang run FILE_OR_PACKAGE [-- APP_ARGS] | lang lock PACKAGE_DIRECTORY | lang audit PACKAGE_DIRECTORY --json | lang inspect effects PACKAGE_DIRECTORY SYMBOL --json | lang inspect api PACKAGE_DIRECTORY --json | lang test [FILE_OR_PACKAGE]");
+
+    private static int ReportProjectWorkflow(ProjectWorkflowResult result)
+    {
+        if (result.Diagnostics.Count != 0)
+            PrintDiagnostics(result.Diagnostics, json: false);
+        if (result.Message is not null)
+            Console.WriteLine(result.Message);
+        return result.ExitCode;
+    }
 
     private static int ReportBuildTargetError(string message, string file)
     {
