@@ -243,5 +243,50 @@
     "file": "48-transitive-fs-write-effect.lang",
     "status": "active",
     "expectedCodes": ["E_EFFECT_EXCEEDED"]
+  },
+  {
+    "file": "49-valid-map.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "50-map-empty-needs-context.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "51-map-key-type.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "52-map-arity.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH", "E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "53-map-member-arguments.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH", "E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "54-map-unknown-member.lang",
+    "status": "active",
+    "expectedCodes": ["E_FIELD_UNKNOWN", "E_FIELD_UNKNOWN"]
+  },
+  {
+    "file": "55-map-resource-direct.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "56-map-resource-nested.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "57-map-resource-generic.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
   }
 ]

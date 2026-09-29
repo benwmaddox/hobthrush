@@ -488,6 +488,7 @@ internal static class Emitter
             if (UsesHttpGetTextAsync) EmitHttpGetTextAsyncHelper();
             if (UsesTextLength) EmitTextLengthHelper();
             if (UsesListGet) EmitListGetHelper();
+            if (UsesMapGet) EmitMapGetHelper();
             if (UsesTextSplit) EmitTextSplitHelper();
             if (UsesHtmlBuilders) EmitHtmlHelpers();
             if (UsesDatabase) EmitDatabaseHelpers();
@@ -1319,6 +1320,11 @@ internal static class Emitter
             TypedBoolExpr boolean => boolean.Value ? "true" : "false",
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
             TypedListExpr list => EmitList(list),
+            TypedMapEmptyExpr map => EmitMapEmpty(map),
+            TypedMapSetExpr map => "(" + EmitExpr(map.Target) + ").SetItem(" + EmitExpr(map.Key) + ", " + EmitExpr(map.Value) + ")",
+            TypedMapGetExpr map => "MapGet(" + EmitExpr(map.Target) + ", " + EmitExpr(map.Key) + ")",
+            TypedMapKeysExpr map => "global::System.Collections.Immutable.ImmutableArray.CreateRange<string>((" + EmitExpr(map.Target) + ").Keys)",
+            TypedMapLengthExpr map => "(" + EmitExpr(map.Target) + ").Count",
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
@@ -1353,6 +1359,16 @@ internal static class Emitter
                 return immutableArray + "<" + itemType + ">.Empty";
             return immutableArray + ".Create<" + itemType + ">(" +
                 string.Join(", ", expression.Items.Select(EmitExpr)) + ")";
+        }
+
+        private string EmitMapEmpty(TypedMapEmptyExpr expression)
+        {
+            var keyType = EmitType(expression.Type.Arguments[0]);
+            var valueType = EmitType(expression.Type.Arguments[1]);
+            if (keyType != "string")
+                throw new InvalidOperationException("Checked map keys must lower to Text");
+            return "global::System.Collections.Immutable.ImmutableSortedDictionary<string, " + valueType +
+                ">.Empty.WithComparers(global::System.StringComparer.Ordinal)";
         }
 
         private string EmitDatabaseCall(TypedDatabaseCallExpr call)
@@ -1708,6 +1724,16 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        if ((uint)index >= (uint)items.Length) return new Option<T>.None();");
             _source.AppendLine("        return new Option<T>.Some(items[index]);");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitMapGetHelper()
+        {
+            _source.AppendLine("    private static Option<T> MapGet<T>(global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> values, string key)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (values.TryGetValue(key, out var value)) return new Option<T>.Some(value);");
+            _source.AppendLine("        return new Option<T>.None();");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -3507,6 +3533,7 @@ internal static class Emitter
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.List => "global::System.Collections.Immutable.ImmutableArray<" + EmitType(type.Arguments[0]) + ">",
+            LangTypeKind.Map => EmitMapType(type),
             LangTypeKind.FilePath => "FilePath",
             LangTypeKind.Html => "Html",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
@@ -3533,6 +3560,14 @@ internal static class Emitter
             LangTypeKind.ProcessError => "ProcessError",
             _ => throw new InvalidOperationException("Error type reached emitter")
         };
+
+        private string EmitMapType(LangType type)
+        {
+            if (type.Arguments.Count != 2 || type.Arguments[0].Kind != LangTypeKind.Text)
+                throw new InvalidOperationException("Checked Map types must have Text keys and one value type");
+            return "global::System.Collections.Immutable.ImmutableSortedDictionary<string, " +
+                EmitType(type.Arguments[1]) + ">";
+        }
 
         private string EmitTypeParameter(LangType type)
         {
@@ -3697,6 +3732,12 @@ internal static class Emitter
             .SelectMany(EnumerateExpressions)
             .Any(expression => expression is TypedListGetExpr);
 
+        private bool UsesMapGet => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .Any(expression => expression is TypedMapGetExpr);
+
         private bool UsesTextSplit => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))
             .SelectMany(StatementExpressions)
@@ -3806,6 +3847,21 @@ internal static class Emitter
                 case TypedListExpr list:
                     foreach (var item in list.Items)
                     foreach (var nested in EnumerateExpressions(item)) yield return nested;
+                    break;
+                case TypedMapSetExpr map:
+                    foreach (var nested in EnumerateExpressions(map.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(map.Key)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(map.Value)) yield return nested;
+                    break;
+                case TypedMapGetExpr map:
+                    foreach (var nested in EnumerateExpressions(map.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(map.Key)) yield return nested;
+                    break;
+                case TypedMapKeysExpr map:
+                    foreach (var nested in EnumerateExpressions(map.Target)) yield return nested;
+                    break;
+                case TypedMapLengthExpr map:
+                    foreach (var nested in EnumerateExpressions(map.Target)) yield return nested;
                     break;
                 case TypedBinaryExpr binary:
                     foreach (var nested in EnumerateExpressions(binary.Left)) yield return nested;

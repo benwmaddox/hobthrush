@@ -57,6 +57,7 @@ internal static partial class IntegrationTests
             ("if conditions, operand types, returns, and scopes are checked", TestInvalidControlFlow),
             ("Text length counts Unicode scalars and trim removes Unicode whitespace", TestUnicodeTextOperations),
             ("lists infer generic items, append immutably, split exactly, and preserve iteration order", TestListRuntime),
+            ("immutable maps preserve snapshots, generic operations, nested values, and ordinal keys in managed and NativeAOT runtimes", TestMapRuntime),
             ("list loops, immutable assignment, effects, and resource escapes have exact diagnostics", TestListDiagnostics),
             ("union payload matching executes", TestUnionMatchOutput),
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
@@ -533,6 +534,126 @@ internal static partial class IntegrationTests
 
         var result = await harness.InvokeAsync("collections-runtime", "run", source);
         AssertRunOutput("42" + Environment.NewLine, result);
+    }
+
+    private static async Task TestMapRuntime(Harness harness)
+    {
+        const string source = """
+            module harness::map_runtime;
+
+            pub struct Map { value: i32 }
+
+            fn lookup<T>(values: Map<Text, T>, key: Text) -> Option<T> effects {} {
+                return values.get(key);
+            }
+            fn store<T>(values: Map<Text, T>, key: Text, value: T) -> Map<Text, T> effects {} {
+                return values.set(key, value);
+            }
+            fn hasInt(values: Map<Text, i32>, key: Text, expected: i32) -> bool effects {} {
+                return match self::harness::map_runtime::lookup(values, key) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn lacksKey(values: Map<Text, i32>, key: Text) -> bool effects {} {
+                return match self::harness::map_runtime::lookup(values, key) {
+                    Some(_) => false,
+                    None => true,
+                };
+            }
+            fn textAt(values: List<Text>, index: i32, expected: Text) -> bool effects {} {
+                return match values.get(index) {
+                    Some(value) => value == expected,
+                    None => false,
+                };
+            }
+            fn nestedValueIs(values: Map<Text, Map<Text, i32>>, key: Text, innerKey: Text, expected: i32) -> bool effects {} {
+                return match values.get(key) {
+                    Some(inner) => match inner.get(innerKey) {
+                        Some(value) => value == expected,
+                        None => false,
+                    },
+                    None => false,
+                };
+            }
+            fn localMapShadow() -> bool effects {} {
+                let Map: Map<Text, i32> = Map.empty();
+                return Map.length == 0;
+            }
+            fn qualifiedMapCollision() -> bool effects {} {
+                let user: self::harness::map_runtime::Map = self::harness::map_runtime::Map { value: 7 };
+                return user.value == 7;
+            }
+
+            pub fn main() -> i32 effects {} {
+                let empty: Map<Text, i32> = Map.empty();
+                if empty.length == 0 { } else { return 1; }
+
+                let original: Map<Text, i32> = empty.set("shared", 1);
+                let overwritten: Map<Text, i32> = original.set("shared", 2);
+                if original.length == 1 { } else { return 2; }
+                if self::harness::map_runtime::hasInt(original, "shared", 1) { } else { return 3; }
+                if overwritten.length == 1 { } else { return 4; }
+                if self::harness::map_runtime::hasInt(overwritten, "shared", 2) { } else { return 5; }
+                if self::harness::map_runtime::lacksKey(empty, "shared") { } else { return 6; }
+
+                var rebound: Map<Text, i32> = original;
+                rebound = self::harness::map_runtime::store(rebound, "shared", 3);
+                rebound = self::harness::map_runtime::store(rebound, "new", 4);
+                if rebound.length == 2 { } else { return 7; }
+                if self::harness::map_runtime::hasInt(rebound, "shared", 3) { } else { return 8; }
+                if self::harness::map_runtime::hasInt(rebound, "new", 4) { } else { return 9; }
+                if self::harness::map_runtime::hasInt(original, "shared", 1) { } else { return 10; }
+                if self::harness::map_runtime::lacksKey(rebound, "missing") { } else { return 11; }
+
+                let inner: Map<Text, i32> = Map.empty();
+                let innerWithValue: Map<Text, i32> = inner.set("answer", 42);
+                let outer: Map<Text, Map<Text, i32>> = Map.empty();
+                let nested: Map<Text, Map<Text, i32>> = outer.set("child", innerWithValue);
+                if self::harness::map_runtime::nestedValueIs(nested, "child", "answer", 42) { } else { return 12; }
+
+                let composed: Text = "é";
+                let decomposed: Text = "é";
+                var ordered: Map<Text, i32> = Map.empty();
+                ordered = ordered.set(composed, 1);
+                ordered = ordered.set("a", 2);
+                ordered = ordered.set(decomposed, 3);
+                ordered = ordered.set("A", 4);
+                ordered = ordered.set("z", 5);
+                let keys: List<Text> = ordered.keys();
+                if keys.length == 5 { } else { return 13; }
+                if self::harness::map_runtime::textAt(keys, 0, "A") { } else { return 14; }
+                if self::harness::map_runtime::textAt(keys, 1, "a") { } else { return 15; }
+                if self::harness::map_runtime::textAt(keys, 2, decomposed) { } else { return 16; }
+                if self::harness::map_runtime::textAt(keys, 3, "z") { } else { return 17; }
+                if self::harness::map_runtime::textAt(keys, 4, composed) { } else { return 18; }
+                if self::harness::map_runtime::hasInt(ordered, composed, 1) { } else { return 19; }
+                if self::harness::map_runtime::hasInt(ordered, decomposed, 3) { } else { return 20; }
+                if self::harness::map_runtime::localMapShadow() { } else { return 21; }
+                if self::harness::map_runtime::qualifiedMapCollision() { } else { return 22; }
+                return 42;
+            }
+            """;
+
+        var managed = await harness.InvokeAsync("immutable-map-managed", "run", source);
+        AssertRunOutput("42" + Environment.NewLine, managed);
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("The NativeAOT map test requires Windows x64 or Linux x64.");
+
+        var build = await harness.InvokeWithTimeoutAsync(
+            "immutable-map-aot", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, build.ExitCode, Describe(build));
+        const string prefix = "Built native executable: ";
+        AssertTrue(build.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(build));
+        AssertTrue(build.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(build));
+        var executablePath = build.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the NativeAOT map executable at {executablePath}.");
+        var native = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
+        AssertRunOutput("42" + Environment.NewLine, native);
     }
 
     private static async Task TestListDiagnostics(Harness harness)
@@ -2100,7 +2221,8 @@ internal static partial class IntegrationTests
                 module app::main;
                 pub struct Envelope {
                     records: List<Option<direct::records::Record>>,
-                    result: Result<direct::records::Record, direct::records::Status>
+                    result: Result<direct::records::Record, direct::records::Status>,
+                    snapshots: Map<Text, List<Option<direct::records::Record>>>
                 }
                 pub union ApiReply { Found(direct::records::Record), Empty }
                 struct HiddenRoot { note: Text }
@@ -2145,7 +2267,7 @@ internal static partial class IntegrationTests
                 pub union Status { Empty, Failed(foundation::models::Issue), Record(self::records::Record) }
                 struct HiddenDirect { secret: Text }
                 fn hidden_direct() -> i32 effects {} { return 2; }
-                pub fn wrap<T>(items: List<Option<T>>, outcome: Result<T, foundation::models::Issue>) -> Option<List<Result<T, self::records::Record>>> effects {} {
+                pub fn wrap<T>(items: List<Option<T>>, outcome: Result<T, foundation::models::Issue>) -> Option<List<Map<Text, Result<T, self::records::Record>>>> effects {} {
                     return None;
                 }
                 """;
@@ -2215,7 +2337,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(6, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
+        AssertEqual(7, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2261,8 +2383,31 @@ internal static partial class IntegrationTests
         AssertEqual("option", wrapResult.GetProperty("kind").GetString(), "Generic return types should preserve wrappers.");
         AssertEqual("list", wrapResult.GetProperty("item").GetProperty("kind").GetString(),
             "Nested generic return types should preserve List.");
-        AssertEqual("result", wrapResult.GetProperty("item").GetProperty("item").GetProperty("kind").GetString(),
+        var wrapMap = wrapResult.GetProperty("item").GetProperty("item");
+        AssertJsonPropertyOrder(wrapMap, "kind,key,value");
+        AssertEqual("map", wrapMap.GetProperty("kind").GetString(), "Generic return types should preserve Map.");
+        AssertEqual("primitive", wrapMap.GetProperty("key").GetProperty("kind").GetString(),
+            "Map keys should retain their recursive type shape.");
+        AssertEqual("Text", wrapMap.GetProperty("key").GetProperty("name").GetString(),
+            "Map keys should retain the Text key type.");
+        AssertEqual("result", wrapMap.GetProperty("value").GetProperty("kind").GetString(),
             "Nested generic return types should preserve Result.");
+        AssertEqual("type_parameter", wrapMap.GetProperty("value").GetProperty("ok").GetProperty("kind").GetString(),
+            "Map values should preserve nested generic type parameters.");
+        var envelope = api.GetProperty("structs").EnumerateArray()
+            .Single(structure => structure.GetProperty("id").GetString() == "self::app::main::Envelope");
+        var snapshotsType = envelope.GetProperty("fields")[2].GetProperty("type");
+        AssertJsonPropertyOrder(snapshotsType, "kind,key,value");
+        AssertEqual("map", snapshotsType.GetProperty("kind").GetString(), "Struct fields should preserve Map.");
+        AssertEqual("primitive", snapshotsType.GetProperty("key").GetProperty("kind").GetString(),
+            "Map field key should be a structured primitive type.");
+        var mapFieldValue = snapshotsType.GetProperty("value");
+        AssertEqual("list", mapFieldValue.GetProperty("kind").GetString(), "Nested Map values should preserve List.");
+        var mapFieldOption = mapFieldValue.GetProperty("item");
+        AssertEqual("option", mapFieldOption.GetProperty("kind").GetString(),
+            "Nested Map/List values should preserve Option.");
+        AssertEqual("nominal", mapFieldOption.GetProperty("item").GetProperty("kind").GetString(),
+            "Nested Map values should preserve nominal dependency types.");
         var origin = api.GetProperty("structs").EnumerateArray()
             .Single(structure => structure.GetProperty("id").GetString() == "direct::records::Record")
             .GetProperty("fields")[1].GetProperty("type").GetProperty("item");
@@ -2386,7 +2531,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(6, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
+        AssertEqual(7, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -2849,6 +2994,7 @@ internal static partial class IntegrationTests
             "kind,value",
             "kind,name,ordinal",
             "kind,item",
+            "kind,key,value",
             "kind,ok,error",
             "kind,declaration_kind,source_id,source_ids,package,module,name",
             "method,path,body_type,handler,handler_is_async,response_type,handler_source_ids,parameters,responses,required_capabilities,capability_parameters",
@@ -3420,8 +3566,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(6, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 6.");
+            AssertEqual(7, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 7.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3486,8 +3632,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(6, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 6.");
+            AssertEqual(7, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 7.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -5323,7 +5469,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6.");
+            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6087,7 +6233,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(6, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 6 with pinned process metadata.");
+            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -10404,7 +10550,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(48, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(57, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -10413,7 +10559,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("48 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("57 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -10590,9 +10736,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b48\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b57\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 48 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 57 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

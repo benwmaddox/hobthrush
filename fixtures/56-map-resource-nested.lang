@@ -1,0 +1,5 @@
+module fixture::map_resource_nested;
+
+pub fn nested(values: Map<Text, Option<FsRead>>) -> i32 effects {} {
+    return 0;
+}

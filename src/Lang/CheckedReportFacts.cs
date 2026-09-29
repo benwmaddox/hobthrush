@@ -134,6 +134,23 @@ internal static class CheckedReportFacts
                     VisitExpression(append.Target);
                     VisitExpression(append.Value);
                     break;
+                case TypedMapEmptyExpr:
+                    break;
+                case TypedMapSetExpr set:
+                    VisitExpression(set.Target);
+                    VisitExpression(set.Key);
+                    VisitExpression(set.Value);
+                    break;
+                case TypedMapGetExpr get:
+                    VisitExpression(get.Target);
+                    VisitExpression(get.Key);
+                    break;
+                case TypedMapKeysExpr keys:
+                    VisitExpression(keys.Target);
+                    break;
+                case TypedMapLengthExpr length:
+                    VisitExpression(length.Target);
+                    break;
                 case TypedCallExpr call:
                     foreach (var argument in call.Arguments)
                         VisitExpression(argument);

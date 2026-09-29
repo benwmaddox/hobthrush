@@ -1,0 +1,5 @@
+module fixture::map_empty_context;
+
+pub fn missingContext() -> i32 effects {} {
+    return Map.empty().length;
+}

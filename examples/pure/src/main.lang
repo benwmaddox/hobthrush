@@ -4,7 +4,25 @@ pub fn square(value: i32) -> i32 effects {} {
     return value * value;
 }
 
+pub fn firstKeyBonus(key: Text) -> i32 effects {} {
+    if key == "one" {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
 pub fn main() -> i32 effects {} {
     let base: i32 = 7;
-    return self::example::pure::square(base) + 1;
+    let empty: Map<Text, i32> = Map.empty();
+    let oneEntry: Map<Text, i32> = empty.set("seven", self::example::pure::square(base));
+    let twoEntries: Map<Text, i32> = oneEntry.set("one", 1);
+    let orderedBonus: i32 = match twoEntries.keys().get(0) {
+        Some(key) => self::example::pure::firstKeyBonus(key),
+        None => 1
+    };
+    return match oneEntry.get("seven") {
+        Some(value) => value + oneEntry.length + orderedBonus,
+        None => 0
+    };
 }

@@ -1,0 +1,5 @@
+module fixture::map_resource_direct;
+
+pub fn direct(values: Map<Text, FsRead>) -> i32 effects {} {
+    return 0;
+}

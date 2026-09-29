@@ -1,0 +1,9 @@
+module fixture::map_member_arguments;
+
+fn invalidKey(values: Map<Text, i32>) -> Option<i32> effects {} {
+    return values.get(1);
+}
+
+pub fn invalidValue(values: Map<Text, i32>) -> Map<Text, i32> effects {} {
+    return values.set("key", true);
+}

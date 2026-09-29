@@ -844,7 +844,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 6,
+            schema_version = 7,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -915,6 +915,12 @@ internal static class Driver
         {
             kind = "list",
             item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+        },
+        LangTypeKind.Map => new
+        {
+            kind = "map",
+            key = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+            value = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
         },
         LangTypeKind.Option => new
         {
