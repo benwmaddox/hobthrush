@@ -16,6 +16,10 @@ internal enum LangTypeKind
     Result,
     FsRead,
     FsWrite,
+    Config,
+    Secrets,
+    Logger,
+    SecretText,
     FsError,
     HttpClient,
     HttpResponse,
@@ -58,6 +62,9 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
     public bool IsFsWrite => Kind == LangTypeKind.FsWrite;
+    public bool IsConfig => Kind == LangTypeKind.Config;
+    public bool IsSecrets => Kind == LangTypeKind.Secrets;
+    public bool IsLogger => Kind == LangTypeKind.Logger;
     public bool IsFsError => Kind == LangTypeKind.FsError;
     public bool IsHttpClient => Kind == LangTypeKind.HttpClient;
     public bool IsHttpResponse => Kind == LangTypeKind.HttpResponse;
@@ -81,6 +88,10 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
     internal static LangType FsWrite { get; } = new(LangTypeKind.FsWrite, "FsWrite");
+    internal static LangType Config { get; } = new(LangTypeKind.Config, "Config");
+    internal static LangType Secrets { get; } = new(LangTypeKind.Secrets, "Secrets");
+    internal static LangType Logger { get; } = new(LangTypeKind.Logger, "Logger");
+    internal static LangType SecretText { get; } = new(LangTypeKind.SecretText, "Secret<Text>", arguments: [Text]);
     internal static LangType FsError { get; } = new(LangTypeKind.FsError, "FsError");
     internal static LangType HttpClient { get; } = new(LangTypeKind.HttpClient, "HttpClient");
     internal static LangType HttpResponse { get; } = new(LangTypeKind.HttpResponse, "HttpResponse");
@@ -202,12 +213,20 @@ internal sealed record CheckedCommand(
     Token At);
 
 internal enum CheckedRouteContentKind { Json, Html }
-internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient }
+internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger }
 internal sealed record CheckedCapabilityParameter(
     CheckedCapabilityKind Kind,
     int HandlerParameterIndex,
     string ParameterName,
     Token At);
+
+internal sealed record CheckedConfigField(
+    string Name,
+    string EnvironmentName,
+    ConfigFieldKind Kind,
+    bool Required,
+    bool HasDefault,
+    string? DefaultValue);
 
 internal sealed record CheckedRouteResponse(
     int VariantId,
@@ -307,6 +326,10 @@ internal enum BuiltinIntrinsic
     FsReadTextAsync,
     FsWriteText,
     HttpGetTextAsync,
+    ConfigGetText,
+    ConfigGetSecretText,
+    SecretsRevealText,
+    LoggerInfo,
     HtmlText,
     HtmlHeading,
     HtmlParagraph,
@@ -491,7 +514,8 @@ internal sealed class CheckedProgram
         IEnumerable<CheckedTest>? tests = null,
         IEnumerable<CheckedCommand>? commands = null,
         int? entryCommandId = null,
-        IEnumerable<CheckedRoute>? routes = null)
+        IEnumerable<CheckedRoute>? routes = null,
+        IEnumerable<CheckedConfigField>? configFields = null)
     {
         Modules = Array.AsReadOnly(modules.ToArray());
         EntryModule = entryModule;
@@ -503,6 +527,7 @@ internal sealed class CheckedProgram
         Commands = Array.AsReadOnly((commands ?? []).ToArray());
         EntryCommandId = entryCommandId;
         Routes = Array.AsReadOnly((routes ?? []).ToArray());
+        ConfigFields = Array.AsReadOnly((configFields ?? []).ToArray());
     }
 
     // Retained for single-file API compatibility. For a package, this is the selected entry module.
@@ -517,6 +542,7 @@ internal sealed class CheckedProgram
     public IReadOnlyList<CheckedCommand> Commands { get; }
     public int? EntryCommandId { get; }
     public IReadOnlyList<CheckedRoute> Routes { get; }
+    public IReadOnlyList<CheckedConfigField> ConfigFields { get; }
 }
 
 internal sealed record CheckResult(CheckedProgram? Program, List<Diagnostic> Diagnostics);
@@ -569,7 +595,8 @@ internal static class Compiler
         string? entryModule,
         IReadOnlySet<string>? rootCapabilities = null,
         bool rootIsCliPackage = false,
-        bool rootIsWebPackage = false)
+        bool rootIsWebPackage = false,
+        IReadOnlyList<ConfigField>? rootConfigFields = null)
     {
         var diagnostics = new List<Diagnostic>();
         return new SemanticChecker(diagnostics).CheckPackage(
@@ -579,7 +606,8 @@ internal static class Compiler
             requireEntry: entryModule is not null,
             rootCapabilities,
             rootIsCliPackage,
-            rootIsWebPackage);
+            rootIsWebPackage,
+            rootConfigFields);
     }
 }
 
@@ -615,6 +643,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
+    private IReadOnlyList<CheckedConfigField> _checkedConfigFields = [];
+    private IReadOnlyDictionary<string, ConfigField> _rootConfigFields =
+        new Dictionary<string, ConfigField>(StringComparer.Ordinal);
     private ModuleIdentity _currentModule = new(string.Empty, string.Empty);
     private FunctionSymbol? _currentFunction;
     private bool _semanticDepthReported;
@@ -635,11 +666,25 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         bool requireEntry,
         IReadOnlySet<string>? rootCapabilities = null,
         bool rootIsCliPackage = false,
-        bool rootIsWebPackage = false)
+        bool rootIsWebPackage = false,
+        IReadOnlyList<ConfigField>? rootConfigFields = null)
     {
         _rootCapabilities = rootCapabilities ?? new HashSet<string>(StringComparer.Ordinal);
         _rootPackageId = rootPackageId;
         _rootIsWebPackage = rootIsWebPackage;
+        var orderedConfigFields = (rootConfigFields ?? [])
+            .OrderBy(field => field.Name, StringComparer.Ordinal)
+            .ToArray();
+        _rootConfigFields = orderedConfigFields.ToDictionary(field => field.Name, StringComparer.Ordinal);
+        _checkedConfigFields = orderedConfigFields
+            .Select(field => new CheckedConfigField(
+                field.Name,
+                "LANG_CONFIG_" + field.Name.ToUpperInvariant(),
+                field.Kind,
+                field.Required,
+                field.HasDefault,
+                field.DefaultValue))
+            .ToArray();
         BuildPackageDisplayLabels(inputs);
         var orderedModules = new List<ModuleSymbols>(inputs.Count);
         foreach (var input in inputs)
@@ -795,7 +840,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             _tests,
             commands,
             entryCommand?.Id,
-            _routes), diagnostics);
+            _routes,
+            _checkedConfigFields), diagnostics);
     }
 
     private void BuildPackageDisplayLabels(IReadOnlyList<PackageModuleInput> inputs)
@@ -1106,11 +1152,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 {
                     var hasHttpClient = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.HttpClient);
                     var hasFsWrite = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.FsWrite);
-                    var expectation = hasHttpClient
-                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, and HttpClient in that order, and return Result<Text, E> for a concrete error type"
-                        : hasFsWrite
-                            ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
-                            : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
+                    var hasConfig = commandCapabilities.Any(capability => capability.Kind is
+                        CheckedCapabilityKind.Config or CheckedCapabilityKind.Secrets or CheckedCapabilityKind.Logger);
+                    var expectation = hasConfig
+                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, and Logger in that order, and return Result<Text, E> for a concrete error type"
+                        : hasHttpClient
+                            ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, and HttpClient in that order, and return Result<Text, E> for a concrete error type"
+                            : hasFsWrite
+                                ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
+                                : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
                     Add("E_COMMAND_HANDLER", expectation, command.HandlerSyntax.Reference.At);
                 }
             }
@@ -1281,11 +1331,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
                 if (!validParameters || !validReturn || !validGenericity)
                 {
+                    var firstCapabilityParameter = route.Method == "POST" ? 1 : 0;
                     var hasFsWrite = handler.Parameters.Any(parameter => parameter.Type.IsFsWrite);
                     var hasHttpClient = handler.Parameters.Any(parameter => parameter.Type.IsHttpClient);
-                    var capabilityOrder = hasHttpClient
-                        ? hasFsWrite ? "FsWrite, DbRead, DbWrite, and HttpClient" : "DbRead, DbWrite, and HttpClient"
-                        : hasFsWrite ? "FsWrite, DbRead, and DbWrite" : "DbRead and DbWrite";
+                    var capabilityOrder = HasConfigCapability(handler, firstCapabilityParameter)
+                        ? "FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, and Logger"
+                        : hasHttpClient
+                            ? hasFsWrite ? "FsWrite, DbRead, DbWrite, and HttpClient" : "DbRead, DbWrite, and HttpClient"
+                            : hasFsWrite ? "FsWrite, DbRead, and DbWrite" : "DbRead and DbWrite";
                     var expectation = route.Method == "GET"
                         ? $"a non-generic function taking optional {capabilityOrder} capabilities in that order, and returning a declared union"
                         : $"a non-generic function taking the route body type followed by optional {capabilityOrder} capabilities in that order, and returning a declared union";
@@ -1377,6 +1430,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.DbRead => 1,
                 CheckedCapabilityKind.DbWrite => 2,
                 CheckedCapabilityKind.HttpClient => 3,
+                CheckedCapabilityKind.Config => 4,
+                CheckedCapabilityKind.Secrets => 5,
+                CheckedCapabilityKind.Logger => 6,
                 _ => -1
             };
 
@@ -1385,9 +1441,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
                 Add(
                     "E_ROUTE_HANDLER",
-                    hasHttpClient
-                        ? "Route handlers may receive only FsWrite, DbRead, DbWrite, and HttpClient capability parameters after the request body"
-                        : "Route handlers may receive only DbRead followed by DbWrite capability parameters after the request body",
+                    HasConfigCapability(handler, firstCapabilityParameter)
+                        ? "Route handlers may receive only FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, and Logger capability parameters after the request body"
+                        : hasHttpClient
+                            ? "Route handlers may receive only FsWrite, DbRead, DbWrite, and HttpClient capability parameters after the request body"
+                            : "Route handlers may receive only DbRead followed by DbWrite capability parameters after the request body",
                     parameter.At);
                 valid = false;
                 continue;
@@ -1402,13 +1460,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
                 var hasFsWrite = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsFsWrite);
-                var orderMessage = hasHttpClient
-                    ? hasFsWrite
-                        ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient order"
-                        : "Route handler capability parameters must appear in DbRead, DbWrite, HttpClient order"
-                    : hasFsWrite
-                        ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite order"
-                        : "Route handler capability parameters must appear in DbRead, DbWrite order";
+                var orderMessage = HasConfigCapability(handler, firstCapabilityParameter)
+                    ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger order"
+                    : hasHttpClient
+                        ? hasFsWrite
+                            ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient order"
+                            : "Route handler capability parameters must appear in DbRead, DbWrite, HttpClient order"
+                        : hasFsWrite
+                            ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite order"
+                            : "Route handler capability parameters must appear in DbRead, DbWrite order";
                 Add("E_ROUTE_HANDLER", orderMessage, parameter.At);
                 valid = false;
             }
@@ -1443,6 +1503,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.FsRead => 0,
                 CheckedCapabilityKind.FsWrite => 1,
                 CheckedCapabilityKind.HttpClient => 2,
+                CheckedCapabilityKind.Config => 3,
+                CheckedCapabilityKind.Secrets => 4,
+                CheckedCapabilityKind.Logger => 5,
                 _ => -1
             };
             if (kind is null || order < 0)
@@ -1475,6 +1538,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         LangTypeKind.DbRead => CheckedCapabilityKind.DbRead,
         LangTypeKind.DbWrite => CheckedCapabilityKind.DbWrite,
         LangTypeKind.HttpClient => CheckedCapabilityKind.HttpClient,
+        LangTypeKind.Config => CheckedCapabilityKind.Config,
+        LangTypeKind.Secrets => CheckedCapabilityKind.Secrets,
+        LangTypeKind.Logger => CheckedCapabilityKind.Logger,
         _ => null
     };
 
@@ -1485,8 +1551,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         CheckedCapabilityKind.DbRead => "db.read",
         CheckedCapabilityKind.DbWrite => "db.write",
         CheckedCapabilityKind.HttpClient => "net.client",
+        CheckedCapabilityKind.Config => "env.read",
+        CheckedCapabilityKind.Secrets => "secret.reveal",
+        CheckedCapabilityKind.Logger => "log.write",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
+
+    private static bool HasConfigCapability(FunctionSymbol handler, int firstCapabilityParameter) =>
+        handler.Parameters.Skip(firstCapabilityParameter).Any(parameter =>
+            parameter.Type.Kind is LangTypeKind.Config or LangTypeKind.Secrets or LangTypeKind.Logger);
 
     private CheckedRouteResponse CheckRouteResponse(RouteResponseSyntax response, CheckedVariant variant)
     {
@@ -1819,7 +1892,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
-            "FsRead" or "FsWrite" or "FsError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
+            "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "Secret" or "FsError" or
+            "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
     private void ValidatePublicSignatures()
     {
@@ -3091,6 +3165,36 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "config" && expression.Member is ("get_text" or "get_secret_text"))
+            {
+                CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+                if (CurrentModule.PackageId != _rootPackageId)
+                    Add("E_CAPABILITY_SCOPE", "Config intrinsics are available only in the root package", expression.At);
+                else
+                    Add("E_CAPABILITY_MISSING", $"Intrinsic 'config.{expression.Member}' requires a local or parameter of type 'Config'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "secrets" && expression.Member == "reveal_text")
+            {
+                CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+                if (CurrentModule.PackageId != _rootPackageId)
+                    Add("E_CAPABILITY_SCOPE", "Secrets intrinsics are available only in the root package", expression.At);
+                else
+                    Add("E_CAPABILITY_MISSING", "Intrinsic 'secrets.reveal_text' requires a local or parameter of type 'Secrets'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "logger" && expression.Member == "info")
+            {
+                CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+                if (CurrentModule.PackageId != _rootPackageId)
+                    Add("E_CAPABILITY_SCOPE", "Logger intrinsics are available only in the root package", expression.At);
+                else
+                    Add("E_CAPABILITY_MISSING", "Intrinsic 'logger.info' requires a local or parameter of type 'Logger'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "http" && expression.Member == "get_text_async")
             {
                 foreach (var argument in expression.Arguments)
@@ -3149,6 +3253,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 _ = CheckExpr(argument, null, locals, depth);
             return new TypedErrorExpr(expression.At);
         }
+
+        if (expression.Member is "get_text" or "get_secret_text" or "reveal_text" or "info")
+            return CheckConfigCapabilityIntrinsic(expression, receiver, locals, depth);
 
         if (expression.Member == "get_text_async")
         {
@@ -3415,6 +3522,137 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             : $"Member calls on values are not implemented for '{targetDescription}.{expression.Member}'";
         Add("E_UNSUPPORTED", unsupportedMessage, expression.MemberAt);
         return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckConfigCapabilityIntrinsic(
+        MemberCallExpr expression,
+        TypedExpr receiver,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var operation = expression.Member switch
+        {
+            "get_text" => BuiltinIntrinsic.ConfigGetText,
+            "get_secret_text" => BuiltinIntrinsic.ConfigGetSecretText,
+            "reveal_text" => BuiltinIntrinsic.SecretsRevealText,
+            "info" => BuiltinIntrinsic.LoggerInfo,
+            _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+        };
+        var requiredType = operation switch
+        {
+            BuiltinIntrinsic.ConfigGetText or BuiltinIntrinsic.ConfigGetSecretText => LangType.Config,
+            BuiltinIntrinsic.SecretsRevealText => LangType.Secrets,
+            BuiltinIntrinsic.LoggerInfo => LangType.Logger,
+            _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+        };
+        if (receiver.Type != requiredType)
+        {
+            CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+            var targetDescription = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
+                ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}'"
+                : $"Value of type '{receiver.Type.DisplayName}'";
+            Add(
+                "E_CAPABILITY_MISSING",
+                $"{targetDescription} cannot provide capability member '{expression.Member}' (requires '{requiredType.DisplayName}')",
+                expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var expectedCount = operation == BuiltinIntrinsic.LoggerInfo ? 2 : 1;
+        var diagnosticsBeforeArguments = diagnostics.Count;
+        var hasCorrectArity = expression.Arguments.Count == expectedCount;
+        if (!hasCorrectArity)
+            Add("E_TYPE_MISMATCH", $"Intrinsic '{requiredType.DisplayName}.{expression.Member}' expects {expectedCount} argument(s), got {expression.Arguments.Count}", expression.MemberAt);
+
+        var arguments = new List<TypedExpr> { receiver };
+        var validTypes = true;
+        for (var index = 0; index < expectedCount; index++)
+        {
+            if (index >= expression.Arguments.Count)
+            {
+                arguments.Add(new TypedErrorExpr(expression.MemberAt));
+                validTypes = false;
+                continue;
+            }
+
+            var expectedType = operation switch
+            {
+                BuiltinIntrinsic.ConfigGetText or BuiltinIntrinsic.ConfigGetSecretText => LangType.Text,
+                BuiltinIntrinsic.SecretsRevealText => LangType.SecretText,
+                BuiltinIntrinsic.LoggerInfo => LangType.Text,
+                _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+            };
+            var argument = CheckExpr(expression.Arguments[index], expectedType, locals, depth);
+            arguments.Add(argument);
+            validTypes &= argument.Type == expectedType;
+
+            if (operation is BuiltinIntrinsic.ConfigGetText or BuiltinIntrinsic.ConfigGetSecretText)
+            {
+                if (expression.Arguments[index] is not TextExpr literal)
+                {
+                    if (argument.Type.IsText)
+                        Add("E_CONFIG_KEY", "Config lookup keys must be string literals declared in the root [config] schema", expression.Arguments[index].At);
+                    validTypes = false;
+                }
+                else if (!_rootConfigFields.TryGetValue(literal.Value, out var field))
+                {
+                    Add("E_CONFIG_KEY", "Config lookup key is not declared in the root [config] schema", expression.Arguments[index].At);
+                    validTypes = false;
+                }
+                else
+                {
+                    var expectedKind = operation == BuiltinIntrinsic.ConfigGetText
+                        ? ConfigFieldKind.Text
+                        : ConfigFieldKind.SecretText;
+                    if (field.Kind != expectedKind)
+                    {
+                        Add("E_CONFIG_TYPE", "Config lookup method does not match the declared field type", expression.Arguments[index].At);
+                        validTypes = false;
+                    }
+                }
+            }
+        }
+        for (var index = expectedCount; index < expression.Arguments.Count; index++)
+            _ = CheckExpr(expression.Arguments[index], null, locals, depth);
+
+        var resultType = operation switch
+        {
+            BuiltinIntrinsic.ConfigGetText or BuiltinIntrinsic.SecretsRevealText => LangType.Text,
+            BuiltinIntrinsic.ConfigGetSecretText => LangType.SecretText,
+            BuiltinIntrinsic.LoggerInfo => LangType.Bool,
+            _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+        };
+        var callIsValid = hasCorrectArity && validTypes && diagnostics.Count == diagnosticsBeforeArguments;
+        if (callIsValid)
+        {
+            var effect = operation switch
+            {
+                BuiltinIntrinsic.ConfigGetText or BuiltinIntrinsic.ConfigGetSecretText => "env.read",
+                BuiltinIntrinsic.SecretsRevealText => "secret.reveal",
+                BuiltinIntrinsic.LoggerInfo => "log.write",
+                _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+            };
+            var operationName = operation switch
+            {
+                BuiltinIntrinsic.ConfigGetText => "Config.get_text",
+                BuiltinIntrinsic.ConfigGetSecretText => "Config.get_secret_text",
+                BuiltinIntrinsic.SecretsRevealText => "Secrets.reveal_text",
+                BuiltinIntrinsic.LoggerInfo => "Logger.info",
+                _ => throw new InvalidOperationException("Unknown configuration capability intrinsic")
+            };
+            _currentFunction?.DirectEffects.Add(new DirectEffectCall(effect, operationName, expression.MemberAt));
+        }
+
+        return new TypedIntrinsicCallExpr(resultType, operation, ReadOnly(arguments), expression.At);
+    }
+
+    private void CheckArgumentsWithoutExpectation(
+        IReadOnlyList<Expr> expressions,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        foreach (var argument in expressions)
+            _ = CheckExpr(argument, null, locals, depth);
     }
 
     private TypedExpr CheckTransactionMemberCall(
@@ -4039,7 +4277,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsResourceHandle(LangType type) =>
-        type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.HttpClient or LangTypeKind.Transaction;
+        type.Kind is LangTypeKind.FsRead or LangTypeKind.FsWrite or LangTypeKind.Config or LangTypeKind.Secrets or
+            LangTypeKind.Logger or LangTypeKind.DbRead or LangTypeKind.DbWrite or LangTypeKind.HttpClient or LangTypeKind.Transaction;
 
     private bool TryGetDeclarationNode(LangType type, out int declaration)
     {
@@ -4148,6 +4387,28 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.FsRead);
             case "FsWrite":
                 return NoTypeArguments(syntax, LangType.FsWrite);
+            case "Config":
+                return ResolveRootOnlyConfigType(syntax, LangType.Config);
+            case "Secrets":
+                return ResolveRootOnlyConfigType(syntax, LangType.Secrets);
+            case "Logger":
+                return ResolveRootOnlyConfigType(syntax, LangType.Logger);
+            case "Secret":
+                if (syntax.Args.Count != 1)
+                {
+                    Add("E_TYPE_MISMATCH", $"Type 'Secret' expects 1 type argument, got {syntax.Args.Count}", syntax.At);
+                    return LangType.Error;
+                }
+
+                var secretValueType = ResolveType(syntax.Args[0], depth + 1, typeParameters);
+                if (secretValueType.IsError)
+                    return LangType.Error;
+                if (!secretValueType.IsText)
+                {
+                    Add("E_TYPE_MISMATCH", "Only Secret<Text> is supported", syntax.At);
+                    return LangType.Error;
+                }
+                return ResolveRootOnlyConfigType(syntax, LangType.SecretText, checkTypeArguments: false);
             case "FsError":
                 return NoTypeArguments(syntax, LangType.FsError);
             case "HttpClient":
@@ -4234,6 +4495,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return LangType.Error;
         }
         return type;
+    }
+
+    private LangType ResolveRootOnlyConfigType(TypeSyntax syntax, LangType type, bool checkTypeArguments = true)
+    {
+        if (CurrentModule.PackageId != _rootPackageId)
+        {
+            Add("E_CAPABILITY_SCOPE", $"Type '{type.DisplayName}' is available only in the root package", syntax.At);
+            return LangType.Error;
+        }
+        return checkTypeArguments ? NoTypeArguments(syntax, type) : type;
     }
 
     private static bool IsFsErrorVariant(string name) =>

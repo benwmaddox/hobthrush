@@ -404,7 +404,8 @@ internal static class Driver
             entryModuleExists ? entryModule : null,
             package.Manifest.Capabilities,
             rootIsCliPackage: package.Manifest.Kind == "cli",
-            rootIsWebPackage: package.Manifest.Kind == "web");
+            rootIsWebPackage: package.Manifest.Kind == "web",
+            rootConfigFields: package.Manifest.ConfigFields);
         if (checkedPackage.Diagnostics.Count == 0 && entryModuleExists)
             return checkedPackage;
 
@@ -710,6 +711,9 @@ internal static class Driver
                         CheckedCapabilityKind.FsRead => "fs.read",
                         CheckedCapabilityKind.FsWrite => "fs.write",
                         CheckedCapabilityKind.HttpClient => "net.client",
+                        CheckedCapabilityKind.Config => "env.read",
+                        CheckedCapabilityKind.Secrets => "secret.reveal",
+                        CheckedCapabilityKind.Logger => "log.write",
                         _ => throw new InvalidOperationException("Unknown checked command capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -756,6 +760,9 @@ internal static class Driver
                         CheckedCapabilityKind.DbRead => "db.read",
                         CheckedCapabilityKind.DbWrite => "db.write",
                         CheckedCapabilityKind.HttpClient => "net.client",
+                        CheckedCapabilityKind.Config => "env.read",
+                        CheckedCapabilityKind.Secrets => "secret.reveal",
+                        CheckedCapabilityKind.Logger => "log.write",
                         _ => throw new InvalidOperationException("Unknown checked route capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -771,6 +778,9 @@ internal static class Driver
                             CheckedCapabilityKind.DbRead => "db.read",
                             CheckedCapabilityKind.DbWrite => "db.write",
                             CheckedCapabilityKind.HttpClient => "net.client",
+                            CheckedCapabilityKind.Config => "env.read",
+                            CheckedCapabilityKind.Secrets => "secret.reveal",
+                            CheckedCapabilityKind.Logger => "log.write",
                             _ => throw new InvalidOperationException("Unknown checked route capability")
                         }
                     })
@@ -782,12 +792,13 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 3,
+            schema_version = 4,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
                 .OrderBy(capability => capability, StringComparer.Ordinal)
                 .ToArray(),
+            config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
             functions,
             structs,
@@ -814,6 +825,14 @@ internal static class Driver
         LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
         LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
         LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
+        LangTypeKind.Config => new { kind = "primitive", name = "Config" },
+        LangTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
+        LangTypeKind.Logger => new { kind = "primitive", name = "Logger" },
+        LangTypeKind.SecretText => new
+        {
+            kind = "secret",
+            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+        },
         LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
         LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
         LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
