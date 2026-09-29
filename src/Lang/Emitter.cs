@@ -1173,6 +1173,9 @@ internal static class Emitter
 
         private void EmitFunction(CheckedFunction function)
         {
+            if (function.AdapterBinding is not null)
+                return;
+
             _emittingFunction = function;
             _source.Append("    ").Append(function.Public ? "public" : "private").Append(" static ")
                 .Append(function.IsAsync ? "async Task<" + EmitType(function.ReturnType) + ">" : EmitType(function.ReturnType))
@@ -1340,6 +1343,10 @@ internal static class Emitter
 
         private string EmitCall(TypedCallExpr call)
         {
+            var targetFunction = program.Functions.Single(function => function.Id == call.FunctionId);
+            if (targetFunction.AdapterBinding is { } adapterBinding)
+                return EmitManagedAdapterCall(adapterBinding, call.Arguments);
+
             var functionName = "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture);
             if (call.TypeArguments.Count != 0)
                 functionName += "<" + string.Join(", ", call.TypeArguments.Select(EmitType)) + ">";
@@ -1352,6 +1359,18 @@ internal static class Emitter
             }
             return functionName + "(" + string.Join(", ", arguments) + ")";
         }
+
+        private string EmitManagedAdapterCall(
+            CheckedManagedAdapterBinding binding,
+            IReadOnlyList<TypedExpr> arguments) =>
+            binding.OperationId switch
+            {
+                "sha256.text.hash_utf8" when arguments.Count == 1 =>
+                    "global::Lang.ManagedAdapters.Sha256Text.HashUtf8(" + EmitExpr(arguments[0]) + ")",
+                "sha256.text.hash_utf8" =>
+                    throw new InvalidOperationException("sha256.text.hash_utf8 requires one checked argument"),
+                _ => throw new InvalidOperationException($"Unknown checked managed adapter operation '{binding.OperationId}'")
+            };
 
         private string EmitAwait(TypedAwaitExpr expression) => expression.Value switch
         {

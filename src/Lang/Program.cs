@@ -263,7 +263,8 @@ internal static class Driver
             return 1;
         }
 
-        if (graph.Nodes.Any(node => node.Package.Manifest.Dependencies.Count != 0))
+        if (graph.Nodes.Any(node =>
+                node.Package.Manifest.Dependencies.Count != 0 || node.Package.ManagedAdapter is not null))
             Console.WriteLine($"Wrote package lock: {Path.Combine(packageDirectory, "lang.lock")}");
         else
             Console.WriteLine($"No dependencies to lock for package '{graph.Root.Package.Manifest.Name}'.");
@@ -310,7 +311,8 @@ internal static class Driver
 
         try
         {
-            var snapshot = AuditReport.Create(graph, checkedPackage.Program);
+            var adapterProvenance = CreateManagedAdapterProvenance(graph, checkedPackage.Program!);
+            var snapshot = AuditReport.Create(graph, checkedPackage.Program!, adapterProvenance);
             Console.Write(Encoding.UTF8.GetString(snapshot.Json));
             return 0;
         }
@@ -379,7 +381,8 @@ internal static class Driver
                 checkedPackage.Program!,
                 package.ManifestFile,
                 package,
-                graph.Root.Id);
+                graph.Root.Id,
+                graph);
         }
 
         return await BuildCheckedAsync(
@@ -407,7 +410,8 @@ internal static class Driver
         }
 
         var graph = resolved.Graph!;
-        if (graph.Root.Package.Manifest.Dependencies.Count != 0)
+        if (graph.Nodes.Any(node =>
+                node.Package.Manifest.Dependencies.Count != 0 || node.Package.ManagedAdapter is not null))
         {
             var lockDiagnostics = PackageLock.Validate(graph);
             if (lockDiagnostics.Count != 0)
@@ -1065,6 +1069,80 @@ internal static class Driver
         CheckedProgram program,
         CheckedFunction root) =>
         CheckedReportFacts.FindTrustedAdapterOperations(program, root);
+
+    private static IReadOnlyList<AuditManagedAdapterProvenance> CreateManagedAdapterProvenance(
+        PackageDependencyGraph? graph,
+        CheckedProgram program)
+    {
+        if (graph is null)
+            return [];
+
+        var provenance = new List<AuditManagedAdapterProvenance>();
+        foreach (var node in graph.Nodes)
+        {
+            if (node.Package.ManagedAdapter is not { } adapter)
+                continue;
+
+            var functionsByOperation = program.Functions
+                .Where(function => function.PackageId == node.Id &&
+                    function.AdapterBinding is { } binding && binding.BridgeId == adapter.BridgeId)
+                .GroupBy(function => function.AdapterBinding!.OperationId, StringComparer.Ordinal)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group
+                        .OrderBy(function => function.Module, StringComparer.Ordinal)
+                        .ThenBy(function => function.Name, StringComparer.Ordinal)
+                        .First(),
+                    StringComparer.Ordinal);
+
+            var operations = new List<AuditManagedAdapterOperation>();
+            foreach (var definition in adapter.Definition.Operations.OrderBy(
+                         operation => operation.OperationId,
+                         StringComparer.Ordinal))
+            {
+                if (!functionsByOperation.TryGetValue(definition.OperationId, out var function) ||
+                    function.AdapterBinding is not { } binding)
+                    continue;
+
+                operations.Add(new AuditManagedAdapterOperation(
+                    binding.OperationId,
+                    $"{function.Module}::{function.Name}",
+                    function.Parameters
+                        .Select(parameter => new AuditManagedAdapterParameter(
+                            parameter.Name,
+                            parameter.Type.DisplayName))
+                        .ToArray(),
+                    function.ReturnType.DisplayName,
+                    function.IsAsync,
+                    definition.Effects,
+                    definition.RequiredCapabilities));
+            }
+
+            var assemblyIdentity =
+                $"{adapter.Definition.AssemblyName}, Version={adapter.Definition.AssemblyVersion}, " +
+                $"Culture={adapter.Definition.AssemblyCulture}, " +
+                $"PublicKeyToken={adapter.Definition.AssemblyPublicKeyToken}";
+            var contractVersion = int.Parse(
+                adapter.Definition.CatalogRevision,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture);
+            provenance.Add(AuditReport.CreateManagedAdapterProvenance(
+                node,
+                adapter.BridgeId,
+                contractVersion,
+                adapter.TargetFramework,
+                adapter.PortabilityTarget,
+                operations,
+                [new AuditManagedAdapterAssembly(
+                    assemblyIdentity,
+                    adapter.AssemblyPath,
+                    adapter.AssemblySha256)],
+                adapter.ClosureSha256));
+        }
+
+        return AuditReport.CanonicalizeManagedAdapters(provenance);
+    }
+
     private static bool TryParseInspectSymbol(string symbol, out string module, out string function)
     {
         module = string.Empty;
@@ -1158,7 +1236,8 @@ internal static class Driver
                         package.Id,
                         parsed,
                         package.DependencyIds,
-                        PackageDisplayLabel(package.Package)));
+                        PackageDisplayLabel(package.Package),
+                        package.Package.ManagedAdapter?.Definition.BridgeId));
             }
         }
 
@@ -1212,7 +1291,8 @@ internal static class Driver
         CheckedProgram program,
         string sourceFile,
         LoadedPackage? package = null,
-        string? rootPackageId = null)
+        string? rootPackageId = null,
+        PackageDependencyGraph? packageGraph = null)
     {
         const string assemblyName = "GeneratedTests";
         var generatedDirectory = Path.Combine(
@@ -1230,12 +1310,27 @@ internal static class Driver
         try
         {
             Directory.CreateDirectory(generatedDirectory);
+            var adapterReferences = StageManagedAdapters(packageGraph, package, generatedDirectory);
             File.WriteAllText(
                 projectFile,
-                ProjectFileContents(executable: true, aotRid: null, assemblyName: assemblyName));
+                ProjectFileContents(
+                    executable: true,
+                    aotRid: null,
+                    assemblyName: assemblyName,
+                    managedAdapters: adapterReferences));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
                 Emitter.EmitTests(program, rootPackageId));
+        }
+        catch (ManagedAdapterPreparationException error)
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_ADAPTER", error.Message, sourceFile)
+            ],
+            json: false);
+            TryCleanupGeneratedDirectory(generatedDirectory, sourceFile);
+            return 1;
         }
         catch (Exception error) when (IsFileError(error))
         {
@@ -1380,6 +1475,17 @@ internal static class Driver
             return 1;
         }
 
+        var managedAdapters = GetManagedAdapterDescriptors(packageGraph, package);
+        var unsupportedAotAdapter = aotRid is null
+            ? null
+            : managedAdapters.FirstOrDefault(adapter => !adapter.Definition.AotSupported);
+        if (unsupportedAotAdapter is not null)
+        {
+            return ReportBuildTargetError(
+                $"Managed adapter '{unsupportedAotAdapter.Definition.BridgeId}' does not support NativeAOT publishing",
+                sourceFile);
+        }
+
         var executable = isWebPackage || entry is not null || entryCommand is not null;
         var usesDatabaseAdapter = package?.WebDatabaseOptions is not null || UsesDatabaseAdapter(program);
         var assemblyName = package?.Manifest.Name ?? "Generated";
@@ -1396,6 +1502,7 @@ internal static class Driver
             Directory.CreateDirectory(generatedDirectory);
             if (aotRid is not null)
                 Directory.CreateDirectory(stagedPublishDirectory);
+            var adapterReferences = StageManagedAdapters(managedAdapters, generatedDirectory);
             projectFile = Path.Combine(generatedDirectory, "Generated.csproj");
             stagedAssemblyFile = Path.Combine(
                 generatedDirectory,
@@ -1410,7 +1517,8 @@ internal static class Driver
                     aotRid,
                     assemblyName,
                     webPackage: isWebPackage,
-                    sqlitePackage: usesDatabaseAdapter));
+                    sqlitePackage: usesDatabaseAdapter,
+                    managedAdapters: adapterReferences));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
                 Emitter.Emit(
@@ -1419,6 +1527,16 @@ internal static class Driver
                     package?.WebDatabaseOptions,
                     package?.Manifest.HttpOrigin,
                     processRunnerOptions));
+        }
+        catch (ManagedAdapterPreparationException error)
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_ADAPTER", error.Message, sourceFile)
+            ],
+            json: false);
+            TryCleanupGeneratedDirectory(generatedDirectory, sourceFile);
+            return 1;
         }
         catch (Exception error) when (IsFileError(error))
         {
@@ -1522,7 +1640,8 @@ internal static class Driver
                             packageGraph,
                             "native_aot",
                             aotRid,
-                            sdkVersion);
+                            sdkVersion,
+                            CreateManagedAdapterProvenance(packageGraph, program));
                     }
                 }
                 catch (ProcessExecutablePreparationException)
@@ -1607,7 +1726,8 @@ internal static class Driver
                         packageGraph,
                         "managed",
                         runtimeIdentifier: null,
-                        sdkVersion);
+                        sdkVersion,
+                        CreateManagedAdapterProvenance(packageGraph, program));
                 }
                 catch (ProcessExecutablePreparationException)
                 {
@@ -1825,11 +1945,118 @@ internal static class Driver
         assemblyName + ".process-runner" +
         (string.Equals(os, "windows", StringComparison.Ordinal) ? ".exe" : "");
 
+    private static IReadOnlyList<ManagedAdapterDescriptor> GetManagedAdapterDescriptors(
+        PackageDependencyGraph? packageGraph,
+        LoadedPackage? package)
+    {
+        if (packageGraph is not null)
+        {
+            return packageGraph.Nodes
+                .Select(node => node.Package.ManagedAdapter)
+                .OfType<ManagedAdapterDescriptor>()
+                .ToArray();
+        }
+
+        return package?.ManagedAdapter is { } adapter ? [adapter] : [];
+    }
+
+    private static IReadOnlyList<ManagedAdapterProjectReference> StageManagedAdapters(
+        PackageDependencyGraph? packageGraph,
+        LoadedPackage? package,
+        string generatedDirectory) =>
+        StageManagedAdapters(GetManagedAdapterDescriptors(packageGraph, package), generatedDirectory);
+
+    private static IReadOnlyList<ManagedAdapterProjectReference> StageManagedAdapters(
+        IReadOnlyList<ManagedAdapterDescriptor> adapters,
+        string generatedDirectory)
+    {
+        if (adapters.Count == 0)
+            return [];
+
+        var output = new List<ManagedAdapterProjectReference>();
+        foreach (var group in adapters
+                     .GroupBy(adapter => adapter.Definition.AssemblyName, StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var distinctHashes = group
+                .Select(adapter => adapter.AssemblySha256)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (distinctHashes.Length != 1)
+            {
+                throw new ManagedAdapterPreparationException(
+                    "Conflicting validated managed adapter DLLs share the same assembly identity.");
+            }
+
+            var adapter = group.First();
+            var expectedHash = distinctHashes[0];
+            if (!IsSha256Digest(expectedHash) || !IsSimpleAssemblyName(adapter.Definition.AssemblyName))
+            {
+                throw new ManagedAdapterPreparationException(
+                    "A validated managed adapter descriptor is incomplete.");
+            }
+
+            try
+            {
+                var sourcePath = Path.GetFullPath(adapter.SourceAssemblyPath);
+                if (!File.Exists(sourcePath) || Directory.Exists(sourcePath) || HasReparsePointOnPath(sourcePath))
+                    throw new IOException();
+
+                var sourceAttributes = File.GetAttributes(sourcePath);
+                if ((sourceAttributes & (FileAttributes.Directory | FileAttributes.Device | FileAttributes.ReparsePoint)) != 0 ||
+                    !string.Equals(HashFileSha256(sourcePath), expectedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException();
+                }
+
+                var relativePath = Path.Combine(
+                    "adapters",
+                    expectedHash.ToLowerInvariant(),
+                    adapter.Definition.AssemblyName + ".dll");
+                var stagedPath = Path.Combine(generatedDirectory, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(stagedPath)!);
+                File.Copy(sourcePath, stagedPath, overwrite: false);
+                if (!string.Equals(HashFileSha256(stagedPath), expectedHash, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException();
+
+                output.Add(new ManagedAdapterProjectReference(
+                    adapter.Definition.AssemblyName,
+                    relativePath.Replace(Path.DirectorySeparatorChar, '/')));
+            }
+            catch (Exception error) when (IsFileError(error) || error is CryptographicException)
+            {
+                throw new ManagedAdapterPreparationException(
+                    "A validated managed adapter DLL could not be staged or its digest did not match.");
+            }
+        }
+
+        return output;
+    }
+
+    private static bool IsSha256Digest(string value) =>
+        value.Length == 64 && value.All(character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
+
+    private static bool IsSimpleAssemblyName(string value) =>
+        !string.IsNullOrWhiteSpace(value) && value is not "." and not ".." &&
+        value.All(character =>
+            character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '-' or '_');
+
+    private static string HashFileSha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
     private sealed class ProcessExecutablePreparationException : IOException
     {
         public ProcessExecutablePreparationException()
             : base("The pinned process executable could not be prepared") { }
     }
+
+    private sealed class ManagedAdapterPreparationException(string message) : Exception(message);
+
+    private sealed record ManagedAdapterProjectReference(string AssemblyName, string HintPath);
 
     private static void PrintProcessExecutableDiagnostic(string sourceFile) =>
         PrintDiagnostics(
@@ -1990,7 +2217,8 @@ internal static class Driver
         string? aotRid,
         string assemblyName = "Generated",
         bool webPackage = false,
-        bool sqlitePackage = false)
+        bool sqlitePackage = false,
+        IReadOnlyList<ManagedAdapterProjectReference>? managedAdapters = null)
     {
         var outputType = executable ? "Exe" : "Library";
         return
@@ -2013,7 +2241,31 @@ internal static class Driver
                   "    <PackageReference Include=\"Microsoft.Data.Sqlite\" Version=\"10.0.12\" />\n" +
                   "  </ItemGroup>\n"
                 : string.Empty) +
+            ManagedAdapterReferencesContents(managedAdapters) +
             "</Project>\n";
+    }
+
+    private static string ManagedAdapterReferencesContents(
+        IReadOnlyList<ManagedAdapterProjectReference>? managedAdapters)
+    {
+        if (managedAdapters is not { Count: > 0 })
+            return string.Empty;
+
+        var contents = new StringBuilder("  <ItemGroup>\n");
+        foreach (var adapter in managedAdapters)
+        {
+            contents.Append("    <Reference Include=\"")
+                .Append(System.Security.SecurityElement.Escape(adapter.AssemblyName))
+                .Append("\">\n")
+                .Append("      <HintPath>")
+                .Append(System.Security.SecurityElement.Escape(adapter.HintPath))
+                .Append("</HintPath>\n")
+                .Append("      <Private>true</Private>\n")
+                .Append("    </Reference>\n");
+        }
+
+        contents.Append("  </ItemGroup>\n");
+        return contents.ToString();
     }
 
     private static void TryCleanupGeneratedDirectory(string generatedDirectory, string sourceFile)

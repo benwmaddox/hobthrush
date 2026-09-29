@@ -95,7 +95,7 @@
     },
     {
       "id": "audit-repair",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "candidate_root": "eval/reference/audit-repair",
       "starter_root": "eval/scenarios/audit-repair/starter",
       "task_file": "eval/scenarios/audit-repair/TASK.md",
@@ -141,8 +141,8 @@
         "audit-repair.check-clean",
         "audit-repair.expected-diagnostics",
         "audit-repair.inspect-effects",
-        "audit-repair.audit-v6",
-        "audit-repair.receipt-v2",
+        "audit-repair.audit-v7",
+        "audit-repair.receipt-v3",
         "audit-repair.runtime",
         "audit-repair.docs-claims"
       ]

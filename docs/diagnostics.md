@@ -9,9 +9,22 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_NAME_UNRESOLVED | Name is not declared in scope, or a qualified reference names an unknown alias, module, or declaration | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
 | E_ACCESS_PRIVATE | A qualified reference crosses a module or package boundary to a private declaration | Implemented |
+| E_ADAPTER | Managed adapter could not be prepared or staged for a generated build or test project | Implemented |
+| E_ADAPTER_ASYNC | Managed adapter function is declared async or binds an asynchronous operation | Implemented |
+| E_ADAPTER_BODY | Managed adapter function contains a source body | Implemented |
+| E_ADAPTER_BRIDGE | Adapter function names a managed adapter bridge the compiler does not support | Implemented |
+| E_ADAPTER_DECL | Adapter function binding is missing the required operation assignment or text operation ID | Implemented |
+| E_ADAPTER_DUPLICATE_OPERATION | More than one function in a package binds the same managed adapter operation | Implemented |
+| E_ADAPTER_EFFECT | Adapter function declares effects, or its catalog operation requires effects or capabilities | Implemented |
+| E_ADAPTER_GENERIC | Managed adapter function declares type parameters | Implemented |
+| E_ADAPTER_MANIFEST | Adapter function is declared without a managed adapter in the package manifest | Implemented |
+| E_ADAPTER_OPERATION | Adapter function binds an operation not supported by its managed adapter bridge | Implemented |
+| E_ADAPTER_SIGNATURE | Adapter function parameters or result do not match the catalog operation signature | Implemented |
+| E_ADAPTER_VISIBILITY | Managed adapter function is not public | Implemented |
 | E_MANIFEST | Package manifest file, schema, key, or value is invalid, including an unsupported or duplicate key/grant, a malformed `[config]` declaration, incomplete process executable pairs or invalid process path/hash syntax, an invalid `http_origin` or `net.client`/origin pairing, non-CLI process configuration/grants, or any application capability/config declaration in a library package | Implemented |
 | E_DEPENDENCY | A local dependency path, package kind, package identity, or dependency graph is invalid | Implemented |
 | E_LOCK | A required dependency lock is missing, malformed, unreadable, or stale | Implemented |
+| E_MANAGED_ADAPTER | Managed adapter descriptor or catalog validation fails, including bridge/target mismatch, invalid package-local assembly path or hash, missing/unreadable or mismatched assembly, or invalid assembly metadata/framework references | Implemented |
 | E_MODULE_PATH | A module header does not match its source-root-relative file path | Implemented |
 | E_MODULE_DUPLICATE | A package includes more than one source for the same package/module identity | Implemented |
 | E_TYPE_MISMATCH | Expression, payload, argument, local, condition, comparison, or return type mismatch; also a function body that may fall through | Implemented for the pure type and control-flow slices |

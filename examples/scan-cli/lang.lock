@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "root": {
     "name": "scan-cli",
     "version": "0.1.0",
@@ -7,6 +7,7 @@
     "source": {
       "kind": "root"
     },
+    "managed_adapter": null,
     "dependencies": {
       "validation": "../text-validation"
     }
@@ -20,7 +21,8 @@
         "kind": "path",
         "path": "../text-validation"
       },
-      "content_sha256": "86033f1b38ab1ea423816dd60d8b6df0547579b94a358ba744f96d8779389e14",
+      "content_sha256": "0de17b22e0a964462234198a85d48155ce72d5bb01dffc5807210a7183dc2e36",
+      "managed_adapter": null,
       "dependencies": {}
     }
   ]

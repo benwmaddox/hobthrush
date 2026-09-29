@@ -169,6 +169,7 @@ internal sealed record CheckedStructField(string Name, LangType Type, int Index,
 internal sealed record CheckedStruct(int Id, string PackageId, string Module, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 internal sealed record CheckedDirectCall(string PackageId, string Module, string Name);
+internal sealed record CheckedManagedAdapterBinding(string BridgeId, string OperationId);
 internal sealed record CheckedTest(string Name, string PackageId, string Module, int FunctionId, Token At);
 internal sealed record CheckedEffectPath
 {
@@ -473,7 +474,8 @@ internal sealed class CheckedFunction
         IReadOnlyList<TypedStmt> body,
         IEnumerable<CheckedDirectCall> calls,
         IReadOnlyList<string> declaredEffects,
-        Token at)
+        Token at,
+        CheckedManagedAdapterBinding? adapterBinding = null)
     {
         Id = id;
         PackageId = packageId;
@@ -487,6 +489,7 @@ internal sealed class CheckedFunction
         Body = ReadOnly(body);
         Calls = ReadOnly(calls);
         DeclaredEffects = ReadOnly(declaredEffects);
+        AdapterBinding = adapterBinding;
         InferredEffects = [];
         InferredEffectPaths = [];
         At = at;
@@ -503,6 +506,7 @@ internal sealed class CheckedFunction
     public LangType ReturnType { get; }
     public IReadOnlyList<CheckedDirectCall> Calls { get; }
     public IReadOnlyList<string> DeclaredEffects { get; }
+    internal CheckedManagedAdapterBinding? AdapterBinding { get; }
     public IReadOnlyList<string> InferredEffects { get; private set; }
     public IReadOnlyList<CheckedEffectPath> InferredEffectPaths { get; private set; }
     internal IReadOnlyList<TypedStmt> Body { get; }
@@ -568,7 +572,8 @@ internal sealed record PackageModuleInput(
     string PackageId,
     ParsedProgram Program,
     IReadOnlyDictionary<string, string> DirectDependencies,
-    string PackageDisplayLabel);
+    string PackageDisplayLabel,
+    string? ManagedAdapterBridgeId = null);
 
 internal readonly record struct ModuleIdentity(string PackageId, string ModuleName);
 
@@ -631,6 +636,8 @@ internal static class Compiler
 internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 {
     private const int MaximumSemanticDepth = 192;
+    private const string Sha256TextBridgeId = "lang.sha256-text.v1";
+    private const string Sha256TextHashUtf8OperationId = "sha256.text.hash_utf8";
     private static readonly string[] EffectVocabulary =
     [
         "fs.read",
@@ -734,6 +741,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             RegisterFunctionSignatures(module);
         }
+        ValidateDuplicateAdapterOperationBindings();
         foreach (var module in orderedModules)
             RegisterTests(module);
         // Command signatures may refer to handlers declared in any module. Resolve them only
@@ -1871,6 +1879,121 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     Add("E_EFFECT_DUPLICATE", $"Effect '{effect.Name}' is declared more than once", effect.At);
             }
             symbol.DeclaredEffects = EffectVocabulary.Where(declaredEffects.Contains).ToArray();
+            ValidateAdapterFunction(module, symbol);
+        }
+    }
+
+    private void ValidateAdapterFunction(ModuleSymbols module, FunctionSymbol symbol)
+    {
+        var declaration = symbol.Declaration;
+        if (!declaration.IsAdapter)
+            return;
+
+        var valid = true;
+        ManagedAdapterDefinition? adapterDefinition = null;
+        if (!declaration.Public)
+        {
+            Add("E_ADAPTER_VISIBILITY", "Adapter functions must be public", declaration.At);
+            valid = false;
+        }
+
+        if (module.ManagedAdapterBridgeId is null)
+        {
+            Add("E_ADAPTER_MANIFEST", "Adapter functions require a managed adapter in the package manifest", declaration.At);
+            valid = false;
+        }
+        else if (module.ManagedAdapterBridgeId != Sha256TextBridgeId ||
+                 !ManagedAdapterCatalog.TryGetDefinition(module.ManagedAdapterBridgeId, out adapterDefinition) ||
+                 adapterDefinition is null)
+        {
+            Add("E_ADAPTER_BRIDGE", $"Managed adapter bridge '{module.ManagedAdapterBridgeId}' is not supported by this compiler", declaration.At);
+            valid = false;
+        }
+
+        var adapterOperation = adapterDefinition?.Operations.SingleOrDefault(
+            operation => operation.OperationId == declaration.AdapterOperation);
+        if (adapterDefinition is not null &&
+            (adapterOperation is null || adapterOperation.OperationId != Sha256TextHashUtf8OperationId))
+        {
+            Add("E_ADAPTER_OPERATION", $"Adapter operation '{declaration.AdapterOperation ?? string.Empty}' is not supported by this compiler", declaration.At);
+            valid = false;
+        }
+
+        if (declaration.IsAsync || adapterOperation is { IsAsync: true })
+        {
+            Add("E_ADAPTER_ASYNC", "Adapter functions must be synchronous", declaration.At);
+            valid = false;
+        }
+
+        if (declaration.TypeParameters.Count != 0)
+        {
+            Add("E_ADAPTER_GENERIC", "Adapter functions cannot declare type parameters", declaration.At);
+            valid = false;
+        }
+
+        if (declaration.TypeParameters.Count == 0 && adapterOperation is not null)
+        {
+            var signatureTypesValid = symbol.Parameters.All(parameter => !parameter.Type.IsError) && !symbol.ReturnType.IsError;
+            if (!signatureTypesValid)
+            {
+                valid = false;
+            }
+            else if (symbol.Parameters.Count != adapterOperation.ParameterTypes.Count ||
+                     !symbol.Parameters.Select(parameter => parameter.Type.DisplayName)
+                         .SequenceEqual(adapterOperation.ParameterTypes, StringComparer.Ordinal) ||
+                     symbol.ReturnType.DisplayName != adapterOperation.ReturnType)
+            {
+                Add("E_ADAPTER_SIGNATURE", "The sha256.text.hash_utf8 adapter must take one Text parameter and return Text", declaration.At);
+                valid = false;
+            }
+        }
+
+        if (declaration.Effects.Count != 0 || adapterOperation is { Effects.Count: > 0 } ||
+            adapterOperation is { RequiredCapabilities.Count: > 0 })
+        {
+            Add("E_ADAPTER_EFFECT", "Adapter functions must declare effects {}", declaration.At);
+            valid = false;
+        }
+
+        if (declaration.Body.Count != 0)
+        {
+            Add("E_ADAPTER_BODY", "Adapter functions cannot contain a source body", declaration.At);
+            valid = false;
+        }
+
+        if (valid)
+            symbol.AdapterBinding = new CheckedManagedAdapterBinding(
+                adapterDefinition!.BridgeId,
+                adapterOperation!.OperationId);
+    }
+
+    private void ValidateDuplicateAdapterOperationBindings()
+    {
+        var adapterFunctions = _functions
+            .Where(function => function.AdapterBinding is not null)
+            .OrderBy(function => function.PackageId, StringComparer.Ordinal)
+            .ThenBy(function => function.AdapterBinding!.OperationId, StringComparer.Ordinal)
+            .ThenBy(StableFunctionOrderKey, StringComparer.Ordinal)
+            .ThenBy(function => function.Declaration.At.File, StringComparer.Ordinal)
+            .ThenBy(function => function.Declaration.At.Line)
+            .ThenBy(function => function.Declaration.At.Column)
+            .GroupBy(function => (function.PackageId, function.AdapterBinding!.OperationId));
+
+        foreach (var declarations in adapterFunctions)
+        {
+            var orderedDeclarations = declarations.ToArray();
+            if (orderedDeclarations.Length < 2)
+                continue;
+
+            var first = orderedDeclarations[0];
+            var operationId = first.AdapterBinding!.OperationId;
+            foreach (var duplicate in orderedDeclarations.Skip(1))
+            {
+                Add(
+                    "E_ADAPTER_DUPLICATE_OPERATION",
+                    $"Managed adapter operation '{operationId}' is already bound by '{FormatFunctionName(first)}' in this package",
+                    duplicate.Declaration.At);
+            }
         }
     }
 
@@ -1978,11 +2101,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 locals.Add(parameter.Name, new LocalSymbol(parameter.LocalId, parameter.Type));
         }
 
-        var body = new List<TypedStmt>();
-        var guaranteesReturn = CheckStatements(function.Declaration.Body, body, locals);
-
-        if (!guaranteesReturn)
-            Add("E_TYPE_MISMATCH", "Function must end with a return value", function.Declaration.At);
+        IReadOnlyList<TypedStmt> body;
+        if (function.Declaration.IsAdapter)
+        {
+            body = [];
+        }
+        else
+        {
+            var checkedBody = new List<TypedStmt>();
+            var guaranteesReturn = CheckStatements(function.Declaration.Body, checkedBody, locals);
+            if (!guaranteesReturn)
+                Add("E_TYPE_MISMATCH", "Function must end with a return value", function.Declaration.At);
+            body = ReadOnly(checkedBody);
+        }
 
         function.CheckedFunction = new CheckedFunction(
             function.Id,
@@ -1994,14 +2125,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.Parameters,
             function.TypeParameters,
             function.ReturnType,
-            ReadOnly(body),
+            body,
             function.Calls
                 .Select(call => new CheckedDirectCall(
                     call.Target.PackageId,
                     call.Target.ModuleName,
                     call.Target.Declaration.Name)),
             function.DeclaredEffects,
-            function.Declaration.At);
+            function.Declaration.At,
+            function.AdapterBinding);
     }
 
     private bool CheckStatements(
@@ -4767,6 +4899,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private sealed class ModuleSymbols(PackageModuleInput input)
     {
         public string PackageId { get; } = input.PackageId;
+        public string? ManagedAdapterBridgeId { get; } = input.ManagedAdapterBridgeId;
         public ParsedProgram Program { get; } = input.Program;
         public ModuleIdentity Identity { get; } = new(input.PackageId, input.Program.Module);
         public IReadOnlyDictionary<string, string> DirectDependencies { get; } = input.DirectDependencies
@@ -4861,6 +4994,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public IReadOnlyDictionary<string, LangType> TypeParametersByName { get; set; } = new Dictionary<string, LangType>(StringComparer.Ordinal);
         public LangType ReturnType { get; set; } = LangType.Error;
         public IReadOnlyList<string> DeclaredEffects { get; set; } = [];
+        public CheckedManagedAdapterBinding? AdapterBinding { get; set; }
         public List<FunctionCallSite> Calls { get; } = [];
         public List<DirectEffectCall> DirectEffects { get; } = [];
         public CheckedFunction? CheckedFunction { get; set; }
