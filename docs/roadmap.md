@@ -115,3 +115,18 @@ SH1 is a follow-on after the M1 reusable-library path, M3 useful CLI, and MS1, o
 - [ ] Use only narrow path/line-ending normalization where required, without masking semantic differences; keep the C# bootstrap available for recovery until its replacement is separately justified.
 
 This is a reproducibility and conformance gate, not a claim of identical binaries or a trust proof. It requires neither a native backend nor a rewritten runtime.
+
+## GOV1 - public AI-operated stewardship experiment (proposed, not started)
+
+The non-binding [public stewardship proposal](public-ai-stewardship.md) describes a possible future model in which public requests are analyzed, implemented, and independently reviewed by bounded agent workflows. Ordinary donations, sponsorships, grants, contracts, and milestone escrow may fund the work. Funding buys defined work and never guarantees acceptance or merge. The proposal explicitly excludes cryptocurrency, tokens, tradable governance rights, financial-return promises, and sponsorship-weighted technical control.
+
+GOV1 is not a V1 language gate. No public fundraising or governance transfer is authorized by this roadmap entry.
+
+- [ ] Demonstrate repeatable private planning, implementation, independent review, release, and maintenance records with measured model and infrastructure costs.
+- [ ] Publish a versioned technical charter, contribution and licensing terms, conflict policy, security process, and conventional public accounting format.
+- [ ] Establish the legal, fiduciary, credential, signing-key, privacy, tax, and refund boundaries before accepting public funds.
+- [ ] Run an evidence-only period with no public funding, then review decision quality, estimate accuracy, and disclosure burden.
+- [ ] Pilot shared maintenance sponsorship before accepting feature-specific review funding.
+- [ ] Pilot capped technical-review sponsorship with public reports and no implementation promise.
+- [ ] Allow milestone-funded implementation only for proposals already accepted through the public technical process, with an independent-review and maintenance allocation.
+- [ ] Publish concentration, dispute, security, maintenance, and cost results before expanding the program.
