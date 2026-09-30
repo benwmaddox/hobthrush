@@ -38,7 +38,8 @@ internal enum TypeParameterOwnerKind
 {
     Function,
     Struct,
-    Union
+    Union,
+    Trait
 }
 
 internal sealed class LangType : IEquatable<LangType>
@@ -252,6 +253,33 @@ internal sealed record CheckedStruct(
     IReadOnlyList<LangType> TypeParameters,
     IReadOnlyList<CheckedStructField> Fields,
     Token At);
+internal sealed record CheckedTraitMethod(
+    int Id,
+    int TraitId,
+    string Name,
+    IReadOnlyList<CheckedParameter> Parameters,
+    LangType ReturnType,
+    Token At);
+internal sealed record CheckedTrait(
+    int Id,
+    string PackageId,
+    string Module,
+    string Name,
+    bool Public,
+    LangType SelfType,
+    IReadOnlyList<CheckedTraitMethod> Methods,
+    Token At);
+internal sealed record CheckedTraitBound(int TraitId, Token At);
+internal sealed record CheckedTraitImpl(
+    int Id,
+    string StableId,
+    string PackageId,
+    string Module,
+    bool Public,
+    int TraitId,
+    LangType Target,
+    IReadOnlyList<int> BindingFunctionIds,
+    Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 internal sealed record CheckedDirectCall(string PackageId, string Module, string Name);
 internal sealed record CheckedManagedAdapterBinding(string BridgeId, string OperationId);
@@ -441,6 +469,17 @@ internal sealed record TypedCallExpr(
     int FunctionId,
     bool IsAsync,
     IReadOnlyList<LangType> TypeArguments,
+    IReadOnlyList<TypedTraitWitness> TraitWitnesses,
+    IReadOnlyList<TypedExpr> Arguments,
+    Token At) : TypedExpr(Type, At);
+internal abstract record TypedTraitWitness;
+internal sealed record TypedConcreteTraitWitness(int ImplId) : TypedTraitWitness;
+internal sealed record TypedForwardedTraitWitness(int TypeParameterOrdinal, int BoundOrdinal) : TypedTraitWitness;
+internal sealed record TypedTraitCallExpr(
+    LangType Type,
+    int TraitId,
+    int MethodId,
+    TypedTraitWitness Witness,
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
 
@@ -584,6 +623,7 @@ internal sealed class CheckedFunction
         bool isAsync,
         IReadOnlyList<CheckedParameter> parameters,
         IReadOnlyList<LangType> typeParameters,
+        IReadOnlyList<IReadOnlyList<CheckedTraitBound>> typeParameterBounds,
         LangType returnType,
         IReadOnlyList<TypedStmt> body,
         IEnumerable<CheckedDirectCall> calls,
@@ -599,6 +639,9 @@ internal sealed class CheckedFunction
         IsAsync = isAsync;
         Parameters = ReadOnly(parameters);
         TypeParameters = ReadOnly(typeParameters);
+        TypeParameterBounds = Array.AsReadOnly(typeParameterBounds
+            .Select(bounds => ReadOnly(bounds))
+            .ToArray());
         ReturnType = returnType;
         Body = ReadOnly(body);
         Calls = ReadOnly(calls);
@@ -617,6 +660,7 @@ internal sealed class CheckedFunction
     public bool IsAsync { get; }
     public IReadOnlyList<CheckedParameter> Parameters { get; }
     public IReadOnlyList<LangType> TypeParameters { get; }
+    public IReadOnlyList<IReadOnlyList<CheckedTraitBound>> TypeParameterBounds { get; }
     public LangType ReturnType { get; }
     public IReadOnlyList<CheckedDirectCall> Calls { get; }
     public IReadOnlyList<string> DeclaredEffects { get; }
@@ -650,7 +694,9 @@ internal sealed class CheckedProgram
         IEnumerable<CheckedCommand>? commands = null,
         int? entryCommandId = null,
         IEnumerable<CheckedRoute>? routes = null,
-        IEnumerable<CheckedConfigField>? configFields = null)
+        IEnumerable<CheckedConfigField>? configFields = null,
+        IEnumerable<CheckedTrait>? traits = null,
+        IEnumerable<CheckedTraitImpl>? traitImpls = null)
     {
         Modules = Array.AsReadOnly(modules.ToArray());
         EntryModule = entryModule;
@@ -658,6 +704,8 @@ internal sealed class CheckedProgram
         Functions = Array.AsReadOnly(functions.ToArray());
         Unions = Array.AsReadOnly(unions.ToArray());
         Structs = Array.AsReadOnly(structs.ToArray());
+        Traits = Array.AsReadOnly((traits ?? []).ToArray());
+        TraitImpls = Array.AsReadOnly((traitImpls ?? []).ToArray());
         Tests = Array.AsReadOnly((tests ?? []).ToArray());
         Commands = Array.AsReadOnly((commands ?? []).ToArray());
         EntryCommandId = entryCommandId;
@@ -673,6 +721,8 @@ internal sealed class CheckedProgram
     public IReadOnlyList<CheckedFunction> Functions { get; }
     public IReadOnlyList<CheckedUnion> Unions { get; }
     public IReadOnlyList<CheckedStruct> Structs { get; }
+    public IReadOnlyList<CheckedTrait> Traits { get; }
+    public IReadOnlyList<CheckedTraitImpl> TraitImpls { get; }
     public IReadOnlyList<CheckedTest> Tests { get; }
     public IReadOnlyList<CheckedCommand> Commands { get; }
     public int? EntryCommandId { get; }
@@ -777,6 +827,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private string _rootPackageId = SinglePackageId;
     private readonly List<UnionSymbol> _unions = [];
     private readonly List<StructSymbol> _structs = [];
+    private readonly List<TraitSymbol> _traits = [];
+    private readonly List<CheckedTraitImpl> _traitImpls = [];
+    private readonly List<TraitImplSymbol> _traitImplSymbols = [];
     private readonly List<FunctionSymbol> _functions = [];
     private readonly List<CheckedTest> _tests = [];
     private readonly List<CommandSymbol> _commands = [];
@@ -791,6 +844,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool[] _illegalMapReachableDeclarations = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _stablePackageIdentities = new(StringComparer.Ordinal);
     private IReadOnlySet<string> _rootCapabilities = new HashSet<string>(StringComparer.Ordinal);
     private IReadOnlyList<CheckedConfigField> _checkedConfigFields = [];
     private IReadOnlyDictionary<string, ConfigField> _rootConfigFields =
@@ -850,17 +904,20 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             _modulesByIdentity.Add(identity, module);
             orderedModules.Add(module);
         }
+        BuildStablePackageIdentities();
 
         // Register every declaration header before resolving signatures, so qualified references
         // across modules and packages can see the complete package graph.
         foreach (var module in orderedModules) RegisterUnionHeaders(module);
         foreach (var module in orderedModules) RegisterStructHeaders(module);
+        foreach (var module in orderedModules) RegisterTraitHeaders(module);
         foreach (var module in orderedModules) RegisterFunctionHeaders(module);
         foreach (var module in orderedModules)
             RegisterCommandHeaders(module, rootPackageId, entryModule, rootIsCliPackage || entryModule is not null);
 
         foreach (var module in orderedModules) PopulateUnionVariants(module);
         foreach (var module in orderedModules) PopulateStructFields(module);
+        foreach (var module in orderedModules) PopulateTraitSignatures(module);
         ValidateStructRecursion();
         foreach (var module in orderedModules)
         {
@@ -881,10 +938,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         BuildResourceGraphSummaries();
+        foreach (var module in orderedModules)
+            RegisterTraitImplementations(module);
+        ValidateTraitImplCoherence();
         ValidatePublicSignatures();
 
         foreach (var function in _functions)
             CheckFunctionBody(function);
+
+        ValidateTraitConstraintRecursion();
 
         ValidateResourceListInvariant();
         InferEffectsAndValidateBounds();
@@ -995,7 +1057,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             commands,
             entryCommand?.Id,
             _routes,
-            _checkedConfigFields), diagnostics);
+            _checkedConfigFields,
+            _traits.Select(trait => trait.ToCheckedTrait()),
+            _traitImpls), diagnostics);
     }
 
     private void BuildPackageDisplayLabels(IReadOnlyList<PackageModuleInput> inputs)
@@ -1019,6 +1083,52 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             _packageDisplayLabels.Add(input.PackageId, label);
         }
+    }
+
+    private void BuildStablePackageIdentities()
+    {
+        _stablePackageIdentities.Clear();
+        _stablePackageIdentities[_rootPackageId] = "root";
+        if (_rootPackageId == SinglePackageId) return;
+
+        var packageModules = _modulesByIdentity.Values
+            .GroupBy(module => module.PackageId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var distinctEdges = packageModules.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value.DirectDependencies.Values.Distinct(StringComparer.Ordinal).ToArray(),
+            StringComparer.Ordinal);
+        var indegree = packageModules.Keys.ToDictionary(package => package, _ => 0, StringComparer.Ordinal);
+        foreach (var dependencies in distinctEdges.Values)
+            foreach (var dependency in dependencies)
+                if (indegree.ContainsKey(dependency)) indegree[dependency]++;
+
+        var ready = new SortedSet<string>(indegree.Where(pair => pair.Value == 0).Select(pair => pair.Key), StringComparer.Ordinal);
+        while (ready.Count != 0)
+        {
+            var package = ready.Min!;
+            ready.Remove(package);
+            if (_stablePackageIdentities.TryGetValue(package, out var parentIdentity))
+            {
+                foreach (var dependency in packageModules[package].DirectDependencies.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                {
+                    var candidate = parentIdentity + "/dep:" + dependency.Key;
+                    if (!_stablePackageIdentities.TryGetValue(dependency.Value, out var existing) ||
+                        string.CompareOrdinal(candidate, existing) < 0)
+                        _stablePackageIdentities[dependency.Value] = candidate;
+                }
+            }
+            foreach (var dependency in distinctEdges[package])
+            {
+                if (!indegree.TryGetValue(dependency, out var remaining)) continue;
+                indegree[dependency] = remaining - 1;
+                if (remaining == 1) ready.Add(dependency);
+            }
+        }
+
+        foreach (var package in packageModules.Keys)
+            if (!_stablePackageIdentities.ContainsKey(package))
+                _stablePackageIdentities[package] = "package:" + _packageDisplayLabels[package];
     }
 
     private static bool IsRunnableEntry(FunctionSymbol function) =>
@@ -1118,6 +1228,82 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 typeParametersByName);
             _structs.Add(symbol);
             module.DeclaredStructs.Add(declaration.Name, symbol);
+        }
+    }
+
+    private void RegisterTraitHeaders(ModuleSymbols module)
+    {
+        _currentModule = module.Identity;
+        foreach (var declaration in module.Program.Traits)
+        {
+            if (IsReservedTypeName(declaration.Name))
+            {
+                Add("E_NAME_DUPLICATE", $"Trait name '{declaration.Name}' is reserved", declaration.At);
+                continue;
+            }
+            if (!module.TypeNames.Add(declaration.Name))
+            {
+                Add("E_NAME_DUPLICATE", $"Type name '{declaration.Name}' is already declared", declaration.At);
+                continue;
+            }
+
+            var id = _traits.Count;
+            var selfType = LangType.ForTypeParameter(TypeParameterOwnerKind.Trait, id, 0, "Self");
+            var trait = new TraitSymbol(id, module.Identity, declaration, selfType);
+            _traits.Add(trait);
+            module.DeclaredTraits.Add(declaration.Name, trait);
+        }
+    }
+
+    private void PopulateTraitSignatures(ModuleSymbols module)
+    {
+        _currentModule = module.Identity;
+        foreach (var declaration in module.Program.Traits)
+        {
+            if (!module.DeclaredTraits.TryGetValue(declaration.Name, out var trait) ||
+                trait.Declaration != declaration)
+                continue;
+
+            if (declaration.Methods.Count == 0)
+                Add("E_TRAIT_DECL", $"Trait '{declaration.Name}' must declare at least one method", declaration.At);
+
+            var methodNames = new HashSet<string>(StringComparer.Ordinal);
+            var selfTypes = new Dictionary<string, LangType>(StringComparer.Ordinal) { ["Self"] = trait.SelfType };
+            foreach (var method in declaration.Methods)
+            {
+                if (!methodNames.Add(method.Name))
+                {
+                    Add("E_TRAIT_DECL", $"Trait method '{method.Name}' is declared more than once", method.At);
+                    continue;
+                }
+                if (method.Effects.Count != 0)
+                    Add("E_TRAIT_DECL", "Trait methods in this language slice must declare effects {}", method.At);
+
+                var parameters = new List<CheckedParameter>();
+                var parameterNames = new HashSet<string>(StringComparer.Ordinal);
+                for (var index = 0; index < method.Parameters.Count; index++)
+                {
+                    var parameter = method.Parameters[index];
+                    if (!parameterNames.Add(parameter.Name))
+                        Add("E_NAME_DUPLICATE", $"Parameter '{parameter.Name}' is already declared", parameter.At);
+                    parameters.Add(new CheckedParameter(
+                        parameter.Name,
+                        ResolveType(parameter.Type, 0, selfTypes),
+                        index,
+                        parameter.At));
+                }
+                var returnType = ResolveType(method.ReturnType, 0, selfTypes);
+                if (!parameters.Any(parameter => ContainsType(parameter.Type, trait.SelfType)))
+                    Add("E_TRAIT_DECL", $"Trait method '{method.Name}' must use Self in at least one parameter", method.At);
+
+                trait.Methods.Add(new CheckedTraitMethod(
+                    trait.Methods.Count,
+                    trait.Id,
+                    method.Name,
+                    ReadOnly(parameters),
+                    returnType,
+                    method.At));
+            }
         }
     }
 
@@ -2419,6 +2605,26 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             symbol.TypeParameters = ReadOnly(typeParameters);
             symbol.TypeParametersByName = typeParametersByName;
 
+            var boundsByParameter = new List<IReadOnlyList<CheckedTraitBound>>(declaration.TypeParameters.Count);
+            foreach (var typeParameter in declaration.TypeParameters)
+            {
+                var bounds = new List<CheckedTraitBound>();
+                var boundIds = new HashSet<int>();
+                foreach (var boundReference in typeParameter.TraitBounds ?? [])
+                {
+                    var trait = ResolveTraitReference(boundReference);
+                    if (trait is null) continue;
+                    if (!boundIds.Add(trait.Id))
+                    {
+                        Add("E_TRAIT_BOUND", $"Trait bound '{FormatReference(boundReference)}' is repeated", boundReference.At);
+                        continue;
+                    }
+                    bounds.Add(new CheckedTraitBound(trait.Id, boundReference.At));
+                }
+                boundsByParameter.Add(ReadOnly(bounds));
+            }
+            symbol.TypeParameterBounds = ReadOnly(boundsByParameter);
+
             var parameters = new List<CheckedParameter>();
             var localNames = new HashSet<string>(StringComparer.Ordinal);
             for (var i = 0; i < declaration.Parameters.Count; i++)
@@ -2457,6 +2663,154 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             ValidateAdapterFunction(module, symbol);
         }
     }
+
+    private void RegisterTraitImplementations(ModuleSymbols module)
+    {
+        _currentModule = module.Identity;
+        foreach (var declaration in module.Program.Impls)
+        {
+            var trait = ResolveTraitReference(declaration.Trait);
+            var target = ResolveType(declaration.Target, 0, new Dictionary<string, LangType>(StringComparer.Ordinal));
+            var valid = trait is not null && !target.IsError;
+            if (ContainsTypeParameter(target))
+            {
+                Add("E_TRAIT_IMPL_SIGNATURE", "Trait implementation targets must be closed types", declaration.Target.At);
+                valid = false;
+            }
+            if (ContainsResourceHandle(target))
+            {
+                Add("E_RESOURCE_ESCAPE", "Trait implementations cannot target values that store resource or capability handles", declaration.Target.At);
+                valid = false;
+            }
+            if (trait is not null && declaration.Public && !trait.Declaration.Public)
+            {
+                Add("E_TYPE_VISIBILITY", $"Public implementation exposes private trait '{trait.Declaration.Name}'", declaration.At);
+                valid = false;
+            }
+            if (declaration.Public && !PublicNominalComponents(target))
+            {
+                Add("E_TYPE_VISIBILITY", $"Public implementation exposes private target type '{target.DisplayName}'", declaration.Target.At);
+                valid = false;
+            }
+            if (trait is not null && module.PackageId != trait.PackageId && !OwnsNominalHead(target, module.PackageId))
+            {
+                Add("E_TRAIT_IMPL_SIGNATURE", "A trait implementation must be declared by the trait's package or a package that owns a nominal target type", declaration.At);
+                valid = false;
+            }
+
+            if (trait is null)
+            {
+                foreach (var binding in declaration.Methods)
+                    _ = ResolveFunctionReference(binding.Function);
+                continue;
+            }
+
+            var methodByName = trait.Methods.ToDictionary(method => method.Name, StringComparer.Ordinal);
+            var suppliedMethods = new HashSet<string>(StringComparer.Ordinal);
+            var bindingFunctions = new FunctionSymbol?[trait.Methods.Count];
+            foreach (var binding in declaration.Methods)
+            {
+                if (!suppliedMethods.Add(binding.MethodName))
+                {
+                    Add("E_TRAIT_IMPL_SIGNATURE", $"Trait method '{binding.MethodName}' is bound more than once", binding.At);
+                    valid = false;
+                    _ = ResolveFunctionReference(binding.Function);
+                    continue;
+                }
+                if (!methodByName.TryGetValue(binding.MethodName, out var method))
+                {
+                    Add("E_TRAIT_IMPL_SIGNATURE", $"Trait '{trait.Declaration.Name}' has no method '{binding.MethodName}'", binding.MethodAt);
+                    valid = false;
+                    _ = ResolveFunctionReference(binding.Function);
+                    continue;
+                }
+
+                var function = ResolveFunctionReference(binding.Function);
+                if (function is null)
+                {
+                    valid = false;
+                    continue;
+                }
+                bindingFunctions[method.Id] = function;
+                var substitution = new Dictionary<LangType, LangType> { [trait.SelfType] = target };
+                var expectedParameters = method.Parameters.Select(parameter => SubstituteType(parameter.Type, substitution)).ToArray();
+                var expectedReturn = SubstituteType(method.ReturnType, substitution);
+                var signatureMatches = !function.Declaration.IsAsync && function.TypeParameters.Count == 0 &&
+                    function.DeclaredEffects.Count == 0 && function.Parameters.Count == expectedParameters.Length &&
+                    function.Parameters.Select(parameter => parameter.Type).SequenceEqual(expectedParameters) &&
+                    function.ReturnType == expectedReturn;
+                if (!signatureMatches)
+                {
+                    Add("E_TRAIT_IMPL_SIGNATURE", $"Binding for '{trait.Declaration.Name}.{method.Name}' must name a synchronous, nongeneric, pure function with signature ({string.Join(", ", expectedParameters.Select(type => type.DisplayName))}) -> {expectedReturn.DisplayName}", binding.At);
+                    valid = false;
+                }
+            }
+
+            foreach (var method in trait.Methods)
+            {
+                if (bindingFunctions[method.Id] is null)
+                {
+                    Add("E_TRAIT_IMPL_SIGNATURE", $"Trait implementation is missing binding for '{method.Name}'", declaration.At);
+                    valid = false;
+                }
+            }
+
+            if (!valid) continue;
+            var stableId = StableTraitImplId(module.PackageId, module.Program.Module, trait, target);
+            var checkedImpl = new CheckedTraitImpl(
+                _traitImpls.Count,
+                stableId,
+                module.PackageId,
+                module.Program.Module,
+                declaration.Public,
+                trait.Id,
+                target,
+                bindingFunctions.Select(function => function!.Id).ToArray(),
+                declaration.At);
+            _traitImpls.Add(checkedImpl);
+            _traitImplSymbols.Add(new TraitImplSymbol(checkedImpl, trait, bindingFunctions.Select(function => function!).ToArray()));
+        }
+    }
+
+    private bool PublicNominalComponents(LangType type)
+    {
+        if (type.Kind == LangTypeKind.Struct && !_structs[type.StructId].Declaration.Public) return false;
+        if (type.Kind == LangTypeKind.Union && !_unions[type.UnionId].Declaration.Public) return false;
+        return type.Arguments.All(PublicNominalComponents);
+    }
+
+    private bool OwnsNominalHead(LangType type, string packageId)
+    {
+        if (type.Kind == LangTypeKind.Struct && _structs[type.StructId].PackageId == packageId) return true;
+        if (type.Kind == LangTypeKind.Union && _unions[type.UnionId].PackageId == packageId) return true;
+        return false;
+    }
+
+    private string StableTraitImplId(string packageId, string module, TraitSymbol trait, LangType target)
+    {
+        var identity = $"trait-impl-v1|{StablePackageIdentity(packageId)}::{module}|{StablePackageIdentity(trait.PackageId)}::{trait.Module}::{trait.Declaration.Name}|{StableTypeIdentity(target)}";
+        return "lang.impl.v1." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
+    }
+
+    private string StablePackageIdentity(string packageId)
+    {
+        if (_stablePackageIdentities.TryGetValue(packageId, out var identity)) return identity;
+        throw new InvalidOperationException("A trait identity package is absent from the checked dependency graph");
+    }
+
+    private string StableTypeIdentity(LangType type) => type.Kind switch
+    {
+        LangTypeKind.Struct => StableNominalIdentity("struct", _structs[type.StructId].PackageId, _structs[type.StructId].Module, _structs[type.StructId].Declaration.Name, type.Arguments),
+        LangTypeKind.Union => StableNominalIdentity("union", _unions[type.UnionId].PackageId, _unions[type.UnionId].Module, _unions[type.UnionId].Declaration.Name, type.Arguments),
+        LangTypeKind.Option or LangTypeKind.List => type.Kind + "<" + StableTypeIdentity(type.Arguments[0]) + ">",
+        LangTypeKind.Map or LangTypeKind.Result => type.Kind + "<" + string.Join(",", type.Arguments.Select(StableTypeIdentity)) + ">",
+        LangTypeKind.TypeParameter => throw new InvalidOperationException("A trait implementation target must be closed"),
+        _ => type.DisplayName
+    };
+
+    private string StableNominalIdentity(string kind, string packageId, string module, string name, IReadOnlyList<LangType> arguments) =>
+        $"{kind}:{StablePackageIdentity(packageId)}::{module}::{name}" +
+        (arguments.Count == 0 ? string.Empty : "<" + string.Join(",", arguments.Select(StableTypeIdentity)) + ">");
 
     private void ValidateAdapterFunction(ModuleSymbols module, FunctionSymbol symbol)
     {
@@ -2626,6 +2980,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             foreach (var parameter in function.Parameters)
                 CheckPublicTypeVisibility(parameter.Type, function.Declaration.Name, parameter.At);
             CheckPublicTypeVisibility(function.ReturnType, function.Declaration.Name, function.Declaration.At);
+            foreach (var bound in function.TypeParameterBounds.SelectMany(bounds => bounds))
+            {
+                var trait = _traits[bound.TraitId];
+                if (!trait.Declaration.Public)
+                    Add("E_TYPE_VISIBILITY", $"Public declaration '{function.Declaration.Name}' exposes private trait '{trait.Declaration.Name}'", bound.At);
+            }
         }
 
         foreach (var union in _unions)
@@ -2641,6 +3001,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             if (!structure.Declaration.Public) continue;
             foreach (var field in structure.Fields)
                 CheckPublicTypeVisibility(field.Type, structure.Declaration.Name, field.At);
+        }
+
+        foreach (var trait in _traits)
+        {
+            if (!trait.Declaration.Public) continue;
+            foreach (var method in trait.Methods)
+            {
+                foreach (var parameter in method.Parameters)
+                    CheckPublicTypeVisibility(parameter.Type, trait.Declaration.Name, parameter.At);
+                CheckPublicTypeVisibility(method.ReturnType, trait.Declaration.Name, method.At);
+            }
         }
     }
 
@@ -2699,6 +3070,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             function.Declaration.IsAsync,
             function.Parameters,
             function.TypeParameters,
+            function.TypeParameterBounds,
             function.ReturnType,
             body,
             function.Calls
@@ -3254,6 +3626,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 foreach (var argument in call.Arguments)
                     ValidateResourceListExpression(argument);
                 break;
+            case TypedTraitCallExpr call:
+                foreach (var argument in call.Arguments)
+                    ValidateResourceListExpression(argument);
+                break;
             case TypedAwaitExpr awaited:
                 ValidateResourceListExpression(awaited.Value);
                 break;
@@ -3462,6 +3838,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             AwaitExpr awaited => CheckAwait(awaited, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             UnionConstructExpr union => CheckUnionConstruction(union, locals, depth + 1),
+            QualifiedTypeMemberCallExpr member => CheckQualifiedTypeMemberCall(member, expected, locals, depth + 1),
             FieldAccessExpr access => CheckFieldAccess(access, locals, depth + 1),
             MatchExpr match => CheckMatch(match, expected, locals, depth + 1),
             _ => UnsupportedExpr(expression)
@@ -3682,6 +4059,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return union;
     }
 
+    private TraitSymbol? ResolveTraitReference(SourceDeclarationRefSyntax reference)
+    {
+        if (!TryResolveTargetModule(reference, out var target)) return null;
+        if (!target!.DeclaredTraits.TryGetValue(reference.Declaration, out var trait))
+        {
+            Add("E_NAME_UNRESOLVED", $"Module '{target.Program.Module}' does not declare trait '{reference.Declaration}'", reference.At);
+            return null;
+        }
+        if (target.Identity != CurrentModule.Identity && !trait.Declaration.Public)
+        {
+            Add("E_ACCESS_PRIVATE", $"Trait '{FormatReference(reference)}' is private", reference.At);
+            return null;
+        }
+        return trait;
+    }
+
     private (UnionSymbol? Union, StructSymbol? Struct) ResolveTypeDeclaration(SourceDeclarationRefSyntax reference)
     {
         if (!TryResolveTargetModule(reference, out var target)) return (null, null);
@@ -3819,6 +4212,369 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return instantiatedType.IsError
             ? new TypedErrorExpr(expression.At)
             : new TypedStructConstructExpr(instantiatedType, structure.Id, ReadOnly(values), expression.At);
+    }
+
+    private TypedExpr CheckQualifiedTypeMemberCall(
+        QualifiedTypeMemberCallExpr expression,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (!TryResolveTargetModule(expression.Owner, out var module))
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (module!.DeclaredUnions.TryGetValue(expression.Owner.Declaration, out var union))
+        {
+            if (module.Identity != CurrentModule.Identity && !union.Declaration.Public)
+            {
+                Add("E_ACCESS_PRIVATE", $"Union '{FormatReference(expression.Owner)}' is private", expression.Owner.At);
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+            return CheckUnionConstruction(
+                new UnionConstructExpr(
+                    expression.At,
+                    new TypeSyntax(expression.Owner, expression.TypeArguments, expression.Owner.At),
+                    expression.Member,
+                    expression.MemberAt,
+                    expression.Arguments),
+                locals,
+                depth);
+        }
+
+        if (module.DeclaredTraits.TryGetValue(expression.Owner.Declaration, out var trait))
+        {
+            if (module.Identity != CurrentModule.Identity && !trait.Declaration.Public)
+            {
+                Add("E_ACCESS_PRIVATE", $"Trait '{FormatReference(expression.Owner)}' is private", expression.Owner.At);
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+            if (expression.TypeArguments.Count != 0)
+            {
+                Add("E_TYPE_MISMATCH", $"Trait '{trait.Declaration.Name}' does not take type arguments", expression.Owner.At);
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+            return CheckTraitOperation(trait, expression.Member, expression.Arguments, expression.At, expression.MemberAt, expected, locals, depth);
+        }
+
+        if (module.DeclaredStructs.TryGetValue(expression.Owner.Declaration, out var structure))
+        {
+            if (module.Identity != CurrentModule.Identity && !structure.Declaration.Public)
+                Add("E_ACCESS_PRIVATE", $"Struct '{FormatReference(expression.Owner)}' is private", expression.Owner.At);
+            else
+                Add("E_TYPE_MISMATCH", $"Struct '{structure.Declaration.Name}' has no static member '{expression.Member}'", expression.MemberAt);
+        }
+        else
+        {
+            Add("E_NAME_UNRESOLVED", $"Module '{module.Program.Module}' does not declare union or trait '{expression.Owner.Declaration}'", expression.Owner.At);
+        }
+        foreach (var argument in expression.Arguments)
+            _ = CheckExpr(argument, null, locals, depth);
+        return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckTraitOperation(
+        TraitSymbol trait,
+        string methodName,
+        IReadOnlyList<Expr> argumentSyntax,
+        Token at,
+        Token memberAt,
+        LangType? expected,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var method = trait.Methods.FirstOrDefault(candidate => candidate.Name == methodName);
+        if (method is null)
+        {
+            foreach (var argument in argumentSyntax)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_NAME_UNRESOLVED", $"Trait '{trait.Declaration.Name}' has no method '{methodName}'", memberAt);
+            return new TypedErrorExpr(at);
+        }
+        if (argumentSyntax.Count != method.Parameters.Count)
+            Add("E_TYPE_MISMATCH", $"Trait method '{trait.Declaration.Name}.{methodName}' expects {method.Parameters.Count} arguments, got {argumentSyntax.Count}", memberAt);
+
+        var arguments = new List<TypedExpr>(argumentSyntax.Count);
+        for (var index = 0; index < argumentSyntax.Count; index++)
+            arguments.Add(CheckExpr(argumentSyntax[index], null, locals, depth));
+
+        var selfBindings = new Dictionary<LangType, LangType>();
+        for (var index = 0; index < Math.Min(arguments.Count, method.Parameters.Count); index++)
+        {
+            var formal = method.Parameters[index].Type;
+            var actual = arguments[index].Type;
+            if (!TryUnifyType(formal, actual, selfBindings) && !formal.IsError && !actual.IsError)
+                AddMismatch(SubstituteType(formal, selfBindings, preserveUnboundTypeParameters: true), actual, argumentSyntax[index].At);
+        }
+        if (!selfBindings.TryGetValue(trait.SelfType, out var selfType))
+        {
+            Add("E_TYPE_MISMATCH", $"Trait method '{trait.Declaration.Name}.{methodName}' cannot infer Self from its arguments", memberAt);
+            return new TypedErrorExpr(at);
+        }
+
+        var witness = ResolveTraitWitness(trait, selfType, memberAt);
+        if (witness is null)
+            return new TypedErrorExpr(at);
+        var returnType = SubstituteType(method.ReturnType, selfBindings, preserveUnboundTypeParameters: true);
+        var typed = new TypedTraitCallExpr(returnType, trait.Id, method.Id, witness, ReadOnly(arguments), at);
+        if (witness is TypedConcreteTraitWitness concrete && _currentFunction is not null)
+        {
+            var impl = _traitImpls[concrete.ImplId];
+            var bindingId = impl.BindingFunctionIds[method.Id];
+            _currentFunction.Calls.Add(new FunctionCallSite(_functions[bindingId], at));
+        }
+        return typed;
+    }
+
+    private TypedTraitWitness? ResolveTraitWitness(TraitSymbol trait, LangType target, Token at)
+    {
+        if (target.IsError) return null;
+        if (target.Kind == LangTypeKind.TypeParameter)
+        {
+            if (target.TypeParameterOwnerKind == TypeParameterOwnerKind.Function &&
+                _currentFunction is not null && target.TypeParameterOwnerId == _currentFunction.Id &&
+                target.TypeParameterOrdinal >= 0 && target.TypeParameterOrdinal < _currentFunction.TypeParameterBounds.Count)
+            {
+                var bounds = _currentFunction.TypeParameterBounds[target.TypeParameterOrdinal];
+                var boundOrdinal = bounds.ToList().FindIndex(bound => bound.TraitId == trait.Id);
+                if (boundOrdinal >= 0)
+                    return new TypedForwardedTraitWitness(target.TypeParameterOrdinal, boundOrdinal);
+            }
+            Add("E_TRAIT_IMPL_MISSING", $"Type '{target.DisplayName}' has no bound or visible implementation for trait '{trait.Declaration.Name}'", at);
+            return null;
+        }
+        if (ContainsResourceHandle(target))
+        {
+            Add("E_RESOURCE_ESCAPE", $"Trait '{trait.Declaration.Name}' cannot be dispatched for a value that stores resource or capability handles", at);
+            return null;
+        }
+
+        var matching = _traitImplSymbols
+            .Where(implementation => implementation.Checked.TraitId == trait.Id && implementation.Checked.Target == target)
+            .OrderBy(implementation => _packageDisplayLabels[implementation.Checked.PackageId], StringComparer.Ordinal)
+            .ThenBy(implementation => implementation.Checked.Module, StringComparer.Ordinal)
+            .ThenBy(implementation => implementation.Checked.StableId, StringComparer.Ordinal)
+            .ToArray();
+        var visible = matching.Where(implementation =>
+            implementation.Checked.PackageId == CurrentModule.PackageId ||
+            implementation.Checked.Public && PackageCanSee(CurrentModule.PackageId, implementation.Checked.PackageId)).ToArray();
+        if (visible.Length > 1)
+        {
+            return null;
+        }
+        if (visible.Length == 1)
+            return new TypedConcreteTraitWitness(visible[0].Checked.Id);
+        if (matching.Length != 0)
+        {
+            Add("E_TRAIT_IMPL_INACCESSIBLE", $"An implementation of trait '{trait.Declaration.Name}' for type '{target.DisplayName}' exists but is not public to this package", at);
+            return null;
+        }
+        Add("E_TRAIT_IMPL_MISSING", $"No visible implementation of trait '{trait.Declaration.Name}' exists for type '{target.DisplayName}'", at);
+        return null;
+    }
+
+    private bool PackageCanSee(string fromPackage, string targetPackage)
+    {
+        var pending = new Queue<string>();
+        var visited = new HashSet<string>(StringComparer.Ordinal) { fromPackage };
+        pending.Enqueue(fromPackage);
+        while (pending.TryDequeue(out var package))
+        {
+            if (package == targetPackage) return true;
+            foreach (var module in _modulesByIdentity.Values.Where(candidate => candidate.PackageId == package))
+                foreach (var dependency in module.DirectDependencies.Values)
+                    if (visited.Add(dependency)) pending.Enqueue(dependency);
+        }
+        return false;
+    }
+
+    private void ValidateTraitImplCoherence()
+    {
+        var packageIds = _modulesByIdentity.Values.Select(module => module.PackageId)
+            .Distinct(StringComparer.Ordinal).ToArray();
+        var ordered = _traitImplSymbols.OrderBy(implementation => _packageDisplayLabels[implementation.Checked.PackageId], StringComparer.Ordinal)
+            .ThenBy(implementation => implementation.Checked.Module, StringComparer.Ordinal)
+            .ThenBy(implementation => implementation.Checked.StableId, StringComparer.Ordinal)
+            .ToArray();
+        for (var leftIndex = 0; leftIndex < ordered.Length; leftIndex++)
+            for (var rightIndex = leftIndex + 1; rightIndex < ordered.Length; rightIndex++)
+            {
+                var left = ordered[leftIndex].Checked;
+                var right = ordered[rightIndex].Checked;
+                if (left.TraitId != right.TraitId || left.Target != right.Target) continue;
+                var conflictVisible = packageIds.Any(package =>
+                    ImplVisibleFrom(left, package) && ImplVisibleFrom(right, package));
+                if (conflictVisible)
+                    Add("E_TRAIT_IMPL_DUPLICATE", $"Trait '{_traits[left.TraitId].Declaration.Name}' has duplicate implementations for type '{left.Target.DisplayName}' in the visible package graph", right.At);
+            }
+    }
+
+    private bool ImplVisibleFrom(CheckedTraitImpl implementation, string packageId) =>
+        implementation.PackageId == packageId ||
+        implementation.Public && PackageCanSee(packageId, implementation.PackageId);
+
+    private void ValidateTraitConstraintRecursion()
+    {
+        if (_traitImplSymbols.Count == 0) return;
+        var functionById = _functions.ToDictionary(function => function.Id);
+        var obligations = _traitImplSymbols.ToDictionary(
+            implementation => implementation.Checked.Id,
+            _ => new HashSet<int>());
+
+        foreach (var implementation in _traitImplSymbols)
+            foreach (var bindingFunction in implementation.BindingFunctions)
+            {
+                var pending = new Stack<(FunctionSymbol Function, IReadOnlyDictionary<(int Parameter, int Bound), int?> Witnesses)>();
+                pending.Push((bindingFunction, new Dictionary<(int, int), int?>()));
+                var visited = new HashSet<string>(StringComparer.Ordinal);
+                while (pending.TryPop(out var state))
+                {
+                    var stateKey = TraitTraversalStateKey(state.Function.Id, state.Witnesses);
+                    if (!visited.Add(stateKey)) continue;
+
+                    foreach (var expression in TypedExpressions(state.Function.CheckedFunction?.Body ?? []))
+                    {
+                        if (expression is TypedTraitCallExpr traitCall)
+                        {
+                            var selectedImpl = ResolveWitnessImplId(traitCall.Witness, state.Witnesses);
+                            if (selectedImpl is int concrete && obligations.ContainsKey(concrete))
+                                obligations[implementation.Checked.Id].Add(concrete);
+                        }
+                        if (expression is not TypedCallExpr call || !functionById.TryGetValue(call.FunctionId, out var target))
+                            continue;
+
+                        var targetWitnesses = new Dictionary<(int, int), int?>();
+                        var flattenedBounds = target.TypeParameterBounds
+                            .SelectMany((bounds, parameter) => bounds.Select((bound, ordinal) => (parameter, ordinal)))
+                            .ToArray();
+                        for (var index = 0; index < Math.Min(flattenedBounds.Length, call.TraitWitnesses.Count); index++)
+                        {
+                            var (parameter, ordinal) = flattenedBounds[index];
+                            targetWitnesses[(parameter, ordinal)] = ResolveWitnessImplId(call.TraitWitnesses[index], state.Witnesses);
+                        }
+                        pending.Push((target, targetWitnesses));
+                    }
+                }
+            }
+
+        foreach (var implementation in _traitImplSymbols)
+        {
+            var start = implementation.Checked.Id;
+            var pending = new Stack<int>(obligations[start]);
+            var visited = new HashSet<int>();
+            var recursive = false;
+            while (pending.TryPop(out var current))
+            {
+                if (current == start)
+                {
+                    recursive = true;
+                    break;
+                }
+                if (!visited.Add(current) || !obligations.TryGetValue(current, out var next)) continue;
+                foreach (var candidate in next) pending.Push(candidate);
+            }
+            if (recursive)
+                Add("E_TRAIT_CONSTRAINT_RECURSIVE", "Trait implementation dispatch forms a recursive constraint cycle", implementation.Checked.At);
+        }
+    }
+
+    private static int? ResolveWitnessImplId(
+        TypedTraitWitness witness,
+        IReadOnlyDictionary<(int Parameter, int Bound), int?> environment) => witness switch
+        {
+            TypedConcreteTraitWitness concrete => concrete.ImplId,
+            TypedForwardedTraitWitness forwarded when environment.TryGetValue((forwarded.TypeParameterOrdinal, forwarded.BoundOrdinal), out var implId) => implId,
+            _ => null
+        };
+
+    private static string TraitTraversalStateKey(
+        int functionId,
+        IReadOnlyDictionary<(int Parameter, int Bound), int?> environment) =>
+        functionId.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" +
+        string.Join(",", environment.OrderBy(item => item.Key.Parameter).ThenBy(item => item.Key.Bound)
+            .Select(item => $"{item.Key.Parameter}:{item.Key.Bound}={item.Value?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?"}"));
+
+    private static IEnumerable<TypedExpr> TypedExpressions(IEnumerable<TypedStmt> statements)
+    {
+        foreach (var statement in statements)
+        {
+            switch (statement)
+            {
+                case TypedLetStmt let:
+                    foreach (var expression in TypedExpressions(let.Value)) yield return expression;
+                    break;
+                case TypedAssignStmt assignment:
+                    foreach (var expression in TypedExpressions(assignment.Value)) yield return expression;
+                    break;
+                case TypedReturnStmt returned:
+                    foreach (var expression in TypedExpressions(returned.Value)) yield return expression;
+                    break;
+                case TypedIfStmt conditional:
+                    foreach (var expression in TypedExpressions(conditional.Condition)) yield return expression;
+                    foreach (var expression in TypedExpressions(conditional.ThenBody)) yield return expression;
+                    if (conditional.ElseBody is not null)
+                        foreach (var expression in TypedExpressions(conditional.ElseBody)) yield return expression;
+                    break;
+                case TypedForStmt loop:
+                    foreach (var expression in TypedExpressions(loop.Collection)) yield return expression;
+                    foreach (var expression in TypedExpressions(loop.Body)) yield return expression;
+                    break;
+                case TypedWithTransactionStmt transaction:
+                    foreach (var expression in TypedExpressions(transaction.Database)) yield return expression;
+                    foreach (var expression in TypedExpressions(transaction.Body)) yield return expression;
+                    break;
+            }
+        }
+    }
+
+    private static IEnumerable<TypedExpr> TypedExpressions(TypedExpr expression)
+    {
+        yield return expression;
+        IEnumerable<TypedExpr> children = expression switch
+        {
+            TypedLambdaInvokeExpr lambda => [lambda.Argument, lambda.Body],
+            TypedListExpr list => list.Items,
+            TypedMapSetExpr map => [map.Target, map.Key, map.Value],
+            TypedMapGetExpr map => [map.Target, map.Key],
+            TypedMapKeysExpr map => [map.Target],
+            TypedMapLengthExpr map => [map.Target],
+            TypedBinaryExpr binary => [binary.Left, binary.Right],
+            TypedCompareExpr comparison => [comparison.Left, comparison.Right],
+            TypedCallExpr call => call.Arguments,
+            TypedTraitCallExpr call => call.Arguments,
+            TypedAwaitExpr awaited => [awaited.Value],
+            TypedDatabaseCallExpr database => [database.Receiver, database.Parameters],
+            TypedTextLengthExpr length => [length.Target],
+            TypedTextTrimExpr trim => [trim.Target],
+            TypedListLengthExpr length => [length.Target],
+            TypedListGetExpr get => [get.Target, get.Index],
+            TypedListAppendExpr append => [append.Target, append.Value],
+            TypedIntrinsicCallExpr intrinsic => intrinsic.Arguments,
+            TypedBuiltinConstructExpr builtin => builtin.Arguments,
+            TypedUnionConstructExpr union => union.Arguments,
+            TypedStructConstructExpr structure => structure.Fields.Select(field => field.Value),
+            TypedFieldAccessExpr field => [field.Target],
+            TypedMatchExpr match => new[] { match.Value }.Concat(match.Arms.SelectMany(arm => TypedExpressions(arm.Body))),
+            _ => []
+        };
+        foreach (var child in children)
+        {
+            if (expression is TypedMatchExpr && child != ((TypedMatchExpr)expression).Value)
+            {
+                yield return child;
+                continue;
+            }
+            foreach (var nested in TypedExpressions(child)) yield return nested;
+        }
     }
 
     private TypedExpr CheckUnionConstruction(
@@ -4172,6 +4928,25 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 ? function.TypeParameters.Select(typeParameter =>
                     inferredTypeArguments.TryGetValue(typeParameter, out var inferred) ? inferred : LangType.Error).ToArray()
                 : Array.Empty<LangType>();
+            var traitWitnesses = new List<TypedTraitWitness>();
+            var boundsValid = true;
+            for (var parameterOrdinal = 0; parameterOrdinal < function.TypeParameterBounds.Count; parameterOrdinal++)
+            {
+                if (parameterOrdinal >= typeArguments.Length || typeArguments[parameterOrdinal].IsError)
+                {
+                    boundsValid = false;
+                    continue;
+                }
+                foreach (var bound in function.TypeParameterBounds[parameterOrdinal])
+                {
+                    var trait = _traits[bound.TraitId];
+                    var witness = ResolveTraitWitness(trait, typeArguments[parameterOrdinal], expression.At);
+                    if (witness is null)
+                        boundsValid = false;
+                    else
+                        traitWitnesses.Add(witness);
+                }
+            }
             var signatureTypesValid = !function.ReturnType.IsError && function.Parameters.All(parameter => !parameter.Type.IsError);
             if (hasCorrectArity && signatureTypesValid && diagnostics.Count == diagnosticsBeforeArguments)
                 _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
@@ -4181,7 +4956,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 : function.ReturnType;
             var returnType = instantiatedReturnType;
             if (isGeneric && (!hasCorrectArity || diagnostics.Count != diagnosticsBeforeArguments ||
-                              typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type))))
+                              typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type)) || !boundsValid))
                 returnType = LangType.Error;
 
             if (isGeneric && typeArguments.All(typeArgument => !ContainsError(typeArgument)))
@@ -4198,6 +4973,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 function.Id,
                 function.Declaration.IsAsync,
                 ReadOnly(typeArguments),
+                ReadOnly(traitWitnesses),
                 ReadOnly(arguments),
                 expression.At);
         }
@@ -6039,6 +6815,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public HashSet<string> TypeNames { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, UnionSymbol> DeclaredUnions { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, StructSymbol> DeclaredStructs { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, TraitSymbol> DeclaredTraits { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, FunctionSymbol> DeclaredFunctions { get; } = new(StringComparer.Ordinal);
         public CommandSymbol? Command { get; set; }
     }
@@ -6053,6 +6830,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         public int Id { get; } = id;
         public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string PackageId => ModuleIdentity.PackageId;
         public string Module => ModuleIdentity.ModuleName;
         public UnionDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
@@ -6071,6 +6849,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         public int Id { get; } = id;
         public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string PackageId => ModuleIdentity.PackageId;
         public string Module => ModuleIdentity.ModuleName;
         public StructDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
@@ -6079,6 +6858,36 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             typeParametersByName ?? new Dictionary<string, LangType>(StringComparer.Ordinal);
         public List<CheckedStructField> Fields { get; } = [];
     }
+
+    private sealed class TraitSymbol(
+        int id,
+        ModuleIdentity moduleIdentity,
+        TraitDecl declaration,
+        LangType selfType)
+    {
+        public int Id { get; } = id;
+        public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
+        public string PackageId => ModuleIdentity.PackageId;
+        public string Module => ModuleIdentity.ModuleName;
+        public TraitDecl Declaration { get; } = declaration;
+        public LangType SelfType { get; } = selfType;
+        public List<CheckedTraitMethod> Methods { get; } = [];
+
+        public CheckedTrait ToCheckedTrait() => new(
+            Id,
+            PackageId,
+            Module,
+            Declaration.Name,
+            Declaration.Public,
+            SelfType,
+            ReadOnly(Methods),
+            Declaration.At);
+    }
+
+    private sealed record TraitImplSymbol(
+        CheckedTraitImpl Checked,
+        TraitSymbol Trait,
+        IReadOnlyList<FunctionSymbol> BindingFunctions);
 
     private sealed class CommandSymbol(
         int id,
@@ -6140,6 +6949,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public string? TestName { get; } = testName;
         public IReadOnlyList<CheckedParameter> Parameters { get; set; } = [];
         public IReadOnlyList<LangType> TypeParameters { get; set; } = [];
+        public IReadOnlyList<IReadOnlyList<CheckedTraitBound>> TypeParameterBounds { get; set; } = [];
         public IReadOnlyDictionary<string, LangType> TypeParametersByName { get; set; } = new Dictionary<string, LangType>(StringComparer.Ordinal);
         public LangType ReturnType { get; set; } = LangType.Error;
         public IReadOnlyList<string> DeclaredEffects { get; set; } = [];

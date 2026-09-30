@@ -1,0 +1,3 @@
+module fixtures::trait_public_private_signature;
+struct Hidden { value: i32 }
+pub trait Make { fn make(value: Self) -> self::fixtures::trait_public_private_signature::Hidden effects {}; }

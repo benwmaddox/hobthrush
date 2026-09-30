@@ -428,5 +428,65 @@
     "file": "85-generic-union-pattern-type-arguments.lang",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "86-valid-static-trait-scalar.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "87-valid-static-trait-closed-targets.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "88-valid-static-trait-private-signature.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "89-valid-static-trait-phantom-resource.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "90-valid-static-trait-unused-bound.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "91-trait-public-private-signature.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_VISIBILITY"]
+  },
+  {
+    "file": "92-trait-recursive-obligation.lang",
+    "status": "active",
+    "expectedCodes": ["E_TRAIT_CONSTRAINT_RECURSIVE"]
+  },
+  {
+    "file": "93-trait-forwarded-cycle.lang",
+    "status": "active",
+    "expectedCodes": ["E_TRAIT_CONSTRAINT_RECURSIVE"]
+  },
+  {
+    "file": "94-trait-stored-resource.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "95-trait-duplicate-no-call.lang",
+    "status": "active",
+    "expectedCodes": ["E_TRAIT_IMPL_DUPLICATE"]
+  },
+  {
+    "file": "96-trait-impl-signature.lang",
+    "status": "active",
+    "expectedCodes": ["E_TRAIT_IMPL_SIGNATURE"]
+  },
+  {
+    "file": "97-trait-impl-missing.lang",
+    "status": "active",
+    "expectedCodes": ["E_TRAIT_IMPL_MISSING"]
   }
 ]

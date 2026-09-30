@@ -1,6 +1,6 @@
 # Memory semantics and performance evaluation
 
-This contract records the accepted .NET implementation baseline, the completed MS1 source contract, and the decisions that remain open outside MS1. It informs [the PRD](PRD.md) and [the roadmap](roadmap.md); it does not implement a runtime or benchmark suite.
+This contract records the accepted .NET implementation baseline, the completed MS1 source contract, and the decisions that remain open outside MS1. It informs [the PRD](PRD.md) and [the roadmap](roadmap.md); it does not implement a runtime or benchmark suite. The language is pre-1.0: source and serialized contracts may change without backward-compatibility or migration support. Schema numbers identify the current format for tooling and tests; compiler, tests, documentation, and examples move together when that format changes.
 
 ## Accepted V1 commitments
 
@@ -27,6 +27,10 @@ MS1 fixes the source-level contract for the currently supported value and resour
 | Foreign adapters | Adapter implementations remain trusted runtime code. Their declarations do not prove safety, resource behavior, or effect truth; richer interop ownership contracts are outside this decision. | Adapter behavior is covered only by its explicit integration contracts; no general foreign-safety proof is claimed. |
 
 The limited closure syntax makes the selected capture rule executable without exposing function values or a general ownership system. Generic closure types remain unsupported because an unconstrained type parameter cannot be proven to be an ordinary value. These decisions remain independent of generated C# records, classes, arrays, dictionaries, or any future backend representation.
+
+### Static traits and value semantics
+
+Static traits add compile-time operation selection without introducing a source-level trait object, reference identity, or mutation. A checked implementation is a closed trait/target pair whose methods bind to synchronous, nongeneric, pure functions with the substituted signature. The checker enforces one visible implementation per pair and rejects recursive implementation-obligation cycles; ordinary recursive calls inside a binding remain ordinary function calls. Generic forwarding passes a constrained zero-state witness type, and generated code uses static-abstract interface members with readonly witness structs. The witness has no instance state and is not boxed or allocated for trait dispatch. Resource eligibility follows the actual stored fields or union payloads of the closed target: a phantom type argument does not make an implementation resource-bearing, while a stored resource handle excludes it. Trait dispatch changes neither the sharing equivalence of immutable values nor the structural equality rules above.
 
 ### MS1 transaction decision record (narrow adapter contract)
 

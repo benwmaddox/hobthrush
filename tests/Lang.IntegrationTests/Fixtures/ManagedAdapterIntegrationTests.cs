@@ -13,11 +13,15 @@ internal static partial class IntegrationTests
         const string adapterSource = """
             module sha;
             pub adapter fn hash_utf8(value: Text) -> Text effects {} = "sha256.text.hash_utf8";
+            pub trait Hash { fn hash(value: Self) -> Text effects {}; }
+            pub impl self::sha::Hash for Text { hash = self::sha::hash_utf8; }
             """;
         const string consumerSource = """
             module app::main;
             pub fn main() -> Text effects {} {
-                return digest::sha::hash_utf8("abc");
+                let direct_hash: Text = digest::sha::hash_utf8("abc");
+                let trait_hash: Text = digest::sha::Hash.hash("abc");
+                if direct_hash == trait_hash { return trait_hash; } else { return ""; }
             }
             """;
 
@@ -172,8 +176,8 @@ internal static partial class IntegrationTests
         using var auditDocument = JsonDocument.Parse(audit.StandardOutput);
         var auditRoot = auditDocument.RootElement;
         AssertAuditPropertyOrder(auditRoot);
-        AssertEqual(7, auditRoot.GetProperty("schema_version").GetInt32(),
-            "Managed adapter audit reports must use schema version 7.");
+        AssertEqual(8, auditRoot.GetProperty("schema_version").GetInt32(),
+            "Managed adapter audit reports must use schema version 8.");
         var auditAdapters = auditRoot.GetProperty("managed_adapters");
         AssertSha256AdapterProvenance(auditAdapters, "../adapter", validHash);
         AssertAuditPortable(audit.StandardOutput, packageRoot, harness.TemporaryRoot);

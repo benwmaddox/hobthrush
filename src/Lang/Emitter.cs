@@ -403,6 +403,8 @@ internal static class Emitter
         private CheckedFunction? _emittingFunction;
         private CheckedStruct? _emittingStruct;
         private CheckedUnion? _emittingUnion;
+        private CheckedTrait? _emittingTrait;
+        private LangType? _emittingTraitSelfTarget;
         private readonly Dictionary<LangType, string> _nominalTypeParameterEqualityNames = [];
         private Dictionary<(LangTypeKind Kind, int Id), int[]>? _nominalEqualityParameterOrdinals;
         private readonly HashSet<int> _testFunctionIds = program.Tests
@@ -485,6 +487,8 @@ internal static class Emitter
             if (NeedsProcessRunnerRuntime) EmitProcessRunnerRuntime();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
+            foreach (var trait in program.Traits) EmitTrait(trait);
+            foreach (var implementation in program.TraitImpls) EmitTraitImpl(implementation);
             if (UsesStructuralEquality) EmitStructuralEqualityHelpers();
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
@@ -1229,6 +1233,62 @@ internal static class Emitter
             _emittingStruct = null;
         }
 
+        private void EmitTrait(CheckedTrait trait)
+        {
+            _emittingTrait = trait;
+            _emittingTraitSelfTarget = null;
+            _source.Append("    ").Append(trait.Public ? "public" : "private")
+                .Append(" interface Trait_").Append(trait.Id.ToString(CultureInfo.InvariantCulture)).AppendLine("<TSelf>");
+            _source.AppendLine("    {");
+            foreach (var method in trait.Methods)
+            {
+                _source.Append("        static abstract ").Append(EmitType(method.ReturnType)).Append(" Method_")
+                    .Append(method.Id.ToString(CultureInfo.InvariantCulture)).Append('(');
+                for (var index = 0; index < method.Parameters.Count; index++)
+                {
+                    if (index != 0) _source.Append(", ");
+                    _source.Append(EmitType(method.Parameters[index].Type)).Append(" Local_")
+                        .Append(method.Parameters[index].LocalId.ToString(CultureInfo.InvariantCulture));
+                }
+                _source.AppendLine(");");
+            }
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _emittingTrait = null;
+        }
+
+        private void EmitTraitImpl(CheckedTraitImpl implementation)
+        {
+            var trait = program.Traits.Single(item => item.Id == implementation.TraitId);
+            _emittingTrait = trait;
+            _emittingTraitSelfTarget = implementation.Target;
+            _source.Append("    private readonly struct Impl_").Append(implementation.Id.ToString(CultureInfo.InvariantCulture))
+                .Append(" : Trait_").Append(trait.Id.ToString(CultureInfo.InvariantCulture)).Append('<')
+                .Append(EmitType(implementation.Target)).AppendLine(">");
+            _source.AppendLine("    {");
+            foreach (var method in trait.Methods)
+            {
+                var binding = program.Functions.Single(function => function.Id == implementation.BindingFunctionIds[method.Id]);
+                _source.Append("        public static ").Append(EmitType(method.ReturnType)).Append(" Method_")
+                    .Append(method.Id.ToString(CultureInfo.InvariantCulture)).Append('(');
+                for (var index = 0; index < method.Parameters.Count; index++)
+                {
+                    if (index != 0) _source.Append(", ");
+                    _source.Append(EmitType(method.Parameters[index].Type)).Append(" Local_")
+                        .Append(method.Parameters[index].LocalId.ToString(CultureInfo.InvariantCulture));
+                }
+                var arguments = method.Parameters.Select(parameter =>
+                    "Local_" + parameter.LocalId.ToString(CultureInfo.InvariantCulture)).ToArray();
+                _source.Append(") => ").Append(binding.AdapterBinding is null
+                    ? "Function_" + binding.Id.ToString(CultureInfo.InvariantCulture) + "(" + string.Join(", ", arguments) + ")"
+                    : EmitManagedAdapterCall(binding.AdapterBinding, arguments)).AppendLine(";");
+            }
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _emittingTraitSelfTarget = null;
+            _emittingTrait = null;
+        }
+
         private void EmitFunction(CheckedFunction function)
         {
             if (function.AdapterBinding is not null)
@@ -1238,10 +1298,14 @@ internal static class Emitter
             _source.Append("    ").Append(function.Public ? "public" : "private").Append(" static ")
                 .Append(function.IsAsync ? "async Task<" + EmitType(function.ReturnType) + ">" : EmitType(function.ReturnType))
                 .Append(" Function_").Append(function.Id);
-            if (function.TypeParameters.Count != 0)
+            var genericParameterNames = function.TypeParameters
+                .Select((_, index) => TypeParameterName(index))
+                .Concat(function.TypeParameterBounds
+                    .SelectMany((bounds, parameter) => bounds.Select((_, bound) => TraitWitnessTypeParameterName(parameter, bound))))
+                .ToArray();
+            if (genericParameterNames.Length != 0)
             {
-                var typeParameterNames = function.TypeParameters.Select((_, index) => TypeParameterName(index));
-                _source.Append('<').Append(string.Join(", ", typeParameterNames)).Append('>');
+                _source.Append('<').Append(string.Join(", ", genericParameterNames)).Append('>');
             }
             _source.Append('(');
             for (var i = 0; i < function.Parameters.Count; i++)
@@ -1256,6 +1320,14 @@ internal static class Emitter
                 _source.Append("CancellationToken cancellationToken");
             }
             _source.AppendLine(")");
+            for (var parameter = 0; parameter < function.TypeParameterBounds.Count; parameter++)
+                for (var bound = 0; bound < function.TypeParameterBounds[parameter].Count; bound++)
+                {
+                    var traitId = function.TypeParameterBounds[parameter][bound].TraitId;
+                    _source.Append("        where ").Append(TraitWitnessTypeParameterName(parameter, bound))
+                        .Append(" : struct, Trait_").Append(traitId.ToString(CultureInfo.InvariantCulture))
+                        .Append('<').Append(TypeParameterName(parameter)).AppendLine(">");
+                }
             _source.AppendLine("    {");
             if (function.IsAsync)
                 _source.AppendLine("        await Task.CompletedTask;");
@@ -1350,6 +1422,7 @@ internal static class Emitter
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr { IsAsync: true } => throw new InvalidOperationException("Async calls must be emitted beneath a checked await expression"),
             TypedCallExpr call => EmitCall(call),
+            TypedTraitCallExpr call => EmitTraitCall(call),
             TypedDatabaseCallExpr databaseCall => EmitDatabaseCall(databaseCall),
             TypedTransactionCommitExpr commit =>
                 "DatabaseTransactionCommit(Local_" + commit.TransactionLocalId.ToString(CultureInfo.InvariantCulture) + ")",
@@ -1429,8 +1502,10 @@ internal static class Emitter
                 return EmitManagedAdapterCall(adapterBinding, call.Arguments);
 
             var functionName = "Function_" + call.FunctionId.ToString(CultureInfo.InvariantCulture);
-            if (call.TypeArguments.Count != 0)
-                functionName += "<" + string.Join(", ", call.TypeArguments.Select(EmitType)) + ">";
+            var typeArguments = call.TypeArguments.Select(EmitType)
+                .Concat(call.TraitWitnesses.Select(EmitTraitWitnessType)).ToArray();
+            if (typeArguments.Length != 0)
+                functionName += "<" + string.Join(", ", typeArguments) + ">";
             var arguments = call.Arguments.Select(EmitExpr).ToList();
             if (call.IsAsync)
             {
@@ -1441,6 +1516,23 @@ internal static class Emitter
             return functionName + "(" + string.Join(", ", arguments) + ")";
         }
 
+        private string EmitTraitCall(TypedTraitCallExpr call)
+        {
+            var witnessType = EmitTraitWitnessType(call.Witness);
+            return witnessType + ".Method_" + call.MethodId.ToString(CultureInfo.InvariantCulture) +
+                "(" + string.Join(", ", call.Arguments.Select(EmitExpr)) + ")";
+        }
+
+        private static string EmitTraitWitnessType(TypedTraitWitness witness) => witness switch
+        {
+            TypedConcreteTraitWitness concrete => "Impl_" + concrete.ImplId.ToString(CultureInfo.InvariantCulture),
+            TypedForwardedTraitWitness forwarded => TraitWitnessTypeParameterName(forwarded.TypeParameterOrdinal, forwarded.BoundOrdinal),
+            _ => throw new InvalidOperationException("Unknown checked trait witness")
+        };
+
+        private static string TraitWitnessTypeParameterName(int typeParameterOrdinal, int boundOrdinal) =>
+            "W" + typeParameterOrdinal.ToString(CultureInfo.InvariantCulture) + "_" + boundOrdinal.ToString(CultureInfo.InvariantCulture);
+
         private string EmitManagedAdapterCall(
             CheckedManagedAdapterBinding binding,
             IReadOnlyList<TypedExpr> arguments) =>
@@ -1448,6 +1540,18 @@ internal static class Emitter
             {
                 "sha256.text.hash_utf8" when arguments.Count == 1 =>
                     "global::Lang.ManagedAdapters.Sha256Text.HashUtf8(" + EmitExpr(arguments[0]) + ")",
+                "sha256.text.hash_utf8" =>
+                    throw new InvalidOperationException("sha256.text.hash_utf8 requires one checked argument"),
+                _ => throw new InvalidOperationException($"Unknown checked managed adapter operation '{binding.OperationId}'")
+            };
+
+        private static string EmitManagedAdapterCall(
+            CheckedManagedAdapterBinding binding,
+            IReadOnlyList<string> arguments) =>
+            binding.OperationId switch
+            {
+                "sha256.text.hash_utf8" when arguments.Count == 1 =>
+                    "global::Lang.ManagedAdapters.Sha256Text.HashUtf8(" + arguments[0] + ")",
                 "sha256.text.hash_utf8" =>
                     throw new InvalidOperationException("sha256.text.hash_utf8 requires one checked argument"),
                 _ => throw new InvalidOperationException($"Unknown checked managed adapter operation '{binding.OperationId}'")
@@ -4045,6 +4149,12 @@ internal static class Emitter
         private string EmitTypeParameter(LangType type)
         {
             var ordinal = type.TypeParameterOrdinal;
+            if (type.TypeParameterOwnerKind == TypeParameterOwnerKind.Trait)
+            {
+                if (_emittingTrait is null || _emittingTrait.Id != type.TypeParameterOwnerId || ordinal != 0)
+                    throw new InvalidOperationException("Trait Self reached emitter outside its defining trait or implementation");
+                return _emittingTraitSelfTarget is null ? "TSelf" : EmitType(_emittingTraitSelfTarget);
+            }
             if (type.TypeParameterOwnerKind == TypeParameterOwnerKind.Function)
             {
                 if (_emittingFunction is null ||
@@ -4261,6 +4371,16 @@ internal static class Emitter
             foreach (var field in structure.Fields)
                 yield return field.Type;
 
+            foreach (var trait in program.Traits)
+                foreach (var method in trait.Methods)
+                {
+                    foreach (var parameter in method.Parameters)
+                        yield return parameter.Type;
+                    yield return method.ReturnType;
+                }
+            foreach (var implementation in program.TraitImpls)
+                yield return implementation.Target;
+
             foreach (var function in EmittedFunctions)
             {
                 foreach (var parameter in function.Parameters)
@@ -4276,15 +4396,17 @@ internal static class Emitter
                 }
 
                 foreach (var statement in EnumerateStatements(function.Body))
-                foreach (var expression in StatementExpressions(statement).SelectMany(EnumerateExpressions))
-                {
-                    yield return expression.Type;
-                    if (expression is TypedCallExpr call)
-                    foreach (var typeArgument in call.TypeArguments)
-                        yield return typeArgument;
-                    if (expression is TypedLambdaInvokeExpr lambda)
-                        yield return lambda.ParameterType;
-                }
+                    foreach (var expression in StatementExpressions(statement).SelectMany(EnumerateExpressions))
+                    {
+                        yield return expression.Type;
+                        if (expression is TypedCallExpr call)
+                            foreach (var typeArgument in call.TypeArguments)
+                                yield return typeArgument;
+                        if (expression is TypedTraitCallExpr traitCall)
+                            yield return traitCall.Type;
+                        if (expression is TypedLambdaInvokeExpr lambda)
+                            yield return lambda.ParameterType;
+                    }
             }
         }
 
@@ -4374,6 +4496,10 @@ internal static class Emitter
                 case TypedCallExpr call:
                     foreach (var argument in call.Arguments)
                     foreach (var nested in EnumerateExpressions(argument)) yield return nested;
+                    break;
+                case TypedTraitCallExpr call:
+                    foreach (var argument in call.Arguments)
+                        foreach (var nested in EnumerateExpressions(argument)) yield return nested;
                     break;
                 case TypedAwaitExpr awaited:
                     foreach (var nested in EnumerateExpressions(awaited.Value)) yield return nested;

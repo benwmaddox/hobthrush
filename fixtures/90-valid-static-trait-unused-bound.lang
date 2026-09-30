@@ -1,0 +1,6 @@
+module fixtures::static_trait_unused_bound;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+pub fn identity<T: self::fixtures::static_trait_unused_bound::Equal>(value: T) -> T effects {} { return value; }
+fn equal_i32(left: i32, right: i32) -> bool effects {} { return left == right; }
+impl self::fixtures::static_trait_unused_bound::Equal for i32 { equal = self::fixtures::static_trait_unused_bound::equal_i32; }
+pub fn main() -> i32 effects {} { return self::fixtures::static_trait_unused_bound::identity(23); }

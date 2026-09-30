@@ -1,0 +1,7 @@
+module fixtures::trait_duplicate_no_call;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn equal_private(left: i32, right: i32) -> bool effects {} { return left == right; }
+fn equal_public(left: i32, right: i32) -> bool effects {} { return left == right; }
+impl self::fixtures::trait_duplicate_no_call::Equal for i32 { equal = self::fixtures::trait_duplicate_no_call::equal_private; }
+pub impl self::fixtures::trait_duplicate_no_call::Equal for i32 { equal = self::fixtures::trait_duplicate_no_call::equal_public; }
+pub fn main() -> i32 effects {} { return 1; }

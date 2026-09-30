@@ -613,6 +613,7 @@ internal static class Driver
                     .ToArray(),
                 StringComparer.Ordinal);
         sourceAliasesByPackageId[graph.Root.Id] = ["self"];
+        var stablePackageIdentities = CheckedReportFacts.StablePackageIdentities(graph);
         var packageReferences = new Dictionary<string, ApiPackageReference>(StringComparer.Ordinal)
         {
             [graph.Root.Id] = new(
@@ -636,6 +637,8 @@ internal static class Driver
         var functionsById = program.Functions.ToDictionary(function => function.Id);
         var unionsById = program.Unions.ToDictionary(union => union.Id);
         var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var traitsById = program.Traits.ToDictionary(trait => trait.Id);
+        var traitImplsById = program.TraitImpls.ToDictionary(implementation => implementation.Id);
 
         var functions = program.Functions
             .Where(function => function.Public && visiblePackageIds.Contains(function.PackageId))
@@ -646,10 +649,16 @@ internal static class Driver
                 package = packageReferences[function.PackageId],
                 is_async = function.IsAsync,
                 type_parameters = function.TypeParameters
-                    .Select(typeParameter => new
+                    .Select((typeParameter, ordinal) => new
                     {
                         name = typeParameter.DisplayName,
-                        ordinal = typeParameter.TypeParameterOrdinal
+                        ordinal = typeParameter.TypeParameterOrdinal,
+                        bounds = function.TypeParameterBounds[ordinal]
+                            .Select(bound => new
+                            {
+                                trait = CheckedReportFacts.StableTraitId(traitsById[bound.TraitId], stablePackageIdentities)
+                            })
+                            .ToArray()
                     })
                     .ToArray(),
                 parameters = function.Parameters
@@ -669,7 +678,18 @@ internal static class Driver
                         steps = ApiEffectPathSteps(path, functionsById, packageReferences, packageIdentities, sourceAliasesByPackageId)
                     })
                     .ToArray(),
-                calls = ApiDirectCalls(function, packageIdentities, sourceAliasesByPackageId),
+                calls = ApiDirectCalls(function, functionsById, packageIdentities, sourceAliasesByPackageId),
+                trait_calls = ApiTraitCalls(
+                    function,
+                    functionsById,
+                    traitsById,
+                    traitImplsById,
+                    packageReferences,
+                    packageIdentities,
+                    sourceAliasesByPackageId,
+                    stablePackageIdentities,
+                    structsById,
+                    unionsById),
                 required_capabilities = RequiredCapabilities(function.InferredEffects)
             })
             .OrderBy(function => function.id, StringComparer.Ordinal)
@@ -729,6 +749,51 @@ internal static class Driver
                     .ToArray()
             })
             .OrderBy(union => union.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var traits = program.Traits
+            .Where(trait => trait.Public && visiblePackageIds.Contains(trait.PackageId))
+            .Select(trait => new
+            {
+                id = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
+                source_ids = ApiDeclarationIds(trait.PackageId, trait.Module, trait.Name, sourceAliasesByPackageId),
+                package = packageReferences[trait.PackageId],
+                methods = trait.Methods
+                    .Select(method => new
+                    {
+                        name = method.Name,
+                        parameters = method.Parameters
+                            .Select(parameter => new
+                            {
+                                name = parameter.Name,
+                                type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                            })
+                            .ToArray(),
+                        return_type = ApiType(method.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                    })
+                    .ToArray()
+            })
+            .OrderBy(trait => trait.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var traitImpls = program.TraitImpls
+            .Where(implementation => implementation.Public && visiblePackageIds.Contains(implementation.PackageId))
+            .Select(implementation =>
+            {
+                if (!traitsById.TryGetValue(implementation.TraitId, out var trait))
+                    throw new InvalidOperationException("A checked trait implementation refers to an unknown trait");
+                return new
+                {
+                    id = implementation.StableId,
+                    package = packageReferences[implementation.PackageId],
+                    module = implementation.Module,
+                    trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
+                    target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                    visibility = implementation.Public ? "public" : "private",
+                    methods = trait.Methods.Select(method => method.Name).ToArray()
+                };
+            })
+            .OrderBy(implementation => implementation.id, StringComparer.Ordinal)
             .ToArray();
 
         var commands = program.Commands
@@ -861,7 +926,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 9,
+            schema_version = 10,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -881,6 +946,8 @@ internal static class Driver
             functions,
             structs,
             unions,
+            traits,
+            trait_impls = traitImpls,
             commands,
             routes
         };
@@ -922,6 +989,7 @@ internal static class Driver
             LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
             LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
             LangTypeKind.DbError => new { kind = "primitive", name = "DbError" },
+            LangTypeKind.TypeParameter when type.TypeParameterOwnerKind == TypeParameterOwnerKind.Trait => new { kind = "self" },
             LangTypeKind.TypeParameter => new
             {
                 kind = "type_parameter",
@@ -1042,11 +1110,19 @@ internal static class Driver
 
     private static object[] ApiDirectCalls(
         CheckedFunction function,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
         IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
     {
+        var sourceCallTargets = CheckedReportFacts.TypedExpressions(function)
+            .OfType<TypedCallExpr>()
+            .Select(call => functionsById.TryGetValue(call.FunctionId, out var target) ? target : null)
+            .Where(target => target is not null)
+            .Select(target => (target!.PackageId, target.Module, target.Name))
+            .ToHashSet();
         return function.Calls
             .Distinct()
+            .Where(call => sourceCallTargets.Contains((call.PackageId, call.Module, call.Name)))
             .Select(call =>
             {
                 if (!packageIdentities.TryGetValue(call.PackageId, out var package))
@@ -1074,6 +1150,123 @@ internal static class Driver
             })
             .ToArray();
     }
+
+    private static object[] ApiTraitCalls(
+        CheckedFunction function,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<int, CheckedTrait> traitsById,
+        IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
+        IReadOnlyDictionary<string, string> stablePackageIdentities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+    {
+        var result = new List<object>();
+        foreach (var expression in CheckedReportFacts.TypedExpressions(function))
+        {
+            if (expression is TypedTraitCallExpr traitCall)
+            {
+                if (!traitsById.TryGetValue(traitCall.TraitId, out var trait) ||
+                    trait.Methods.FirstOrDefault(method => method.Id == traitCall.MethodId) is not { } method)
+                    throw new InvalidOperationException("A checked trait call refers to an unknown method");
+                if (!trait.Public)
+                    continue;
+                result.Add(new
+                {
+                    kind = "method",
+                    trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
+                    method = method.Name,
+                    witness = ApiTraitWitness(
+                        traitCall.Witness,
+                        traitCall.TraitId,
+                        traitImplsById,
+                        packageReferences,
+                        packageIdentities,
+                        sourceAliasesByPackageId,
+                        structsById,
+                        unionsById)
+                });
+                continue;
+            }
+
+            if (expression is not TypedCallExpr call || !functionsById.TryGetValue(call.FunctionId, out var target))
+                continue;
+
+            var targetBounds = target.TypeParameterBounds
+                .SelectMany((bounds, parameter) => bounds.Select((bound, ordinal) => (parameter, ordinal, bound)))
+                .ToArray();
+            if (targetBounds.Length != call.TraitWitnesses.Count)
+                throw new InvalidOperationException("A checked call has an inconsistent trait witness count");
+            if (targetBounds.Length == 0)
+                continue;
+
+            var witnesses = targetBounds
+                .Select((entry, index) =>
+                {
+                    if (!traitsById.TryGetValue(entry.bound.TraitId, out var boundTrait))
+                        throw new InvalidOperationException("A checked function bound refers to an unknown trait");
+                    if (!boundTrait.Public)
+                        return null;
+                    return (object)new
+                    {
+                        type_parameter_ordinal = entry.parameter,
+                        bound_ordinal = entry.ordinal,
+                        trait = CheckedReportFacts.StableTraitId(boundTrait, stablePackageIdentities),
+                        witness = ApiTraitWitness(
+                            call.TraitWitnesses[index],
+                            entry.bound.TraitId,
+                            traitImplsById,
+                            packageReferences,
+                            packageIdentities,
+                            sourceAliasesByPackageId,
+                            structsById,
+                            unionsById)
+                    };
+                })
+                .Where(witness => witness is not null)
+                .ToArray();
+            if (witnesses.Length == 0)
+                continue;
+            result.Add(new
+            {
+                kind = "function_call",
+                function = CheckedReportFacts.StableFunctionId(target, stablePackageIdentities),
+                witnesses
+            });
+        }
+
+        return result.ToArray();
+    }
+
+    private static object? ApiTraitWitness(
+        TypedTraitWitness witness,
+        int expectedTraitId,
+        IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
+        IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
+        IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById) => witness switch
+        {
+            TypedConcreteTraitWitness concrete when traitImplsById.TryGetValue(concrete.ImplId, out var implementation) &&
+                implementation.TraitId == expectedTraitId => implementation.Public && packageReferences.ContainsKey(implementation.PackageId)
+                    ? new
+                    {
+                        kind = "impl",
+                        id = implementation.StableId,
+                        target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                    }
+                    : null,
+            TypedForwardedTraitWitness forwarded => new
+            {
+                kind = "bound",
+                type_parameter_ordinal = forwarded.TypeParameterOrdinal,
+                bound_ordinal = forwarded.BoundOrdinal
+            },
+            _ => throw new InvalidOperationException("A checked trait witness is unknown")
+        };
 
     private static string ApiFunctionId(
         int functionId,

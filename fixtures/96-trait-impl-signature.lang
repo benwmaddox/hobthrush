@@ -1,0 +1,4 @@
+module fixtures::trait_impl_signature;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn equal_i32(left: i32) -> bool effects {} { return false; }
+impl self::fixtures::trait_impl_signature::Equal for i32 { equal = self::fixtures::trait_impl_signature::equal_i32; }

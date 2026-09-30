@@ -1,0 +1,10 @@
+module fixtures::static_trait_phantom_resource;
+pub struct Tag<T> { value: i32 }
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn tag_equal(left: self::fixtures::static_trait_phantom_resource::Tag<FsRead>, right: self::fixtures::static_trait_phantom_resource::Tag<FsRead>) -> bool effects {} { return left.value == right.value; }
+pub impl self::fixtures::static_trait_phantom_resource::Equal for self::fixtures::static_trait_phantom_resource::Tag<FsRead> { equal = self::fixtures::static_trait_phantom_resource::tag_equal; }
+pub fn main() -> bool effects {} {
+    let left: self::fixtures::static_trait_phantom_resource::Tag<FsRead> = self::fixtures::static_trait_phantom_resource::Tag<FsRead> { value: 3 };
+    let right: self::fixtures::static_trait_phantom_resource::Tag<FsRead> = self::fixtures::static_trait_phantom_resource::Tag<FsRead> { value: 3 };
+    return self::fixtures::static_trait_phantom_resource::Equal.equal(left, right);
+}

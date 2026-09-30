@@ -1,0 +1,4 @@
+module fixtures::trait_recursive_obligation;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn equal_i32(left: i32, right: i32) -> bool effects {} { return self::fixtures::trait_recursive_obligation::Equal.equal(left, right); }
+impl self::fixtures::trait_recursive_obligation::Equal for i32 { equal = self::fixtures::trait_recursive_obligation::equal_i32; }

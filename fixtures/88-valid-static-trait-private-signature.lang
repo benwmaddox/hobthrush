@@ -1,0 +1,8 @@
+module fixtures::static_trait_private_signature;
+struct Hidden { value: i32 }
+trait Make { fn make(value: Self) -> self::fixtures::static_trait_private_signature::Hidden effects {}; }
+fn make_i32(value: i32) -> self::fixtures::static_trait_private_signature::Hidden effects {} {
+    return self::fixtures::static_trait_private_signature::Hidden { value: value };
+}
+impl self::fixtures::static_trait_private_signature::Make for i32 { make = self::fixtures::static_trait_private_signature::make_i32; }
+pub fn main() -> i32 effects {} { return self::fixtures::static_trait_private_signature::Make.make(4).value; }
