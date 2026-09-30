@@ -142,7 +142,7 @@
         "audit-repair.check-clean",
         "audit-repair.expected-diagnostics",
         "audit-repair.inspect-effects",
-        "audit-repair.audit-v7",
+        "audit-repair.audit-report",
         "audit-repair.receipt-v3",
         "audit-repair.runtime",
         "audit-repair.docs-claims"

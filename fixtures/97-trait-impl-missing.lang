@@ -1,0 +1,3 @@
+module fixtures::trait_impl_missing;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+pub fn main() -> bool effects {} { return self::fixtures::trait_impl_missing::Equal.equal(1, 2); }

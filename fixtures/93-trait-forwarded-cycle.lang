@@ -1,0 +1,5 @@
+module fixtures::trait_forwarded_cycle;
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn compare<T: self::fixtures::trait_forwarded_cycle::Equal>(left: T, right: T) -> bool effects {} { return self::fixtures::trait_forwarded_cycle::Equal.equal(left, right); }
+fn equal_i32(left: i32, right: i32) -> bool effects {} { return self::fixtures::trait_forwarded_cycle::compare(left, right); }
+impl self::fixtures::trait_forwarded_cycle::Equal for i32 { equal = self::fixtures::trait_forwarded_cycle::equal_i32; }

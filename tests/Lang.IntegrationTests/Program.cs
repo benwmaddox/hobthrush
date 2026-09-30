@@ -67,6 +67,7 @@ internal static partial class IntegrationTests
             ("struct values compose with Option, Result, and unions", TestStructWrappers),
             ("generic immutable structs substitute fields, compare structurally, and run in managed and NativeAOT builds", TestGenericStructs),
             ("generic tagged unions substitute payloads, match exhaustively, compare structurally, and run in managed and NativeAOT builds", TestGenericUnions),
+            ("static traits bind closed targets, forward ordered witnesses, and detect recursive obligations", TestStaticTraits),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
@@ -1381,7 +1382,7 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 9.");
+            AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 10.");
             var union = api.GetProperty("unions").EnumerateArray().Single();
             AssertJsonPropertyOrder(union, "id,source_ids,package,type_parameters,variants");
             AssertEqual("T", union.GetProperty("type_parameters")[0].GetProperty("name").GetString(),
@@ -1405,8 +1406,328 @@ internal static partial class IntegrationTests
         var auditRun = await harness.InvokeCompilerCommandAsync("audit", dependencyRoot, "--json");
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
-        AssertEqual(7, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-            "Generic-union source changes should leave the unchanged audit contract at version 7.");
+        AssertEqual(8, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+            "The current audit contract with trait facts must use version 8.");
+    }
+
+    private static async Task TestStaticTraits(Harness harness)
+    {
+        async Task<string> Fixture(string name) => await File.ReadAllTextAsync(
+            Path.Combine(harness.RepositoryRoot, "fixtures", name));
+
+        var scalar = await Fixture("86-valid-static-trait-scalar.lang");
+        AssertRunOutput("70" + Environment.NewLine,
+            await harness.InvokeAsync("static-traits-scalar", "run", scalar));
+
+        var closedTargets = await Fixture("87-valid-static-trait-closed-targets.lang");
+        var (managed, generatedSource) = await InvokeCapturingGeneratedSourceAsync(
+            harness,
+            "static-traits-closed-targets-managed",
+            "run",
+            closedTargets);
+        AssertRunOutput("151" + Environment.NewLine, managed);
+        AssertTrue(generatedSource.Contains("static abstract ", StringComparison.Ordinal),
+            "Static-trait generated source must use C# static-abstract interface members.");
+        AssertTrue(generatedSource.Contains("private readonly struct Impl_", StringComparison.Ordinal),
+            "Each concrete implementation must lower to a zero-state value witness.");
+        AssertTrue(generatedSource.Contains("where W0_0 : struct, Trait_", StringComparison.Ordinal) &&
+                   generatedSource.Contains("where W1_0 : struct, Trait_", StringComparison.Ordinal),
+            "Generic forwarding must use ordered constrained witness type parameters.");
+        AssertTrue(!generatedSource.Contains("System.Func<", StringComparison.Ordinal) &&
+                   !generatedSource.Contains("DynamicInvoke", StringComparison.Ordinal) &&
+                   !generatedSource.Contains("System.Reflection", StringComparison.Ordinal) &&
+                   !generatedSource.Contains("GetType(", StringComparison.Ordinal) &&
+                   !generatedSource.Contains("object ", StringComparison.Ordinal),
+            "Trait lowering must not introduce delegates, reflection, runtime lookup, or interface objects.");
+
+        var privateSignature = await Fixture("88-valid-static-trait-private-signature.lang");
+        AssertRunOutput("4" + Environment.NewLine,
+            await harness.InvokeAsync("static-traits-private-signature", "run", privateSignature));
+        var phantom = await Fixture("89-valid-static-trait-phantom-resource.lang");
+        AssertRunOutput("true" + Environment.NewLine,
+            await harness.InvokeAsync("static-traits-phantom-resource", "run", phantom));
+        var unusedBound = await Fixture("90-valid-static-trait-unused-bound.lang");
+        AssertRunOutput("23" + Environment.NewLine,
+            await harness.InvokeAsync("static-traits-unused-bound", "run", unusedBound));
+
+        const string reportSource = """
+            module app::main;
+            pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+            fn measure_i32(value: i32) -> i32 effects {} { return value * 3; }
+            fn measure_text(value: Text) -> i32 effects {} { return 2; }
+            pub impl self::app::main::Measure for i32 { measure = self::app::main::measure_i32; }
+            impl self::app::main::Measure for Text { measure = self::app::main::measure_text; }
+            trait Hidden { fn hidden(value: Self) -> i32 effects {}; }
+            fn hidden_i32(value: i32) -> i32 effects {} { return value + 1; }
+            impl self::app::main::Hidden for i32 { hidden = self::app::main::hidden_i32; }
+            fn hidden_forward<T: self::app::main::Hidden>(value: T) -> i32 effects {} {
+                return self::app::main::Hidden.hidden(value);
+            }
+            pub fn dispatch<T: self::app::main::Measure>(value: T) -> i32 effects {} {
+                return self::app::main::Measure.measure(value);
+            }
+            pub fn main() -> i32 effects {} {
+                return self::app::main::Measure.measure(5)
+                    + self::app::main::Measure.measure("hidden")
+                    + self::app::main::dispatch(5)
+                    + self::app::main::hidden_forward(1);
+            }
+            """;
+        var reportManifest = CliPackageManifest();
+        var reportFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["src/app/main.lang"] = reportSource
+        };
+        var reportRoot = await harness.WritePackageAsync("static-traits-report", reportManifest, reportFiles);
+        AssertRunOutput("34" + Environment.NewLine,
+            await harness.InvokePackageDirectoryAsync("static-traits-report-run", reportRoot, "run"));
+        var apiRun = await harness.InvokeCompilerCommandAsync("inspect", "api", reportRoot, "--json");
+        AssertEqual(0, apiRun.ExitCode, Describe(apiRun));
+        using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
+        var api = apiDocument.RootElement;
+        AssertInspectApiPropertyOrder(api);
+        AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
+            "Trait metadata should use current inspect API schema version 10.");
+        var measureTraitId = "lang.trait.v1.root::app::main::Measure";
+        var apiTraits = api.GetProperty("traits").EnumerateArray().ToArray();
+        AssertEqual(1, apiTraits.Length, "The API should expose the one public source trait.");
+        var apiTrait = apiTraits[0];
+        AssertEqual(measureTraitId, apiTrait.GetProperty("id").GetString(),
+            "Trait identities should be portable semantic IDs, not graph-local numbers.");
+        AssertEqual("self::app::main::Measure", apiTrait.GetProperty("source_ids")[0].GetString(),
+            "Public traits should retain their source-facing declaration identity.");
+        var apiMethod = apiTrait.GetProperty("methods")[0];
+        AssertEqual("measure", apiMethod.GetProperty("name").GetString(),
+            "Trait method order and names should follow the declaration.");
+        AssertEqual("self", apiMethod.GetProperty("parameters")[0].GetProperty("type").GetProperty("kind").GetString(),
+            "Implicit Self should serialize as its own source-level type kind.");
+        var apiImpls = api.GetProperty("trait_impls").EnumerateArray().ToArray();
+        AssertEqual(1, apiImpls.Length, "The public API should filter the package-private Text implementation.");
+        AssertEqual(measureTraitId, apiImpls[0].GetProperty("trait").GetString(),
+            "Public impls should refer to the stable trait identity.");
+        AssertTrue(Regex.IsMatch(apiImpls[0].GetProperty("id").GetString() ?? string.Empty,
+                "^lang\\.impl\\.v1\\.[0-9a-f]{64}$", RegexOptions.CultureInvariant),
+            "Implementation identities should be stable semantic digests.");
+        AssertEqual("public", apiImpls[0].GetProperty("visibility").GetString(),
+            "The API should preserve public implementation visibility.");
+        AssertEqual("measure", apiImpls[0].GetProperty("methods")[0].GetString(),
+            "The API should expose fulfilled method names without binding-function identities.");
+        var apiFunctions = api.GetProperty("functions").EnumerateArray().ToArray();
+        var dispatch = apiFunctions.Single(function => function.GetProperty("id").GetString() == "self::app::main::dispatch");
+        var dispatchParameter = dispatch.GetProperty("type_parameters")[0];
+        AssertJsonPropertyOrder(dispatchParameter, "name,ordinal,bounds");
+        AssertEqual(0, dispatchParameter.GetProperty("ordinal").GetInt32(),
+            "Function type parameter ordinals should remain source ordered.");
+        AssertEqual(measureTraitId, dispatchParameter.GetProperty("bounds")[0].GetProperty("trait").GetString(),
+            "Trait bounds should retain source order and stable identities.");
+        var dispatchCall = dispatch.GetProperty("trait_calls")[0];
+        AssertEqual("method", dispatchCall.GetProperty("kind").GetString(),
+            "Generic method dispatch should remain explicit in checked report facts.");
+        AssertEqual("bound", dispatchCall.GetProperty("witness").GetProperty("kind").GetString(),
+            "Generic method dispatch should identify the forwarded bound witness.");
+        AssertEqual(0, dispatchCall.GetProperty("witness").GetProperty("type_parameter_ordinal").GetInt32(),
+            "Forwarded trait witnesses should preserve the type parameter ordinal.");
+        var apiMain = apiFunctions.Single(function => function.GetProperty("id").GetString() == "self::app::main::main");
+        var apiMainCalls = apiMain.GetProperty("trait_calls").EnumerateArray().ToArray();
+        var privateDispatch = apiMainCalls.Single(call => call.GetProperty("kind").GetString() == "method"
+            && call.GetProperty("witness").ValueKind == JsonValueKind.Null);
+        AssertEqual(measureTraitId, privateDispatch.GetProperty("trait").GetString(),
+            "A public call through a private impl should retain the trait operation while hiding the impl identity.");
+        AssertTrue(apiMainCalls.Any(call => call.GetProperty("kind").GetString() == "function_call"
+                && call.GetProperty("witnesses")[0].GetProperty("witness").GetProperty("kind").GetString() == "impl"),
+            "Public API call-site facts should retain addressable concrete witnesses.");
+        AssertTrue(!apiRun.StandardOutput.Contains("measure_text", StringComparison.Ordinal),
+            "Public API calls must not expose private impl binding function names.");
+        AssertTrue(!apiRun.StandardOutput.Contains("::Hidden", StringComparison.Ordinal)
+                && !apiRun.StandardOutput.Contains("hidden_i32", StringComparison.Ordinal),
+            "Public API call facts must not expose private trait identities or impl binding names.");
+        var auditRun = await harness.InvokeCompilerCommandAsync("audit", reportRoot, "--json");
+        AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
+        using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
+        var audit = auditDocument.RootElement;
+        AssertAuditPropertyOrder(audit);
+        AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
+            "Trait compiler facts should use current audit schema version 8.");
+        var compilerFacts = audit.GetProperty("compiler");
+        AssertEqual(2, compilerFacts.GetProperty("traits").GetArrayLength(),
+            "Audit should retain public and private trait declarations.");
+        var auditImpls = compilerFacts.GetProperty("trait_impls").EnumerateArray().ToArray();
+        AssertEqual(3, auditImpls.Length, "Audit should retain public and private impl facts.");
+        var privateImpl = auditImpls.Single(implementation =>
+            implementation.GetProperty("target").GetProperty("name").GetString() == "Text");
+        AssertEqual("Text", privateImpl.GetProperty("target").GetProperty("name").GetString(),
+            "Audit should retain the closed target of a private implementation.");
+        AssertEqual("measure_text", privateImpl.GetProperty("methods")[0].GetProperty("binding_function").GetProperty("name").GetString(),
+            "Audit should retain the bound function identity for private implementations.");
+        AssertTrue(compilerFacts.GetProperty("traits").EnumerateArray()
+                .Any(trait => trait.GetProperty("name").GetString() == "Hidden"),
+            "Audit should retain private trait identities that the API filters.");
+        var auditMain = compilerFacts.GetProperty("functions").EnumerateArray()
+            .Single(function => function.GetProperty("name").GetString() == "main");
+        AssertTrue(auditMain.GetProperty("trait_calls").EnumerateArray()
+                .Any(call => call.GetProperty("kind").GetString() == "method"
+                    && call.GetProperty("witness").GetProperty("kind").GetString() == "impl"
+                    && call.GetProperty("witness").GetProperty("binding_function").GetProperty("name").GetString() == "measure_text"),
+            "Audit method-dispatch facts should connect a concrete witness to its binding function.");
+        AssertTrue(auditMain.GetProperty("direct_calls").EnumerateArray()
+                .Any(call => call.GetProperty("name").GetString() == "measure_text"),
+            "Audit call closure should retain private implementation binding edges.");
+        var repeatedApi = await harness.InvokeCompilerCommandAsync("inspect", "api", reportRoot, "--json");
+        AssertEqual(apiRun.StandardOutput, repeatedApi.StandardOutput,
+            "Trait API output should be byte-identical on repeated inspection.");
+        var relocatedRoot = await harness.WritePackageAsync("static-traits-report-relocated", reportManifest, reportFiles);
+        var relocatedApi = await harness.InvokeCompilerCommandAsync("inspect", "api", relocatedRoot, "--json");
+        AssertEqual(apiRun.StandardOutput, relocatedApi.StandardOutput,
+            "Trait API IDs should remain deterministic after relocating an identical package.");
+        var relocatedAudit = await harness.InvokeCompilerCommandAsync("audit", relocatedRoot, "--json");
+        AssertEqual(auditRun.StandardOutput, relocatedAudit.StandardOutput,
+            "Audit trait and impl identities should remain deterministic after package relocation.");
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("The static-trait NativeAOT test requires Windows x64 or Linux x64.");
+        var aotBuild = await harness.InvokeWithTimeoutAsync(
+            "static-traits-closed-targets-aot", "build", closedTargets, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, aotBuild.ExitCode, Describe(aotBuild));
+        const string builtPrefix = "Built native executable: ";
+        AssertTrue(aotBuild.StandardOutput.StartsWith(builtPrefix, StringComparison.Ordinal), Describe(aotBuild));
+        var executablePath = aotBuild.StandardOutput[builtPrefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the static-trait NativeAOT executable at {executablePath}.");
+        AssertRunOutput("151" + Environment.NewLine,
+            await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30)));
+
+        var publicPrivate = await Fixture("91-trait-public-private-signature.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-public-private-signature", publicPrivate, "E_TYPE_VISIBILITY");
+        var recursive = await Fixture("92-trait-recursive-obligation.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-recursive-obligation", recursive, "E_TRAIT_CONSTRAINT_RECURSIVE");
+        var forwardedCycle = await Fixture("93-trait-forwarded-cycle.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-forwarded-cycle", forwardedCycle, "E_TRAIT_CONSTRAINT_RECURSIVE");
+        var storedResource = await Fixture("94-trait-stored-resource.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-stored-resource", storedResource, "E_RESOURCE_ESCAPE");
+        var duplicate = await Fixture("95-trait-duplicate-no-call.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-duplicate-no-call", duplicate, "E_TRAIT_IMPL_DUPLICATE");
+        var badSignature = await Fixture("96-trait-impl-signature.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-impl-signature", badSignature, "E_TRAIT_IMPL_SIGNATURE");
+        var missing = await Fixture("97-trait-impl-missing.lang");
+        await ExpectDiagnosticsAsync(harness, "static-traits-impl-missing", missing, "E_TRAIT_IMPL_MISSING");
+
+        const string dependencyManifest = """
+            name = "static-trait-consumer"
+            version = "0.1.0"
+            kind = "cli"
+            source_root = "src"
+            entry_module = "app::main"
+
+            [dependencies]
+            core = "../core"
+            """;
+        const string dependencySource = """
+            module app::main;
+            pub fn main() -> i32 effects {} {
+                return core::traits::Measure.measure(8);
+            }
+            """;
+        const string traitDependencySource = """
+            module traits;
+            pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+            fn measure_i32(value: i32) -> i32 effects {} { return value * 10; }
+            pub impl self::traits::Measure for i32 { measure = self::traits::measure_i32; }
+            """;
+        var dependencyRoot = await harness.WritePackageGraphAsync(
+            "static-traits-dependency",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(dependencyManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/main.lang"] = dependencySource }),
+                ["core"] = new PackageFixture(LibraryPackageManifest("static-trait-core"),
+                    new Dictionary<string, string>(StringComparer.Ordinal) { ["src/traits.lang"] = traitDependencySource })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "static-traits-dependency-lock", dependencyRoot, "lock"));
+        AssertRunOutput("80" + Environment.NewLine,
+            await harness.InvokePackageDirectoryAsync("static-traits-dependency-run", dependencyRoot, "run"));
+
+        const string orphanManifest = """
+            name = "static-trait-orphan-app"
+            version = "0.1.0"
+            kind = "lib"
+            source_root = "src"
+
+            [dependencies]
+            remote = "../remote"
+            """;
+        const string orphanSource = """
+            module app::model;
+            struct Local { value: i32 }
+            fn read_local(value: List<self::app::model::Local>) -> i32 effects {} { return 0; }
+            impl remote::traits::Read for List<self::app::model::Local> { read = self::app::model::read_local; }
+            """;
+        const string remoteTrait = """
+            module traits;
+            pub trait Read { fn read(value: Self) -> i32 effects {}; }
+            """;
+        var orphanRoot = await harness.WritePackageGraphAsync(
+            "static-traits-orphan-wrapper",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(orphanManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal) { ["src/app/model.lang"] = orphanSource }),
+                ["remote"] = new PackageFixture(LibraryPackageManifest("static-trait-remote"),
+                    new Dictionary<string, string>(StringComparer.Ordinal) { ["src/traits.lang"] = remoteTrait })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "static-traits-orphan-lock", orphanRoot, "lock"));
+        var orphanCheck = await harness.InvokePackageDirectoryAsync(
+            "static-traits-orphan-check", orphanRoot, "check", "--json");
+        AssertEqual(1, orphanCheck.ExitCode, Describe(orphanCheck));
+        var orphanDiagnostics = ParseDiagnosticSnapshots(orphanCheck.StandardOutput);
+        AssertEqual(1, orphanDiagnostics.Length, Describe(orphanCheck));
+        AssertEqual("E_TRAIT_IMPL_SIGNATURE", orphanDiagnostics[0].Code,
+            "The orphan rule must reject a foreign trait on a builtin wrapper around a local nominal.");
+    }
+
+    private static async Task<(ProcessResult Result, string Source)> InvokeCapturingGeneratedSourceAsync(
+        Harness harness,
+        string caseName,
+        string command,
+        string source)
+    {
+        var generatedRoot = Path.Combine(Path.GetTempPath(), "lang-generated");
+        Directory.CreateDirectory(generatedRoot);
+        var processTask = harness.InvokeAsync(caseName, command, source);
+        string? capturedSource = null;
+        while (!processTask.IsCompleted && capturedSource is null)
+        {
+            foreach (var generatedDirectory in Directory.EnumerateDirectories(generatedRoot))
+            {
+                var sourcePath = Path.Combine(generatedDirectory, "Program.cs");
+                if (!File.Exists(sourcePath)) continue;
+                try
+                {
+                    var candidate = await File.ReadAllTextAsync(sourcePath);
+                    if (candidate.Contains("interface Trait_", StringComparison.Ordinal))
+                    {
+                        capturedSource = candidate;
+                        break;
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+            if (capturedSource is null) await Task.Delay(10);
+        }
+
+        var result = await processTask;
+        AssertTrue(capturedSource is not null,
+            $"The compiler should leave its generated static-trait C# available while the build runs. " +
+            $"exit={result.ExitCode}, stdout=<{result.StandardOutput}>, stderr=<{result.StandardError}>");
+        return (result, capturedSource!);
     }
 
     private static async Task TestForwardAndGuardedRecursion(Harness harness)
@@ -2837,7 +3158,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
+        AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2896,7 +3217,11 @@ internal static partial class IntegrationTests
             $"Private and transitive unions must be filtered, got [{string.Join(", ", unionIds)}].");
         var wrap = functions.Single(function => function.GetProperty("id").GetString() == "direct::records::wrap");
         AssertJsonStringArray(wrap.GetProperty("source_ids"), ["direct::records::wrap", "zeta::records::wrap"]);
-        AssertEqual(0, wrap.GetProperty("type_parameters")[0].GetProperty("ordinal").GetInt32(),
+        var wrapTypeParameter = wrap.GetProperty("type_parameters")[0];
+        AssertJsonPropertyOrder(wrapTypeParameter, "name,ordinal,bounds");
+        AssertEqual(0, wrapTypeParameter.GetProperty("bounds").GetArrayLength(),
+            "Unbounded generic functions should expose an empty ordered bounds array.");
+        AssertEqual(0, wrapTypeParameter.GetProperty("ordinal").GetInt32(),
             "Generic type parameter ordinals should be stable and source-facing.");
         var wrapResult = wrap.GetProperty("return_type");
         AssertEqual("option", wrapResult.GetProperty("kind").GetString(), "Generic return types should preserve wrappers.");
@@ -3050,7 +3375,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
+        AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -3207,7 +3532,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(7, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7.");
+        AssertEqual(8, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8.");
         AssertEqual(0, report.GetProperty("managed_adapters").GetArrayLength(),
             "Ordinary packages must report an empty managed adapter provenance array.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
@@ -3365,10 +3690,10 @@ internal static partial class IntegrationTests
             foreach (var input in package.GetProperty("inputs").EnumerateArray())
                 Order(input, "kind,path,sha256");
         }
-        Order(root.GetProperty("compiler"), "functions");
+        Order(root.GetProperty("compiler"), "functions,traits,trait_impls");
         foreach (var function in root.GetProperty("compiler").GetProperty("functions").EnumerateArray())
         {
-            Order(function, "package,module,name,visibility,is_async,declared_effects,inferred_effects,effect_paths,direct_calls,required_capabilities");
+            Order(function, "package,module,name,visibility,is_async,type_parameters,declared_effects,inferred_effects,effect_paths,direct_calls,trait_calls,required_capabilities");
             AssertPackageIdentitySource(function.GetProperty("package"));
             foreach (var path in function.GetProperty("effect_paths").EnumerateArray())
             {
@@ -3378,6 +3703,52 @@ internal static partial class IntegrationTests
             }
             foreach (var call in function.GetProperty("direct_calls").EnumerateArray())
                 Order(call, "package,module,name");
+            foreach (var typeParameter in function.GetProperty("type_parameters").EnumerateArray())
+            {
+                Order(typeParameter, "name,ordinal,bounds");
+                foreach (var bound in typeParameter.GetProperty("bounds").EnumerateArray())
+                    Order(bound, "trait");
+            }
+            foreach (var call in function.GetProperty("trait_calls").EnumerateArray())
+            {
+                var kind = call.GetProperty("kind").GetString();
+                if (kind == "method")
+                {
+                    Order(call, "kind,trait,method,witness");
+                    var witness = call.GetProperty("witness");
+                    Order(witness, witness.GetProperty("kind").GetString() == "impl"
+                        ? "kind,id,target,binding_function"
+                        : "kind,type_parameter_ordinal,bound_ordinal");
+                }
+                else
+                {
+                    Order(call, "kind,function,witnesses");
+                    foreach (var witness in call.GetProperty("witnesses").EnumerateArray())
+                    {
+                        Order(witness, "type_parameter_ordinal,bound_ordinal,trait,witness");
+                        var selection = witness.GetProperty("witness");
+                        Order(selection, selection.GetProperty("kind").GetString() == "impl"
+                            ? "kind,id,target"
+                            : "kind,type_parameter_ordinal,bound_ordinal");
+                    }
+                }
+            }
+        }
+        foreach (var trait in root.GetProperty("compiler").GetProperty("traits").EnumerateArray())
+        {
+            Order(trait, "id,package,module,name,visibility,methods");
+            foreach (var method in trait.GetProperty("methods").EnumerateArray())
+            {
+                Order(method, "name,parameters,return_type");
+                foreach (var parameter in method.GetProperty("parameters").EnumerateArray())
+                    Order(parameter, "name,type");
+            }
+        }
+        foreach (var implementation in root.GetProperty("compiler").GetProperty("trait_impls").EnumerateArray())
+        {
+            Order(implementation, "id,package,module,trait,target,visibility,methods");
+            foreach (var method in implementation.GetProperty("methods").EnumerateArray())
+                Order(method, "name,binding_function");
         }
         foreach (var claim in root.GetProperty("trusted_claims").EnumerateArray())
         {
@@ -3456,8 +3827,15 @@ internal static partial class IntegrationTests
             {
                 foreach (var property in element.EnumerateObject())
                 {
-                    AssertTrue(property.Name is not "id" and not "function_id" and not "package_id",
+                    AssertTrue(property.Name is not "function_id" and not "package_id",
                         $"Audit JSON should use stable symbolic identities instead of numeric identifiers at {path}.{property.Name}.");
+                    if (property.Name == "id")
+                    {
+                        var id = property.Value.GetString() ?? string.Empty;
+                        AssertTrue(id.StartsWith("lang.trait.v1.", StringComparison.Ordinal)
+                                   || id.StartsWith("lang.impl.v1.", StringComparison.Ordinal),
+                            $"Audit declaration IDs should be portable trait or impl identities, got <{id}> at {path}.id.");
+                    }
                     Visit(property.Value, $"{path}.{property.Name}");
                 }
             }
@@ -3493,13 +3871,15 @@ internal static partial class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,unions,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,unions,traits,trait_impls,commands,routes",
             "os,path,sha256",
             "name,source_type,required,has_default",
             "alias,name,version",
             "name,version",
-            "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
+            "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,trait_calls,required_capabilities",
+            "name,ordinal,bounds",
             "name,ordinal",
+            "trait",
             "name,type",
             "kind,declaration_kind,source_id,source_ids,package,module,name,type_arguments",
             "kind,source_id,source_ids,package,module,name",
@@ -3508,6 +3888,15 @@ internal static partial class IntegrationTests
             "source_id,source_ids,package,module,name",
             "id,source_ids,package,type_parameters,fields",
             "id,source_ids,package,type_parameters,variants",
+            "id,source_ids,package,methods",
+            "name,parameters,return_type",
+            "id,package,module,trait,target,visibility,methods",
+            "kind,trait,method,witness",
+            "kind,id,target",
+            "kind,type_parameter_ordinal,bound_ordinal",
+            "kind,function,witnesses",
+            "type_parameter_ordinal,bound_ordinal,trait,witness",
+            "kind",
             "name,payload",
             "id,package,help,inputs,handler,handler_is_async,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
             "name,kind,type,help,default_value",
@@ -3522,19 +3911,34 @@ internal static partial class IntegrationTests
             "name,capability"
         };
 
-        static void Walk(JsonElement element, HashSet<string> allowedOrders)
+        static void Walk(JsonElement element, HashSet<string> allowedOrders, string? requiredOrder = null)
         {
             if (element.ValueKind == JsonValueKind.Object)
             {
                 var names = element.EnumerateObject().Select(property => property.Name).ToArray();
                 var order = string.Join(",", names);
+                if (requiredOrder is not null)
+                {
+                    AssertEqual(requiredOrder, order,
+                        "Function type parameters must expose their ordered trait bounds, including an empty array.");
+                }
                 AssertTrue(allowedOrders.Contains(order),
                     $"Unexpected inspect-api JSON object property order: [{order}].");
-                foreach (var property in element.EnumerateObject()) Walk(property.Value, allowedOrders);
+                var isFunction = names.Contains("is_async", StringComparer.Ordinal)
+                    && names.Contains("type_parameters", StringComparer.Ordinal)
+                    && names.Contains("parameters", StringComparer.Ordinal)
+                    && names.Contains("return_type", StringComparer.Ordinal);
+                foreach (var property in element.EnumerateObject())
+                {
+                    var childRequiredOrder = isFunction && property.Name == "type_parameters"
+                        ? "name,ordinal,bounds"
+                        : null;
+                    Walk(property.Value, allowedOrders, childRequiredOrder);
+                }
             }
             else if (element.ValueKind == JsonValueKind.Array)
             {
-                foreach (var child in element.EnumerateArray()) Walk(child, allowedOrders);
+                foreach (var child in element.EnumerateArray()) Walk(child, allowedOrders, requiredOrder);
             }
         }
 
@@ -4085,8 +4489,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(9, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 9.");
+            AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 10.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -4151,8 +4555,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(9, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 9.");
+            AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 10.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -4203,8 +4607,8 @@ internal static partial class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(7, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 7.");
+            AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 8.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -5988,7 +6392,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
+            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6001,7 +6405,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7.");
+            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -6752,7 +7156,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9 with pinned process metadata.");
+            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -6790,7 +7194,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 7 with pinned process metadata.");
+            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "Audit process pins must use deterministic OS ordering.");
@@ -8444,8 +8848,8 @@ internal static partial class IntegrationTests
             AssertEqual(0, audit.ExitCode, Describe(audit));
             using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
             {
-                AssertEqual(7, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                    "Audit reports with source identities must use schema version 7.");
+                AssertEqual(8, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                    "Audit reports with source identities must use schema version 8.");
                 var identity = auditDocument.RootElement.GetProperty("packages").EnumerateArray()
                     .Single(package => package.GetProperty("role").GetString() == "direct")
                     .GetProperty("identity");
@@ -11262,7 +11666,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(85, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(97, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -11271,7 +11675,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("85 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("97 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -11448,9 +11852,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b85\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b97\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 85 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 97 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

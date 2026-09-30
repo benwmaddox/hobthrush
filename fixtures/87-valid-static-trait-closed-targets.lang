@@ -1,0 +1,15 @@
+module fixtures::static_trait_closed_targets;
+pub struct Box<T> { value: T }
+pub union Choice<T> { Empty, Value(T) }
+pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+fn box_measure(value: self::fixtures::static_trait_closed_targets::Box<i32>) -> i32 effects {} { return value.value + 100; }
+fn choice_measure(value: self::fixtures::static_trait_closed_targets::Choice<i32>) -> i32 effects {} {
+    return match value { self::fixtures::static_trait_closed_targets::Choice.Empty => 0, self::fixtures::static_trait_closed_targets::Choice.Value(item) => item + 30 };
+}
+pub impl self::fixtures::static_trait_closed_targets::Measure for self::fixtures::static_trait_closed_targets::Box<i32> { measure = self::fixtures::static_trait_closed_targets::box_measure; }
+pub impl self::fixtures::static_trait_closed_targets::Measure for self::fixtures::static_trait_closed_targets::Choice<i32> { measure = self::fixtures::static_trait_closed_targets::choice_measure; }
+pub fn pair<L: self::fixtures::static_trait_closed_targets::Measure, R: self::fixtures::static_trait_closed_targets::Measure>(left: L, right: R) -> i32 effects {} {
+    return self::fixtures::static_trait_closed_targets::Measure.measure(left) + self::fixtures::static_trait_closed_targets::Measure.measure(right);
+}
+pub fn forward<L: self::fixtures::static_trait_closed_targets::Measure, R: self::fixtures::static_trait_closed_targets::Measure>(left: L, right: R) -> i32 effects {} { return self::fixtures::static_trait_closed_targets::pair(left, right); }
+pub fn main() -> i32 effects {} { return self::fixtures::static_trait_closed_targets::forward(self::fixtures::static_trait_closed_targets::Box<i32> { value: 9 }, self::fixtures::static_trait_closed_targets::Choice<i32>.Value(12)); }

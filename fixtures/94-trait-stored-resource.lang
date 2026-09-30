@@ -1,0 +1,5 @@
+module fixtures::trait_stored_resource;
+pub union Carrier<T> { Hold(T), Empty }
+pub trait Equal { fn equal(left: Self, right: Self) -> bool effects {}; }
+fn equal_carrier(left: self::fixtures::trait_stored_resource::Carrier<FsRead>, right: self::fixtures::trait_stored_resource::Carrier<FsRead>) -> bool effects {} { return false; }
+pub impl self::fixtures::trait_stored_resource::Equal for self::fixtures::trait_stored_resource::Carrier<FsRead> { equal = self::fixtures::trait_stored_resource::equal_carrier; }

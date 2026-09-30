@@ -358,6 +358,8 @@ internal sealed class Parser
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
             var structs = new List<StructDecl>();
+            var traits = new List<TraitDecl>();
+            var impls = new List<ImplDecl>();
             var tests = new List<TestDecl>();
             var commands = new List<CommandDecl>();
             var routes = new List<RouteDecl>();
@@ -404,6 +406,14 @@ internal sealed class Parser
                 {
                     structs.Add(ParseStruct(isPublic));
                 }
+                else if (Is("trait"))
+                {
+                    traits.Add(ParseTrait(isPublic));
+                }
+                else if (Is("impl"))
+                {
+                    impls.Add(ParseImpl(isPublic));
+                }
                 else if (Is("test"))
                 {
                     if (isPublic)
@@ -429,7 +439,7 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, tests, commands, routes);
+            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, traits, impls, tests, commands, routes);
         }
         catch (ParseFailure)
         {
@@ -869,13 +879,13 @@ internal sealed class Parser
         return new TestDecl(name, setup, assertion, at, nameAt, assertAt);
     }
 
-    private List<TypeParameterSyntax> ParseFunctionTypeParameters() => ParseTypeParameters("generic function");
+    private List<TypeParameterSyntax> ParseFunctionTypeParameters() => ParseTypeParameters("generic function", allowTraitBounds: true);
 
     private List<TypeParameterSyntax> ParseStructTypeParameters() => ParseTypeParameters("generic struct");
 
     private List<TypeParameterSyntax> ParseUnionTypeParameters() => ParseTypeParameters("generic union");
 
-    private List<TypeParameterSyntax> ParseTypeParameters(string owner)
+    private List<TypeParameterSyntax> ParseTypeParameters(string owner, bool allowTraitBounds = false)
     {
         var typeParameters = new List<TypeParameterSyntax>();
         if (!Is("<")) return typeParameters;
@@ -888,7 +898,18 @@ internal sealed class Parser
         while (true)
         {
             var parameter = ExpectBareIdentifier();
-            typeParameters.Add(new TypeParameterSyntax(parameter.Text, parameter));
+            var bounds = new List<SourceDeclarationRefSyntax>();
+            if (allowTraitBounds && Is(":"))
+            {
+                Take();
+                while (true)
+                {
+                    bounds.Add(ParseSourceDeclarationRef());
+                    if (!Is("+")) break;
+                    Take();
+                }
+            }
+            typeParameters.Add(new TypeParameterSyntax(parameter.Text, parameter, bounds));
             if (Is(">")) break;
             if (Current.Kind == "eof")
                 Fail(Current, "E_SYNTAX", $"Unclosed {owner} type parameter list");
@@ -1192,6 +1213,81 @@ internal sealed class Parser
         return new StructDecl(name.Text, typeParameters, isPublic, fields, name);
     }
 
+    private TraitDecl ParseTrait(bool isPublic)
+    {
+        Expect("trait");
+        var name = ExpectBareIdentifier();
+        Expect("{");
+
+        var methods = new List<TraitMethodDecl>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof")
+                Fail(Current, "E_TRAIT_DECL", "Unclosed trait declaration");
+            if (!Is("fn"))
+                Fail(Current, "E_TRAIT_DECL", "A trait body may contain only method signatures");
+
+            Take();
+            var method = ExpectBareIdentifier();
+            if (Is("<"))
+                Fail(Current, "E_TRAIT_DECL", "Trait methods cannot declare type parameters");
+
+            Expect("(");
+            var parameters = new List<ParameterDecl>();
+            while (!Is(")"))
+            {
+                if (Current.Kind == "eof")
+                    Fail(Current, "E_TRAIT_DECL", "Unclosed trait method parameter list");
+                var parameter = ExpectBareIdentifier();
+                Expect(":");
+                parameters.Add(new ParameterDecl(parameter.Text, ParseType(), parameter));
+                if (Is(","))
+                {
+                    Take();
+                    if (Is(")")) break;
+                }
+                else if (!Is(")"))
+                {
+                    Expect(",");
+                }
+            }
+            Expect(")");
+            Expect("->");
+            var returnType = ParseType();
+            Expect("effects");
+            var effects = ParseEffects();
+            Expect(";");
+            methods.Add(new TraitMethodDecl(method.Text, parameters, returnType, effects, method));
+        }
+
+        Expect("}");
+        return new TraitDecl(name.Text, isPublic, methods, name);
+    }
+
+    private ImplDecl ParseImpl(bool isPublic)
+    {
+        var at = Expect("impl");
+        var trait = ParseSourceDeclarationRef();
+        Expect("for");
+        var target = ParseType();
+        Expect("{");
+
+        var methods = new List<ImplMethodBindingDecl>();
+        while (!Is("}"))
+        {
+            if (Current.Kind == "eof")
+                Fail(Current, "E_TRAIT_DECL", "Unclosed trait implementation declaration");
+            var method = ExpectBareIdentifier();
+            Expect("=");
+            var function = ParseSourceDeclarationRef();
+            Expect(";");
+            methods.Add(new ImplMethodBindingDecl(method.Text, method, function, method));
+        }
+
+        Expect("}");
+        return new ImplDecl(isPublic, trait, target, methods, at);
+    }
+
     private TypeSyntax ParseType()
     {
         EnterNesting(Current, "Type nesting is too deep");
@@ -1353,12 +1449,11 @@ internal sealed class Parser
             Expr expression;
             if (reference.IsQualified && IsTypeArgumentListFollowedByUnionVariant())
             {
-                var type = new TypeSyntax(reference, ParseTypeArguments(), reference.At);
-                expression = ParseUnionConstruction(type);
+                expression = ParseQualifiedTypeMemberCall(reference, ParseTypeArguments());
             }
             else if (reference.IsQualified && Is("."))
             {
-                expression = ParseUnionConstruction(new TypeSyntax(reference, [], reference.At));
+                expression = ParseQualifiedTypeMemberCall(reference, []);
             }
             else if (allowStructConstruction && IsTypeArgumentListFollowedByStructBrace())
             {
@@ -1461,14 +1556,16 @@ internal sealed class Parser
         return false;
     }
 
-    private Expr ParseUnionConstruction(TypeSyntax unionType)
+    private Expr ParseQualifiedTypeMemberCall(
+        SourceDeclarationRefSyntax owner,
+        IReadOnlyList<TypeSyntax> typeArguments)
     {
         Expect(".");
-        var variantAt = ExpectMemberIdentifier();
+        var memberAt = ExpectMemberIdentifier();
         var arguments = Is("(") ? ParseArguments() : [];
         var depth = arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max() + 1;
         return RegisterExpression(
-            new UnionConstructExpr(unionType.At, unionType, variantAt.Text, variantAt, arguments),
+            new QualifiedTypeMemberCallExpr(owner.At, owner, typeArguments, memberAt.Text, memberAt, arguments),
             depth);
     }
 

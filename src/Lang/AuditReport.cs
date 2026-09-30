@@ -67,7 +67,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 7;
+    private const int SchemaVersion = 8;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -84,7 +84,10 @@ internal static class AuditReport
         var identities = new Dictionary<string, AuditPackageIdentity?>(StringComparer.Ordinal);
         foreach (var package in packageSnapshots)
             identities.Add(FindNodeId(graph, package.Identity.Path), package.Identity);
-        var functions = CreateFunctionFacts(program, identities);
+        var stablePackageIdentities = CheckedReportFacts.StablePackageIdentities(graph);
+        var functions = CreateFunctionFacts(program, identities, stablePackageIdentities);
+        var traits = CreateTraitFacts(program, identities, stablePackageIdentities);
+        var traitImpls = CreateTraitImplFacts(program, identities, stablePackageIdentities);
         var claims = CreateTrustedClaims(graph, program, identities);
         var grants = graph.Root.Package.Manifest.Capabilities
             .OrderBy(capability => capability, StringComparer.Ordinal)
@@ -116,7 +119,7 @@ internal static class AuditReport
                     sha256 = input.Sha256
                 }).ToArray()
             }).ToArray(),
-            compiler = new { functions },
+            compiler = new { functions, traits, trait_impls = traitImpls },
             manifest_grants = grants,
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
@@ -158,8 +161,13 @@ internal static class AuditReport
     {
         var identities = program.Functions
             .Select(function => function.PackageId)
+            .Concat(program.Structs.Select(structure => structure.PackageId))
+            .Concat(program.Unions.Select(union => union.PackageId))
+            .Concat(program.Traits.Select(trait => trait.PackageId))
+            .Concat(program.TraitImpls.Select(implementation => implementation.PackageId))
             .Distinct(StringComparer.Ordinal)
             .ToDictionary(packageId => packageId, _ => (AuditPackageIdentity?)null, StringComparer.Ordinal);
+        var stablePackageIdentities = CheckedReportFacts.StablePackageIdentities(program);
         var claims = CreateStandaloneTrustedClaims(program);
         var output = new
         {
@@ -168,7 +176,12 @@ internal static class AuditReport
             {
                 new { kind = "source", path = "source", sha256 = HashNormalizedText(sourceText) }
             },
-            compiler = new { functions = CreateFunctionFacts(program, identities) },
+            compiler = new
+            {
+                functions = CreateFunctionFacts(program, identities, stablePackageIdentities),
+                traits = CreateTraitFacts(program, identities, stablePackageIdentities),
+                trait_impls = CreateTraitImplFacts(program, identities, stablePackageIdentities)
+            },
             manifest_grants = Array.Empty<string>(),
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = (string?)null,
@@ -406,11 +419,107 @@ internal static class AuditReport
         return result;
     }
 
+    private static object[] CreateTraitFacts(
+        CheckedProgram program,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities)
+    {
+        var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var unionsById = program.Unions.ToDictionary(union => union.Id);
+        return program.Traits
+            .Select(trait => new
+            {
+                Trait = trait,
+                Id = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities)
+            })
+            .OrderBy(item => item.Id, StringComparer.Ordinal)
+            .Select(item =>
+            {
+                var trait = item.Trait;
+                if (!identities.TryGetValue(trait.PackageId, out var package))
+                    throw new InvalidOperationException("A checked trait has no resolved package identity");
+                return (object)new
+                {
+                    id = item.Id,
+                    package = package is null ? null : IdentityJson(package),
+                    module = trait.Module,
+                    name = trait.Name,
+                    visibility = trait.Public ? "public" : "private",
+                    methods = trait.Methods
+                        .Select(method => new
+                        {
+                            name = method.Name,
+                            parameters = method.Parameters
+                                .Select(parameter => new
+                                {
+                                    name = parameter.Name,
+                                    type = AuditType(parameter.Type, identities, structsById, unionsById)
+                                })
+                                .ToArray(),
+                            return_type = AuditType(method.ReturnType, identities, structsById, unionsById)
+                        })
+                        .ToArray()
+                };
+            })
+            .ToArray();
+    }
+
+    private static object[] CreateTraitImplFacts(
+        CheckedProgram program,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities)
+    {
+        var traitsById = program.Traits.ToDictionary(trait => trait.Id);
+        var functionsById = program.Functions.ToDictionary(function => function.Id);
+        var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var unionsById = program.Unions.ToDictionary(union => union.Id);
+        return program.TraitImpls
+            .OrderBy(implementation => implementation.StableId, StringComparer.Ordinal)
+            .Select(implementation =>
+            {
+                if (!traitsById.TryGetValue(implementation.TraitId, out var trait))
+                    throw new InvalidOperationException("A checked trait implementation refers to an unknown trait");
+                if (!identities.TryGetValue(implementation.PackageId, out var package))
+                    throw new InvalidOperationException("A checked trait implementation has no resolved package identity");
+                if (trait.Methods.Count != implementation.BindingFunctionIds.Count)
+                    throw new InvalidOperationException("A checked trait implementation has an inconsistent method binding count");
+
+                return (object)new
+                {
+                    id = implementation.StableId,
+                    package = package is null ? null : IdentityJson(package),
+                    module = implementation.Module,
+                    trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
+                    target = AuditType(implementation.Target, identities, structsById, unionsById),
+                    visibility = implementation.Public ? "public" : "private",
+                    methods = trait.Methods
+                        .Select(method =>
+                        {
+                            var bindingId = implementation.BindingFunctionIds[method.Id];
+                            if (!functionsById.TryGetValue(bindingId, out var bindingFunction))
+                                throw new InvalidOperationException("A checked trait implementation binding has no function");
+                            return new
+                            {
+                                name = method.Name,
+                                binding_function = FunctionJson(FunctionIdentity(bindingFunction, identities))
+                            };
+                        })
+                        .ToArray()
+                };
+            })
+            .ToArray();
+    }
+
     private static object[] CreateFunctionFacts(
         CheckedProgram program,
-        IReadOnlyDictionary<string, AuditPackageIdentity?> identities)
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities)
     {
         var functionsById = program.Functions.ToDictionary(function => function.Id);
+        var traitsById = program.Traits.ToDictionary(trait => trait.Id);
+        var traitImplsById = program.TraitImpls.ToDictionary(implementation => implementation.Id);
+        var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var unionsById = program.Unions.ToDictionary(union => union.Id);
         return program.Functions
             .Select(function =>
             {
@@ -464,15 +573,172 @@ internal static class AuditReport
                     name = item.Identity.Name,
                     visibility = function.Public ? "public" : "private",
                     is_async = function.IsAsync,
+                    type_parameters = function.TypeParameters
+                        .Select((typeParameter, ordinal) => new
+                        {
+                            name = typeParameter.DisplayName,
+                            ordinal = typeParameter.TypeParameterOrdinal,
+                            bounds = function.TypeParameterBounds[ordinal]
+                                .Select(bound => new
+                                {
+                                    trait = CheckedReportFacts.StableTraitId(traitsById[bound.TraitId], stablePackageIdentities)
+                                })
+                                .ToArray()
+                        })
+                        .ToArray(),
                     declared_effects = function.DeclaredEffects.OrderBy(effect => effect, StringComparer.Ordinal).ToArray(),
                     inferred_effects = function.InferredEffects.OrderBy(effect => effect, StringComparer.Ordinal).ToArray(),
                     effect_paths = effectPaths,
                     direct_calls = directCalls,
+                    trait_calls = CreateTraitCalls(
+                        function,
+                        functionsById,
+                        traitsById,
+                        traitImplsById,
+                        identities,
+                        stablePackageIdentities,
+                        structsById,
+                        unionsById),
                     required_capabilities = CheckedReportFacts.RequiredCapabilities(function.InferredEffects)
                 };
             })
             .ToArray();
     }
+
+    private static object[] CreateTraitCalls(
+        CheckedFunction function,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<int, CheckedTrait> traitsById,
+        IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+    {
+        var result = new List<object>();
+        foreach (var expression in CheckedReportFacts.TypedExpressions(function))
+        {
+            if (expression is TypedTraitCallExpr traitCall)
+            {
+                if (!traitsById.TryGetValue(traitCall.TraitId, out var trait) ||
+                    trait.Methods.FirstOrDefault(method => method.Id == traitCall.MethodId) is not { } method)
+                    throw new InvalidOperationException("A checked trait call refers to an unknown method");
+                result.Add(new
+                {
+                    kind = "method",
+                    trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
+                    method = method.Name,
+                    witness = AuditMethodWitness(
+                        traitCall.Witness,
+                        traitCall.TraitId,
+                        method,
+                        traitsById,
+                        traitImplsById,
+                        functionsById,
+                        identities,
+                        stablePackageIdentities,
+                        structsById,
+                        unionsById)
+                });
+                continue;
+            }
+
+            if (expression is not TypedCallExpr call || !functionsById.TryGetValue(call.FunctionId, out var target))
+                continue;
+
+            var targetBounds = target.TypeParameterBounds
+                .SelectMany((bounds, parameter) => bounds.Select((bound, ordinal) => (parameter, ordinal, bound)))
+                .ToArray();
+            if (targetBounds.Length != call.TraitWitnesses.Count)
+                throw new InvalidOperationException("A checked call has an inconsistent trait witness count");
+            if (targetBounds.Length == 0)
+                continue;
+
+            var witnesses = targetBounds.Select((entry, index) => new
+            {
+                type_parameter_ordinal = entry.parameter,
+                bound_ordinal = entry.ordinal,
+                trait = CheckedReportFacts.StableTraitId(traitsById[entry.bound.TraitId], stablePackageIdentities),
+                witness = AuditWitnessSelection(
+                    call.TraitWitnesses[index],
+                    entry.bound.TraitId,
+                    traitImplsById,
+                    identities,
+                    structsById,
+                    unionsById)
+            }).ToArray();
+            result.Add(new
+            {
+                kind = "function_call",
+                function = FunctionJson(FunctionIdentity(target, identities)),
+                witnesses
+            });
+        }
+
+        return result.ToArray();
+    }
+
+    private static object AuditMethodWitness(
+        TypedTraitWitness witness,
+        int traitId,
+        CheckedTraitMethod method,
+        IReadOnlyDictionary<int, CheckedTrait> traitsById,
+        IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
+        IReadOnlyDictionary<int, CheckedFunction> functionsById,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+    {
+        if (witness is TypedForwardedTraitWitness forwarded)
+        {
+            return new
+            {
+                kind = "bound",
+                type_parameter_ordinal = forwarded.TypeParameterOrdinal,
+                bound_ordinal = forwarded.BoundOrdinal
+            };
+        }
+
+        if (witness is not TypedConcreteTraitWitness concrete ||
+            !traitImplsById.TryGetValue(concrete.ImplId, out var implementation) ||
+            implementation.TraitId != traitId ||
+            method.Id < 0 || method.Id >= implementation.BindingFunctionIds.Count ||
+            !functionsById.TryGetValue(implementation.BindingFunctionIds[method.Id], out var bindingFunction))
+            throw new InvalidOperationException("A checked trait call has an unresolved implementation binding");
+
+        return new
+        {
+            kind = "impl",
+            id = implementation.StableId,
+            target = AuditType(implementation.Target, identities, structsById, unionsById),
+            binding_function = FunctionJson(FunctionIdentity(bindingFunction, identities))
+        };
+    }
+
+    private static object AuditWitnessSelection(
+        TypedTraitWitness witness,
+        int expectedTraitId,
+        IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById) => witness switch
+        {
+            TypedConcreteTraitWitness concrete when traitImplsById.TryGetValue(concrete.ImplId, out var implementation) &&
+                implementation.TraitId == expectedTraitId => new
+                {
+                    kind = "impl",
+                    id = implementation.StableId,
+                    target = AuditType(implementation.Target, identities, structsById, unionsById)
+                },
+            TypedForwardedTraitWitness forwarded => new
+            {
+                kind = "bound",
+                type_parameter_ordinal = forwarded.TypeParameterOrdinal,
+                bound_ordinal = forwarded.BoundOrdinal
+            },
+            _ => throw new InvalidOperationException("A checked trait witness is unknown")
+        };
 
     private static IReadOnlyList<AuditTrustedClaim> CreateTrustedClaims(
         PackageDependencyGraph graph,
@@ -577,9 +843,104 @@ internal static class AuditReport
         CheckedFunction function,
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities)
     {
-        if (!identities.TryGetValue(function.PackageId, out var package) || package is null)
+        if (!identities.TryGetValue(function.PackageId, out var package))
             throw new InvalidOperationException("A checked function has no resolved package identity");
         return new AuditFunctionIdentity(package, function.Module, function.Name);
+    }
+
+    private static object AuditType(
+        LangType type,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById) => type.Kind switch
+        {
+            LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
+            LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
+            LangTypeKind.Text => new { kind = "primitive", name = "Text" },
+            LangTypeKind.Html => new { kind = "primitive", name = "Html" },
+            LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
+            LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
+            LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
+            LangTypeKind.Config => new { kind = "primitive", name = "Config" },
+            LangTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
+            LangTypeKind.Logger => new { kind = "primitive", name = "Logger" },
+            LangTypeKind.ProcessRunner => new { kind = "primitive", name = "ProcessRunner" },
+            LangTypeKind.SecretText => new
+            {
+                kind = "secret",
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+            },
+            LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
+            LangTypeKind.ProcessOutput => new { kind = "primitive", name = "ProcessOutput" },
+            LangTypeKind.ProcessError => new { kind = "primitive", name = "ProcessError" },
+            LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
+            LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
+            LangTypeKind.HttpError => new { kind = "primitive", name = "HttpError" },
+            LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
+            LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
+            LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
+            LangTypeKind.DbError => new { kind = "primitive", name = "DbError" },
+            LangTypeKind.TypeParameter when type.TypeParameterOwnerKind == TypeParameterOwnerKind.Trait => new { kind = "self" },
+            LangTypeKind.TypeParameter => new
+            {
+                kind = "type_parameter",
+                name = type.DisplayName,
+                ordinal = type.TypeParameterOrdinal
+            },
+            LangTypeKind.List => new
+            {
+                kind = "list",
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+            },
+            LangTypeKind.Map => new
+            {
+                kind = "map",
+                key = AuditType(type.Arguments[0], identities, structsById, unionsById),
+                value = AuditType(type.Arguments[1], identities, structsById, unionsById)
+            },
+            LangTypeKind.Option => new
+            {
+                kind = "option",
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+            },
+            LangTypeKind.Result => new
+            {
+                kind = "result",
+                ok = AuditType(type.Arguments[0], identities, structsById, unionsById),
+                error = AuditType(type.Arguments[1], identities, structsById, unionsById)
+            },
+            LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) => AuditNominalType(
+                "struct", structure.PackageId, structure.Module, structure.Name, type.Arguments, identities, structsById, unionsById),
+            LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) => AuditNominalType(
+                "union", union.PackageId, union.Module, union.Name, type.Arguments, identities, structsById, unionsById),
+            LangTypeKind.Error => throw new InvalidOperationException("An audit report cannot contain an error type"),
+            LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
+            _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
+        };
+
+    private static object AuditNominalType(
+        string declarationKind,
+        string packageId,
+        string module,
+        string name,
+        IReadOnlyList<LangType> typeArguments,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+    {
+        if (!identities.TryGetValue(packageId, out var package))
+            throw new InvalidOperationException("A checked nominal type has no resolved package identity");
+        return new
+        {
+            kind = "nominal",
+            declaration_kind = declarationKind,
+            package = package is null ? null : IdentityJson(package),
+            module,
+            name,
+            type_arguments = typeArguments
+                .Select(argument => AuditType(argument, identities, structsById, unionsById))
+                .ToArray()
+        };
     }
 
     private static object FunctionJson(AuditFunctionIdentity function) => function.Package is null

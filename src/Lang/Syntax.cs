@@ -20,7 +20,10 @@ internal sealed record SourceDeclarationRefSyntax(
 }
 
 internal sealed record TypeSyntax(SourceDeclarationRefSyntax Reference, IReadOnlyList<TypeSyntax> Args, Token At);
-internal sealed record TypeParameterSyntax(string Name, Token At);
+internal sealed record TypeParameterSyntax(
+    string Name,
+    Token At,
+    IReadOnlyList<SourceDeclarationRefSyntax>? TraitBounds = null);
 internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record EffectSyntax(string Name, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
@@ -37,6 +40,28 @@ internal sealed record StructDecl(
     IReadOnlyList<TypeParameterSyntax> TypeParameters,
     bool Public,
     IReadOnlyList<StructFieldDecl> Fields,
+    Token At);
+internal sealed record TraitMethodDecl(
+    string Name,
+    IReadOnlyList<ParameterDecl> Parameters,
+    TypeSyntax ReturnType,
+    IReadOnlyList<EffectSyntax> Effects,
+    Token At);
+internal sealed record TraitDecl(
+    string Name,
+    bool Public,
+    IReadOnlyList<TraitMethodDecl> Methods,
+    Token At);
+internal sealed record ImplMethodBindingDecl(
+    string MethodName,
+    Token MethodAt,
+    SourceDeclarationRefSyntax Function,
+    Token At);
+internal sealed record ImplDecl(
+    bool Public,
+    SourceDeclarationRefSyntax Trait,
+    TypeSyntax Target,
+    IReadOnlyList<ImplMethodBindingDecl> Methods,
     Token At);
 internal abstract record CommandEntrySyntax(Token At);
 internal sealed record CommandHelpSyntax(Token At, string Text) : CommandEntrySyntax(At);
@@ -101,6 +126,8 @@ internal sealed record ParsedProgram(
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs,
+    IReadOnlyList<TraitDecl> Traits,
+    IReadOnlyList<ImplDecl> Impls,
     IReadOnlyList<TestDecl> Tests,
     IReadOnlyList<CommandDecl> Commands,
     IReadOnlyList<RouteDecl> Routes);
@@ -140,6 +167,13 @@ internal sealed record UnionConstructExpr(
     TypeSyntax UnionType,
     string VariantName,
     Token VariantAt,
+    IReadOnlyList<Expr> Arguments) : Expr(At);
+internal sealed record QualifiedTypeMemberCallExpr(
+    Token At,
+    SourceDeclarationRefSyntax Owner,
+    IReadOnlyList<TypeSyntax> TypeArguments,
+    string Member,
+    Token MemberAt,
     IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
