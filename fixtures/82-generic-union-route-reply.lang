@@ -1,0 +1,16 @@
+module fixture::generic_union_route_reply;
+
+pub union Reply<T> {
+    Found(T),
+    Empty,
+}
+
+route GET "/items" {
+    handler: self::fixture::generic_union_route_reply::get_items;
+    response Found: 200 json Text;
+    response Empty: 204;
+}
+
+pub fn get_items() -> self::fixture::generic_union_route_reply::Reply<Text> effects {} {
+    return self::fixture::generic_union_route_reply::Reply<Text>.Found("ok");
+}

@@ -873,6 +873,8 @@ internal sealed class Parser
 
     private List<TypeParameterSyntax> ParseStructTypeParameters() => ParseTypeParameters("generic struct");
 
+    private List<TypeParameterSyntax> ParseUnionTypeParameters() => ParseTypeParameters("generic union");
+
     private List<TypeParameterSyntax> ParseTypeParameters(string owner)
     {
         var typeParameters = new List<TypeParameterSyntax>();
@@ -1090,7 +1092,7 @@ internal sealed class Parser
     {
         Expect("union");
         var name = ExpectBareIdentifier();
-        if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic unions are not implemented yet");
+        var typeParameters = ParseUnionTypeParameters();
         Expect("{");
 
         var variants = new List<VariantDecl>();
@@ -1157,7 +1159,7 @@ internal sealed class Parser
         }
 
         Expect("}");
-        return new UnionDecl(name.Text, isPublic, variants, name);
+        return new UnionDecl(name.Text, typeParameters, isPublic, variants, name);
     }
 
     private StructDecl ParseStruct(bool isPublic)
@@ -1349,7 +1351,16 @@ internal sealed class Parser
 
             var reference = ParseSourceDeclarationRef();
             Expr expression;
-            if (allowStructConstruction && IsTypeArgumentListFollowedByStructBrace())
+            if (reference.IsQualified && IsTypeArgumentListFollowedByUnionVariant())
+            {
+                var type = new TypeSyntax(reference, ParseTypeArguments(), reference.At);
+                expression = ParseUnionConstruction(type);
+            }
+            else if (reference.IsQualified && Is("."))
+            {
+                expression = ParseUnionConstruction(new TypeSyntax(reference, [], reference.At));
+            }
+            else if (allowStructConstruction && IsTypeArgumentListFollowedByStructBrace())
             {
                 var type = new TypeSyntax(reference, ParseTypeArguments(), reference.At);
                 expression = ParseStructConstruction(type);
@@ -1418,6 +1429,47 @@ internal sealed class Parser
         }
 
         return false;
+    }
+
+    private bool IsTypeArgumentListFollowedByUnionVariant()
+    {
+        if (!Is("<")) return false;
+
+        var depth = 0;
+        for (var index = _position; index < _tokens.Count; index++)
+        {
+            var token = _tokens[index];
+            if (token.Kind == "eof" || token.Kind is not ("id" or "::" or "," or "<" or ">"))
+                return false;
+            if (token.Kind == "<")
+            {
+                depth++;
+                continue;
+            }
+
+            if (token.Kind != ">") continue;
+            depth--;
+            if (depth < 0) return false;
+            if (depth != 0) continue;
+
+            var dotIndex = index + 1;
+            var variantIndex = index + 2;
+            return dotIndex < _tokens.Count && _tokens[dotIndex].Text == "." &&
+                   variantIndex < _tokens.Count && _tokens[variantIndex].Kind == "id";
+        }
+
+        return false;
+    }
+
+    private Expr ParseUnionConstruction(TypeSyntax unionType)
+    {
+        Expect(".");
+        var variantAt = ExpectMemberIdentifier();
+        var arguments = Is("(") ? ParseArguments() : [];
+        var depth = arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max() + 1;
+        return RegisterExpression(
+            new UnionConstructExpr(unionType.At, unionType, variantAt.Text, variantAt, arguments),
+            depth);
     }
 
     private Expr ParseStructConstruction(TypeSyntax typeName)
@@ -1583,6 +1635,8 @@ internal sealed class Parser
         }
 
         var reference = ParseSourceDeclarationRef();
+        if (Is("<"))
+            Fail(Current, "E_TYPE_MISMATCH", "Match patterns take type arguments from the matched union value; omit union type arguments");
         SourceDeclarationRefSyntax? union = null;
         var variantName = reference.Declaration;
         if (reference.IsQualified || Is("."))

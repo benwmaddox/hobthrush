@@ -1,0 +1,11 @@
+module fixture::generic_union_payload_mismatch;
+
+pub union Choice<T> {
+    Value(T),
+}
+
+pub fn main() -> i32 effects {} {
+    let invalid: self::fixture::generic_union_payload_mismatch::Choice<i32> =
+        self::fixture::generic_union_payload_mismatch::Choice<i32>.Value("wrong");
+    return 0;
+}

@@ -1,0 +1,6 @@
+module fixture::generic_union_recursion_growth;
+
+pub union Grow<T> {
+    Next(Option<self::fixture::generic_union_recursion_growth::Grow<List<T>>>),
+    End,
+}

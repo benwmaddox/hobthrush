@@ -1,0 +1,5 @@
+module fixture::generic_union_unbound_parameter;
+
+pub union Choice<T> {
+    Value(U),
+}

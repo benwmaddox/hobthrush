@@ -25,7 +25,12 @@ internal sealed record ParameterDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record EffectSyntax(string Name, Token At);
 internal sealed record VariantFieldDecl(string? Name, TypeSyntax Type, Token At);
 internal sealed record VariantDecl(string Name, IReadOnlyList<VariantFieldDecl> Fields, Token At);
-internal sealed record UnionDecl(string Name, bool Public, IReadOnlyList<VariantDecl> Variants, Token At);
+internal sealed record UnionDecl(
+    string Name,
+    IReadOnlyList<TypeParameterSyntax> TypeParameters,
+    bool Public,
+    IReadOnlyList<VariantDecl> Variants,
+    Token At);
 internal sealed record StructFieldDecl(string Name, TypeSyntax Type, Token At);
 internal sealed record StructDecl(
     string Name,
@@ -130,6 +135,12 @@ internal sealed record StructConstructExpr(
     Token At,
     TypeSyntax Type,
     IReadOnlyList<StructFieldValue> Fields) : Expr(At);
+internal sealed record UnionConstructExpr(
+    Token At,
+    TypeSyntax UnionType,
+    string VariantName,
+    Token VariantAt,
+    IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
 internal sealed record AwaitExpr(Token At, Expr Value) : Expr(At);

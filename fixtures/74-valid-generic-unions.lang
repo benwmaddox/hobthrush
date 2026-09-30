@@ -1,0 +1,44 @@
+module fixture::valid_generic_unions;
+
+pub union Maybe<T> {
+    Some(T),
+    None,
+}
+
+pub union Pair<Left, Right> {
+    Both(Left, Right),
+    LeftOnly(Left),
+    RightOnly(Right),
+    Empty,
+}
+
+pub struct Envelope<T> {
+    choice: self::fixture::valid_generic_unions::Maybe<T>,
+}
+
+pub struct Node<T> {
+    value: T,
+    next: Option<self::fixture::valid_generic_unions::Node<T>>,
+}
+
+pub union Tree<T> {
+    Leaf(T),
+    Branch(List<self::fixture::valid_generic_unions::Tree<T>>),
+}
+
+pub fn echo<T>(value: self::fixture::valid_generic_unions::Maybe<T>) -> self::fixture::valid_generic_unions::Maybe<T> effects {} {
+    return value;
+}
+
+pub fn main() -> i32 effects {} {
+    let maybe: self::fixture::valid_generic_unions::Maybe<i32> =
+        self::fixture::valid_generic_unions::Maybe<i32>.Some(7);
+    let envelope: self::fixture::valid_generic_unions::Envelope<i32> =
+        self::fixture::valid_generic_unions::Envelope<i32> { choice: maybe };
+    let echoed: self::fixture::valid_generic_unions::Maybe<i32> =
+        self::fixture::valid_generic_unions::echo(envelope.choice);
+    return match echoed {
+        self::fixture::valid_generic_unions::Maybe.Some(value) => value,
+        self::fixture::valid_generic_unions::Maybe.None => 0,
+    };
+}
