@@ -98,8 +98,8 @@ fn lookup_by_id(id: i32, name: Text, city: Option<Text>, db: DbRead) -> self::ap
 
 fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects { db.write } {
     let normalized: Text = match validation::text::validation::normalize(request.name) {
-        Ok(name) => name,
-        Err(error) => ""
+        validation::text::validation::Validation.Valid(value) => value.value,
+        validation::text::validation::Validation.Invalid(error) => ""
     };
     if normalized.length == 0 {
         return self::app::main::CreateReply.Invalid("name must contain non-whitespace text");

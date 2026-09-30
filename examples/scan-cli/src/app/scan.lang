@@ -46,8 +46,8 @@ fn normalize_if_requested(
 ) -> Result<Text, self::app::main::ScanError> effects {} {
     if requested {
         return match validation::text::validation::normalize(contents) {
-            Ok(normalized) => Ok(normalized),
-            Err(error) => Err(self::app::scan::map_normalize_error(error)),
+            validation::text::validation::Validation.Valid(normalized) => Ok(normalized.value),
+            validation::text::validation::Validation.Invalid(error) => Err(self::app::scan::map_normalize_error(error)),
         };
     } else {
         return Ok(contents);

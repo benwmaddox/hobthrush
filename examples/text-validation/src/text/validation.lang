@@ -1,13 +1,34 @@
 module text::validation;
 
+pub struct Normalized<T> { value: T }
+
 pub union NormalizeError { Empty }
 
-pub fn normalize(input: Text) -> Result<Text, self::text::validation::NormalizeError> effects {} {
+pub union Validation<T> { Valid(T), Invalid(self::text::validation::NormalizeError) }
+
+pub trait Normalize {
+    fn normalize(input: Self) -> Result<Self, self::text::validation::NormalizeError> effects {};
+}
+
+fn normalize_text(input: Text) -> Result<Text, self::text::validation::NormalizeError> effects {} {
     if input.length == 0 {
         return Err(self::text::validation::NormalizeError.Empty);
     }
 
     return Ok(input.trim());
+}
+
+pub impl self::text::validation::Normalize for Text {
+    normalize = self::text::validation::normalize_text;
+}
+
+pub fn normalize<T: self::text::validation::Normalize>(input: T) -> self::text::validation::Validation<self::text::validation::Normalized<T>> effects {} {
+    return match self::text::validation::Normalize.normalize(input) {
+        Ok(value) => self::text::validation::Validation<self::text::validation::Normalized<T>>.Valid(
+            self::text::validation::Normalized<T> { value: value }
+        ),
+        Err(error) => self::text::validation::Validation<self::text::validation::Normalized<T>>.Invalid(error),
+    };
 }
 
 pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
@@ -17,21 +38,21 @@ pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
     };
 }
 
-test "normalize empty input returns Empty" {
-    let result: Result<Text, self::text::validation::NormalizeError> = self::text::validation::normalize("");
+test "generic normalize empty input returns Invalid" {
+    let result: self::text::validation::Validation<self::text::validation::Normalized<Text>> = self::text::validation::normalize("");
     assert match result {
-        Ok(value) => false,
-        Err(error) => match error {
+        self::text::validation::Validation.Valid(value) => false,
+        self::text::validation::Validation.Invalid(error) => match error {
             self::text::validation::NormalizeError.Empty => true,
         },
     };
 }
 
-test "normalize trims nonempty input" {
-    let result: Result<Text, self::text::validation::NormalizeError> = self::text::validation::normalize("  hello  ");
+test "generic normalize trims nonempty input" {
+    let result: self::text::validation::Validation<self::text::validation::Normalized<Text>> = self::text::validation::normalize("  hello  ");
     assert match result {
-        Ok(value) => value == "hello",
-        Err(error) => false,
+        self::text::validation::Validation.Valid(value) => value.value == "hello",
+        self::text::validation::Validation.Invalid(error) => false,
     };
 }
 
