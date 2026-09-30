@@ -74,19 +74,30 @@ The compiler must reject invalid programs rather than relying on a formatter, li
 Illustrative library surface:
 
 ```text
-module text::normalize;
+module text::validation;
 
-pub union NormalizeError {
-    Empty,
-    TooLong(max: u32),
+pub struct Normalized<T> { value: T }
+pub union NormalizeError { Empty }
+pub union Validation<T> { Valid(T), Invalid(self::text::validation::NormalizeError) }
+pub trait Normalize {
+    fn normalize(input: Self) -> Result<Self, self::text::validation::NormalizeError> effects {};
 }
-
-pub fn normalize(input: Text) -> Result<Text, self::text::normalize::NormalizeError>
-    effects {} {
+fn normalize_text(input: Text) -> Result<Text, self::text::validation::NormalizeError> effects {} {
     if input.length == 0 {
-        return Err(self::text::normalize::NormalizeError.Empty);
+        return Err(self::text::validation::NormalizeError.Empty);
     }
     return Ok(input.trim());
+}
+pub impl self::text::validation::Normalize for Text {
+    normalize = self::text::validation::normalize_text;
+}
+pub fn normalize<T: self::text::validation::Normalize>(input: T) -> self::text::validation::Validation<self::text::validation::Normalized<T>> effects {} {
+    return match self::text::validation::Normalize.normalize(input) {
+        Ok(value) => self::text::validation::Validation<self::text::validation::Normalized<T>>.Valid(
+            self::text::validation::Normalized<T> { value: value }
+        ),
+        Err(error) => self::text::validation::Validation<self::text::validation::Normalized<T>>.Invalid(error),
+    };
 }
 ```
 
@@ -100,7 +111,7 @@ Pure static traits are implemented for explicit, closed targets. A trait declare
 
 The bounded effect/capability implementation recognizes the closed vocabulary and checks declared upper bounds against direct and transitive effects. Current filesystem reads include synchronous `FsRead.read_text` and async `FsRead.read_text_async`; both are strict-UTF-8 `fs.read` operations returning `Result<Text, FsError>`. Other current operations include opaque `FsWrite.write_text` and `FsWrite.write_text_async` (`fs.write`), CLI-only `ProcessRunner.run_text_async` (`process.spawn`), `HttpClient.get_text_async` (`net.client`), and SQLite operations `DbRead.query_one` (`db.read`), `DbWrite.execute`, `DbWrite.begin`, `Transaction.execute`, and `Transaction.commit` (`db.write`). CLI packages may grant `fs.read`, `fs.write`, `net.client`, `env.read`, `secret.reveal`, `log.write`, and `process.spawn`; a network grant requires top-level `http_origin`. Command handlers receive requested granted capabilities after generated arguments in `FsRead`, `FsWrite`, `HttpClient`, `Config`, `Secrets`, `Logger`, then `ProcessRunner` order. Configured web packages require `net.listen` and may grant `fs.write`, configured `db.read`/`db.write`, `net.client`, `env.read`, `secret.reveal`, and `log.write`; the network grant also requires `http_origin`. Process pins and `process.spawn` are CLI-only. Route handlers receive requested capabilities after any body in `FsWrite`, `DbRead`, `DbWrite`, `HttpClient`, `Config`, `Secrets`, then `Logger` order. `FsRead` is not injected into web routes. Libraries may expose checked functions with the existing filesystem, database, and HTTP capability parameters, but cannot declare application grants or use/expose `Config`, `Secrets`, `Logger`, `Secret<Text>`, `ProcessRunner`, `ProcessOutput`, or `ProcessError`. `lang inspect effects PACKAGE_DIRECTORY SYMBOL --json` provides a narrow compiler-derived report of one root function's declared/inferred effects, shortest paths, required capabilities, manifest grants, and trusted-operation metadata. `lang inspect api PACKAGE_DIRECTORY --json` provides schema-v10 metadata for public declarations in the root and direct dependencies, plus checked root commands/routes, recursive types, direct calls, and root `http_origin`. The API report keeps root manifest grants separate from inferred effects and required capabilities; API schema v10 and audit schema v8 include configured process pins in `process_executables` after `http_origin`. Neither inspect report proves trusted adapter behavior. The schema-v8 package audit and schema-v3 successful-build receipt are implemented. The synchronous `FsWrite.write_text` and SQLite source APIs remain available. Async functions, host cancellation, `FsRead.read_text_async`, `FsWrite.write_text_async`, and the bounded HTTP client adapter are implemented. Async SQLite is explicitly deferred pending a concurrency and cancellation-cleanup design; other effect-class adapters remain later `#743` work, so M2 remains partial.
 
-[`examples/text-validation`](../examples/text-validation) is a strict pure `lib` package precursor implementing `NormalizeError`, `normalize`, and the argument-inferred generic `require<T, E>` API. It includes pure module-level tests for empty/nonempty normalization, Unicode trimming, and `Option<Text>`/`Option<i32>` generic calls. Integration tests build it and run same-package consumers; the maintained CLI example consumes it through a sibling path dependency. Broader package source support is still required. In particular, the illustrative `TooLong(max: u32)` API remains beyond the current type slice.
+[`examples/text-validation`](../examples/text-validation) is a strict pure `lib` package that exposes immutable `Normalized<T>` and `Validation<T>` values, a pure static `Normalize` trait with a closed `Text` implementation, and generic `normalize<T: Normalize>` dispatch. Empty raw text returns `Invalid(NormalizeError.Empty)`; nonempty text is trimmed and wrapped as `Valid(Normalized<Text>)`. The generic `require<T, E>` helper remains, and module-level tests cover empty/nonempty input, Unicode trimming, and generic `Option` calls. Integration tests build it and run same-package, path-dependency, and pinned-Git consumers; the maintained library-package, CLI, and web examples consume its generic validation surface. The illustrative `TooLong(max: u32)` API remains beyond the current type slice.
 
 The implemented package subset loads a strict `lang.toml` and recursively resolves `.lang` modules under normalized `source_root`. User declarations use qualified package/module paths; aliases expose direct dependencies only and there is no source-level import. A `lib` package builds as a managed library; a `cli` package selects its supported main or typed command from `entry_module`. A `web` package selects a route module, requires `net.listen`, and uses the managed host. `lang new lib|cli|web NAME` creates a validated starter. `lang add SOURCE` updates the current package; `lang add PACKAGE_DIRECTORY SOURCE` chooses one explicitly. Dependency sources are local relative paths or Git references pinned to canonical HTTPS/file URLs and exact 40-character lowercase commits. Lock schema v3 records root/path/Git source identities and content hashes and binds catalog-resolved managed adapter provenance. The root identity uses path `.`, path dependencies use portable relative paths, and Git dependencies use the opaque logical ID `git:<64 lowercase hex SHA-256>` derived from canonical URL and exact commit; that ID is not a filesystem or cache path. `lang add` and `lang lock` are the only operations that use the external Git source provider. For Git pins they freshly fetch and verify the exact commit before changing a manifest or writing the lock; a mismatched existing cache is rejected without changing the cache or lock. Git is tooling, not part of Lang syntax, semantics, or runtime. Normal `check`, `build`, `run`, `test`, `inspect effects`, `inspect api`, and `audit` commands validate the project lock and cached content attestation against the exact URL/commit offline and never invoke Git. A valid current lock is required for package graphs with dependencies and root packages with managed adapter declarations; dependency-free packages without adapters may omit a lock. The unkeyed attestation is a local integrity check, not proof of upstream provenance. The package cache defaults under user local application data; `LANG_PACKAGE_CACHE` can override it, but an explicit cache equal to or inside the package root or its `source_root` is rejected before source discovery. Git-sourced packages cannot declare path dependencies. Registries/public package installation, trait objects and excluded advanced trait forms, remaining adapter coverage, and the full V1 package requirements remain incomplete.
 

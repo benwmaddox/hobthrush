@@ -135,6 +135,9 @@ internal static partial class IntegrationTests
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("new and add workflows create projects and resolve pinned Git dependencies offline", TestProjectWorkflow),
             ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
+            ("maintained generic source identity remains current across locks and cached Git inputs", TestGenericSourceIdentityLifecycle),
+            ("qualified HTTP effects cross dependencies and require root authority", TestQualifiedHttpDependencyAuthority),
+            ("Secret<Text> stays redacted across CLI exit classes", TestSecretCanaryExitMatrix),
             ("managed adapter packages lock and report closed provenance, execute, reject drift, and publish to NativeAOT", TestManagedAdapterPackages),
             ("dependency graphs reject cycles, missing manifests, non-libraries, and duplicate identities", TestDependencyGraphDiagnostics),
             ("dependency aliases enforce direct visibility and preserve module identity", TestDependencyAliasResolution),
@@ -1696,11 +1699,16 @@ internal static partial class IntegrationTests
     {
         var generatedRoot = Path.Combine(Path.GetTempPath(), "lang-generated");
         Directory.CreateDirectory(generatedRoot);
+        var existingDirectories = Directory.EnumerateDirectories(generatedRoot)
+            .Select(Path.GetFullPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var processTask = harness.InvokeAsync(caseName, command, source);
         string? capturedSource = null;
-        while (!processTask.IsCompleted && capturedSource is null)
+        async Task<string?> CaptureCurrentSourceAsync()
         {
-            foreach (var generatedDirectory in Directory.EnumerateDirectories(generatedRoot))
+            foreach (var generatedDirectory in Directory.EnumerateDirectories(generatedRoot)
+                         .Select(Path.GetFullPath)
+                         .Where(path => !existingDirectories.Contains(path)))
             {
                 var sourcePath = Path.Combine(generatedDirectory, "Program.cs");
                 if (!File.Exists(sourcePath)) continue;
@@ -1708,10 +1716,7 @@ internal static partial class IntegrationTests
                 {
                     var candidate = await File.ReadAllTextAsync(sourcePath);
                     if (candidate.Contains("interface Trait_", StringComparison.Ordinal))
-                    {
-                        capturedSource = candidate;
-                        break;
-                    }
+                        return candidate;
                 }
                 catch (IOException)
                 {
@@ -1720,10 +1725,17 @@ internal static partial class IntegrationTests
                 {
                 }
             }
+            return null;
+        }
+
+        while (!processTask.IsCompleted && capturedSource is null)
+        {
+            capturedSource = await CaptureCurrentSourceAsync();
             if (capturedSource is null) await Task.Delay(10);
         }
 
         var result = await processTask;
+        capturedSource ??= await CaptureCurrentSourceAsync();
         AssertTrue(capturedSource is not null,
             $"The compiler should leave its generated static-trait C# available while the build runs. " +
             $"exit={result.ExitCode}, stdout=<{result.StandardOutput}>, stderr=<{result.StandardError}>");
@@ -8634,7 +8646,7 @@ internal static partial class IntegrationTests
             "name = \"Git-Library\"\nversion = \"0.1.0\"\nkind = \"lib\"\nsource_root = \"src\"\n");
         await File.WriteAllTextAsync(
             Path.Combine(gitRepository, "src", "greeting", "lib.lang"),
-            "module greeting::lib;\npub fn identity(value: Text) -> Text effects {} { return value; }\n");
+            GenericValidationLibrarySource("greeting::lib"));
 
         var gitHome = Path.Combine(harness.TemporaryRoot, "project-workflow-git-home");
         var gitConfig = Path.Combine(harness.TemporaryRoot, "project-workflow-gitconfig");
@@ -8683,7 +8695,7 @@ internal static partial class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = "module app::main;\n"
-                    + "pub fn main() -> Text effects {} { return git_library::greeting::lib::identity(\"cached\"); }\n"
+                    + "pub fn main() -> Text effects {} { return match git_library::greeting::lib::normalize(\" cached \") { git_library::greeting::lib::Validation.Valid(value) => value.value, git_library::greeting::lib::Validation.Invalid(error) => \"invalid\" }; }\n"
                     + "test \"pinned package call\" { assert self::app::main::main() == \"cached\"; }\n"
             });
         var createGitLock = await harness.InvokePackageDirectoryWithEnvironmentAsync(
@@ -8740,7 +8752,7 @@ internal static partial class IntegrationTests
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["src/app/main.lang"] = "module app::main;\n"
-                    + "pub fn main() -> Text effects {} { return git_library::greeting::lib::identity(\"cached\"); }\n"
+                    + "pub fn main() -> Text effects {} { return match git_library::greeting::lib::normalize(\" cached \") { git_library::greeting::lib::Validation.Valid(value) => value.value, git_library::greeting::lib::Validation.Invalid(error) => \"invalid\" }; }\n"
                     + "test \"pinned package call\" { assert self::app::main::main() == \"cached\"; }\n"
             });
         var gitAdd = await harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
@@ -8867,6 +8879,7 @@ internal static partial class IntegrationTests
             AssertEqual(0, api.ExitCode, Describe(api));
             AssertTrue(!api.StandardOutput.Contains(Path.GetFullPath(gitCache), StringComparison.OrdinalIgnoreCase),
                 "Inspect output must not expose the absolute package-cache path.");
+            AssertGenericTraitReportFacts(api.StandardOutput, audit.StandardOutput, "git_library", expectVisibleImpl: true);
 
             var effects = await harness.InvokeCompilerCommandWithEnvironmentAsync(
                 packageCacheEnvironment, "inspect", "effects", consumer,
@@ -8886,6 +8899,18 @@ internal static partial class IntegrationTests
         var relocatedAudit = await harness.InvokePackageDirectoryWithEnvironmentAsync(
             "project-workflow-git-relocated-audit", gitConsumerRoot, "audit", relocatedEnvironment, "--json");
         AssertEqual(0, relocatedAudit.ExitCode, Describe(relocatedAudit));
+        var relocatedApi = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            relocatedEnvironment, "inspect", "api", gitConsumerRoot, "--json");
+        AssertEqual(0, relocatedApi.ExitCode, Describe(relocatedApi));
+        AssertGenericTraitReportFacts(relocatedApi.StandardOutput, relocatedAudit.StandardOutput,
+            "git_library", expectVisibleImpl: true);
+        AssertTrue(!relocatedApi.StandardOutput.Contains(Path.GetFullPath(relocatedCache), StringComparison.OrdinalIgnoreCase),
+            "Relocated inspect-api output must not expose the configured cache path.");
+        var originalApi = await harness.InvokeCompilerCommandWithEnvironmentAsync(
+            packageCacheEnvironment, "inspect", "api", gitConsumerRoot, "--json");
+        AssertEqual(0, originalApi.ExitCode, Describe(originalApi));
+        AssertEqual(originalApi.StandardOutput, relocatedApi.StandardOutput,
+            "Equivalent Git cache contents at different cache roots must produce identical API JSON.");
         var originalAudit = await harness.InvokePackageDirectoryWithEnvironmentAsync(
             "project-workflow-git-original-audit", gitConsumerRoot, "audit", packageCacheEnvironment, "--json");
         AssertEqual(originalAudit.StandardOutput, relocatedAudit.StandardOutput,
@@ -9538,6 +9563,9 @@ internal static partial class IntegrationTests
             "The maintained web page must use the safe Html builder API.");
         AssertTrue(source.Contains("validation::text::validation::normalize", StringComparison.Ordinal),
             "The POST handler must normalize its request through the shared validation library.");
+        AssertTrue(source.Contains("Validation.Valid", StringComparison.Ordinal)
+            && source.Contains(".value", StringComparison.Ordinal),
+            "The POST handler must match the generic validation union and explicitly project Normalized<Text>.value.");
         AssertTrue(source.Contains("db.query_one", StringComparison.Ordinal)
             && source.Contains("tx.execute", StringComparison.Ordinal)
             && source.Contains("DbError.Statement", StringComparison.Ordinal)
@@ -9667,12 +9695,54 @@ internal static partial class IntegrationTests
         var runtimeDependencyRoot = Path.Combine(runtimeCopyRoot, "text-validation");
         CopyMaintainedPackageInputs(packageRoot, runtimePackageRoot, includeSqliteSchema: true);
         CopyMaintainedPackageInputs(Path.Combine(harness.RepositoryRoot, "examples", "text-validation"), runtimeDependencyRoot);
+        var runtimeSourcePath = Path.Combine(runtimePackageRoot, "src", "app", "main.lang");
+        var runtimeSource = (await File.ReadAllTextAsync(runtimeSourcePath))
+            .Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        const string createHandlerSignature =
+            "fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects { db.write } {";
+        AssertTrue(runtimeSource.Contains(createHandlerSignature, StringComparison.Ordinal),
+            "The copied web source must retain the expected create handler signature before N3 instrumentation.");
+        var instrumentedSource = runtimeSource.Replace(createHandlerSignature,
+            "fn create(request: self::app::main::GreetingRequest, writer: FsWrite, db: DbWrite) -> self::app::main::CreateReply effects { fs.write, db.write } {\n"
+            + "    let invoked: Result<bool, FsError> = writer.write_text(\"data/create-handler-invoked.txt\", \"invoked\");",
+            StringComparison.Ordinal);
+        await File.WriteAllTextAsync(runtimeSourcePath, instrumentedSource, new UTF8Encoding(false));
+        var runtimeCopyLock = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-runtime-instrumented-lock", runtimePackageRoot, "lock");
+        AssertEqual(0, runtimeCopyLock.ExitCode, Describe(runtimeCopyLock));
         var port = GetUnusedLoopbackPort();
         var baseAddress = new Uri($"http://127.0.0.1:{port}");
         var client = new HttpClient { BaseAddress = baseAddress, Timeout = TimeSpan.FromSeconds(4) };
         var noteDirectory = Path.Combine(runtimePackageRoot, "data");
         Directory.CreateDirectory(noteDirectory);
         var notePath = Path.Combine(noteDirectory, "async-note.txt");
+        var invocationMarkerPath = Path.Combine(noteDirectory, "create-handler-invoked.txt");
+        const string invocationMarker = "invoked";
+        void ResetInvocationMarker()
+        {
+            if (File.Exists(invocationMarkerPath))
+                File.Delete(invocationMarkerPath);
+            AssertTrue(!File.Exists(invocationMarkerPath),
+                "The invocation marker must be absent immediately before each calibrated request.");
+        }
+        void AssertInvocationMarker(string requestDescription)
+        {
+            AssertTrue(File.Exists(invocationMarkerPath),
+                $"The {requestDescription} should enter the create handler and write its invocation marker.");
+            AssertEqual(invocationMarker, File.ReadAllText(invocationMarkerPath),
+                $"The {requestDescription} should write the exact constant invocation marker.");
+        }
+        async Task AssertRejectedBeforeCreateHandlerAsync(
+            string requestDescription,
+            Func<Task<HttpResponseMessage>> send,
+            HttpStatusCode expectedStatus)
+        {
+            ResetInvocationMarker();
+            using var response = await send();
+            AssertEqual(expectedStatus, response.StatusCode, $"The {requestDescription} should be rejected with {expectedStatus}.");
+            AssertTrue(!File.Exists(invocationMarkerPath),
+                $"The {requestDescription} must be rejected before the handler changes persisted state.");
+        }
         using var process = harness.StartWebPackageProcessWithEnvironment(
             "maintained-web-run", runtimePackageRoot, databaseEnvironment, "--urls", baseAddress.ToString().TrimEnd('/'));
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -9740,6 +9810,7 @@ internal static partial class IntegrationTests
                     "A 205 response must not set a content type.");
             }
 
+            ResetInvocationMarker();
             using (var created = await client.PostAsync("/api/greeting", JsonBody(
                        "{\"name\":\" Ada \",\"profile\":{\"city\":\"Paris\"}}")))
             {
@@ -9751,6 +9822,7 @@ internal static partial class IntegrationTests
                 AssertEqual("Paris", response.RootElement.GetProperty("profile").GetProperty("city").GetString(),
                     "The POST route should preserve its nested JSON request and response values.");
             }
+            AssertInvocationMarker("valid success request");
 
             using (var lookupWithoutOptionalCity = await client.GetAsync("/api/greeting/1?name=Ada"))
             {
@@ -9811,51 +9883,56 @@ internal static partial class IntegrationTests
                     "Persisted user text must not render an executable script element.");
             }
 
+            ResetInvocationMarker();
             using (var invalid = await client.PostAsync("/api/greeting", JsonBody(
                        "{\"name\":\"  \",\"profile\":{\"city\":\"Paris\"}}")))
                 AssertEqual(HttpStatusCode.BadRequest, invalid.StatusCode,
                     "A validation failure should select the mapped Invalid status.");
+            AssertInvocationMarker("validly decoded domain-error request");
 
-            using (var malformed = await client.PostAsync("/api/greeting", JsonBody("{broken")))
-                AssertEqual(HttpStatusCode.BadRequest, malformed.StatusCode,
-                    "Malformed JSON should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "malformed JSON", () => client.PostAsync("/api/greeting", JsonBody("{broken")), HttpStatusCode.BadRequest);
 
-            using (var wrongShape = await client.PostAsync("/api/greeting", JsonBody(
-                       "{\"name\":42,\"profile\":{\"city\":\"Paris\"}}")))
-                AssertEqual(HttpStatusCode.BadRequest, wrongShape.StatusCode,
-                    "A JSON body with an incompatible field type should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "incompatible top-level JSON type", () => client.PostAsync("/api/greeting", JsonBody("[]")), HttpStatusCode.BadRequest);
 
-            using (var unknownField = await client.PostAsync("/api/greeting", JsonBody(
-                       "{\"name\":\"Ada\",\"profile\":{\"city\":\"Paris\"},\"extra\":true}")))
-                AssertEqual(HttpStatusCode.BadRequest, unknownField.StatusCode,
-                    "A JSON body with an unknown field should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "incompatible top-level field type",
+                () => client.PostAsync("/api/greeting", JsonBody("{\"name\":42,\"profile\":{\"city\":\"Paris\"}}")),
+                HttpStatusCode.BadRequest);
 
-            using (var duplicateField = await client.PostAsync("/api/greeting", JsonBody(
-                       "{\"name\":\"Ada\",\"name\":\"Grace\",\"profile\":{\"city\":\"Paris\"}}")))
-                AssertEqual(HttpStatusCode.BadRequest, duplicateField.StatusCode,
-                    "A JSON body with a duplicate field should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "unknown JSON field",
+                () => client.PostAsync("/api/greeting", JsonBody("{\"name\":\"Ada\",\"profile\":{\"city\":\"Paris\"},\"extra\":true}")),
+                HttpStatusCode.BadRequest);
 
-            using (var missingField = await client.PostAsync("/api/greeting", JsonBody(
-                       "{\"name\":\"Ada\"}")))
-                AssertEqual(HttpStatusCode.BadRequest, missingField.StatusCode,
-                    "A JSON body missing a required nested field should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "duplicate JSON field",
+                () => client.PostAsync("/api/greeting", JsonBody("{\"name\":\"Ada\",\"name\":\"Grace\",\"profile\":{\"city\":\"Paris\"}}")),
+                HttpStatusCode.BadRequest);
 
-            using (var nestedWrongShape = await client.PostAsync("/api/greeting", JsonBody(
-                       "{\"name\":\"Ada\",\"profile\":{\"city\":42}}")))
-                AssertEqual(HttpStatusCode.BadRequest, nestedWrongShape.StatusCode,
-                    "A nested JSON field with an incompatible type should be rejected with 400.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "missing JSON field",
+                () => client.PostAsync("/api/greeting", JsonBody("{\"name\":\"Ada\"}")),
+                HttpStatusCode.BadRequest);
+
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "incompatible nested JSON field type",
+                () => client.PostAsync("/api/greeting", JsonBody("{\"name\":\"Ada\",\"profile\":{\"city\":42}}")),
+                HttpStatusCode.BadRequest);
 
             var boundaryPrefix = "{\"name\":\"Ada\",\"profile\":{\"city\":\"Paris\"}}";
             var exactlyOneMiB = boundaryPrefix + new string(' ', 1_048_576 - Encoding.UTF8.GetByteCount(boundaryPrefix));
+            ResetInvocationMarker();
             using (var boundary = await client.PostAsync("/api/greeting", JsonBody(exactlyOneMiB)))
                 AssertEqual(HttpStatusCode.Created, boundary.StatusCode,
                     "A valid request body exactly at the 1 MiB limit should be accepted.");
+            AssertInvocationMarker("valid 1 MiB boundary request");
 
             var oversizedJson = "{\"name\":\"" + new string('x', 1_048_600)
                 + "\",\"profile\":{\"city\":\"Paris\"}}";
-            using (var oversized = await client.PostAsync("/api/greeting", JsonBody(oversizedJson)))
-                AssertEqual((HttpStatusCode)413, oversized.StatusCode,
-                    "A request body over the managed host's 1 MiB limit should return 413.");
+            await AssertRejectedBeforeCreateHandlerAsync(
+                "oversized Content-Length JSON", () => client.PostAsync("/api/greeting", JsonBody(oversizedJson)), (HttpStatusCode)413);
 
             var oversizedBytes = Encoding.UTF8.GetBytes(oversizedJson);
             using (var chunkedContent = new StreamContent(new NonSeekableMemoryStream(oversizedBytes)))
@@ -9868,9 +9945,8 @@ internal static partial class IntegrationTests
                 chunkedRequest.Headers.TransferEncodingChunked = true;
                 AssertTrue(chunkedContent.Headers.ContentLength is null,
                     "The oversized stream request must not declare Content-Length.");
-                using var chunkedOversized = await client.SendAsync(chunkedRequest);
-                AssertEqual((HttpStatusCode)413, chunkedOversized.StatusCode,
-                    "A chunked body over the managed host's 1 MiB limit should return 413.");
+                await AssertRejectedBeforeCreateHandlerAsync(
+                    "oversized chunked JSON", () => client.SendAsync(chunkedRequest), (HttpStatusCode)413);
             }
 
             using (var missing = await client.GetAsync("/not-found"))
@@ -10025,6 +10101,67 @@ internal static partial class IntegrationTests
 
             await Task.WhenAll(directStdoutTask, directStderrTask);
             await AssertLoopbackPortReleasedAsync(directPort);
+        }
+
+        var unmappedGraphRoot = Path.Combine(harness.TemporaryRoot, $"maintained-web-unmapped-{Guid.NewGuid():N}");
+        var unmappedPackageRoot = Path.Combine(unmappedGraphRoot, "web");
+        CopyMaintainedPackageInputs(packageRoot, unmappedPackageRoot, includeSqliteSchema: true);
+        CopyMaintainedPackageInputs(Path.Combine(harness.RepositoryRoot, "examples", "text-validation"),
+            Path.Combine(unmappedGraphRoot, "text-validation"));
+        var unmappedSource = source.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        const string createReplyDeclaration =
+            "union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text) }";
+        AssertTrue(unmappedSource.Contains(createReplyDeclaration, StringComparison.Ordinal),
+            "The maintained web fixture must retain its expected CreateReply declaration.");
+        unmappedSource = unmappedSource.Replace(createReplyDeclaration,
+            "union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text), Unmapped }",
+            StringComparison.Ordinal);
+        const string createResponseMapping =
+            "    response StorageFailure: 500 json Text;\n}\n\nroute POST \"/api/note\"";
+        AssertTrue(unmappedSource.Contains(createResponseMapping, StringComparison.Ordinal),
+            "The maintained web fixture must retain the expected create-route response mapping.");
+        var unmappedSourcePath = Path.Combine(unmappedPackageRoot, "src", "app", "main.lang");
+        var unmappedMapping = "    response StorageFailure: 500 json Text;\n    response Unmapped: 409;\n}\n\nroute POST \"/api/note\"";
+        await File.WriteAllTextAsync(unmappedSourcePath, unmappedSource, new UTF8Encoding(false));
+        var unmappedLock = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-unmapped-reply-lock", unmappedPackageRoot, "lock");
+        AssertEqual(0, unmappedLock.ExitCode, Describe(unmappedLock));
+
+        var unmappedCheck = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-unmapped-reply-check", unmappedPackageRoot, "check", "--json");
+        AssertEqual(1, unmappedCheck.ExitCode, Describe(unmappedCheck));
+        var unmappedDiagnostics = ParseDiagnosticSnapshots(unmappedCheck.StandardOutput);
+        AssertEqual(1, unmappedDiagnostics.Length, Describe(unmappedCheck));
+        AssertEqual("E_ROUTE_RESPONSE_MISSING", unmappedDiagnostics[0].Code, Describe(unmappedCheck));
+        AssertEqual("Route responses are missing variants: Unmapped", unmappedDiagnostics[0].Message, Describe(unmappedCheck));
+        AssertRangeAtToken(unmappedSource, unmappedDiagnostics[0], "route", 4);
+        var unmappedBuild = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-unmapped-reply-build", unmappedPackageRoot, "build");
+        AssertEqual(1, unmappedBuild.ExitCode, Describe(unmappedBuild));
+        AssertTrue(!Directory.Exists(Path.Combine(unmappedPackageRoot, "out")),
+            "An unmapped route reply must not produce a build artifact.");
+        AssertTrue(!Directory.EnumerateFiles(unmappedPackageRoot, "openapi.json", SearchOption.AllDirectories).Any()
+            && !Directory.EnumerateFiles(unmappedPackageRoot, "build-receipt.json", SearchOption.AllDirectories).Any(),
+            "An unmapped route reply must not produce OpenAPI or a build receipt.");
+
+        var mappedSource = unmappedSource.Replace(createResponseMapping, unmappedMapping, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(unmappedSourcePath, mappedSource, new UTF8Encoding(false));
+        var mappedLock = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-mapped-reply-lock", unmappedPackageRoot, "lock");
+        AssertEqual(0, mappedLock.ExitCode, Describe(mappedLock));
+        var mappedCheck = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-mapped-reply-check", unmappedPackageRoot, "check", "--json");
+        AssertEqual(0, mappedCheck.ExitCode, Describe(mappedCheck));
+        var mappedBuild = await harness.InvokePackageDirectoryAsync(
+            "maintained-web-mapped-reply-build", unmappedPackageRoot, "build");
+        var mappedArtifact = AssertBuiltWebApplication(mappedBuild, unmappedPackageRoot);
+        var mappedOpenApiPath = Path.Combine(Path.GetDirectoryName(mappedArtifact)!, "openapi.json");
+        using (var mappedOpenApi = JsonDocument.Parse(await File.ReadAllBytesAsync(mappedOpenApiPath)))
+        {
+            var responses = mappedOpenApi.RootElement.GetProperty("paths").GetProperty("/api/greeting")
+                .GetProperty("post").GetProperty("responses");
+            AssertTrue(responses.TryGetProperty("409", out _),
+                "Adding the Unmapped response mapping must restore successful checking and generated OpenAPI.");
         }
 
     }
@@ -11325,6 +11462,80 @@ internal static partial class IntegrationTests
             "Permission denied",
             "File read failed",
             "Invalid file path");
+
+        var missingGrantGraphRoot = Path.Combine(harness.TemporaryRoot, $"scan-cli-missing-grant-{Guid.NewGuid():N}");
+        var missingGrantRoot = Path.Combine(missingGrantGraphRoot, "scan-cli");
+        var missingGrantDependency = Path.Combine(missingGrantGraphRoot, "text-validation");
+        CopyMaintainedPackageInputs(packageRoot, missingGrantRoot);
+        CopyMaintainedPackageInputs(Path.Combine(harness.RepositoryRoot, "examples", "text-validation"), missingGrantDependency);
+        var missingGrantManifestPath = Path.Combine(missingGrantRoot, "lang.toml");
+        var originalManifest = await File.ReadAllTextAsync(missingGrantManifestPath);
+        var noGrantManifest = originalManifest.Replace("[capabilities]\nfs.read = \"allow\"\n", "[capabilities]\n", StringComparison.Ordinal);
+        AssertTrue(noGrantManifest != originalManifest,
+            "The scanner capability fixture must contain the expected root fs.read grant.");
+        await File.WriteAllTextAsync(missingGrantManifestPath, noGrantManifest, new UTF8Encoding(false));
+        var staleGrantCheck = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-missing-grant-stale-check", missingGrantRoot, "check", "--json");
+        AssertEqual(1, staleGrantCheck.ExitCode, Describe(staleGrantCheck));
+        var staleGrantDiagnostics = ParseDiagnosticSnapshots(staleGrantCheck.StandardOutput);
+        AssertEqual(1, staleGrantDiagnostics.Length, Describe(staleGrantCheck));
+        AssertEqual("E_LOCK", staleGrantDiagnostics[0].Code, Describe(staleGrantCheck));
+
+        var noGrantLock = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-missing-grant-relock", missingGrantRoot, "lock");
+        AssertEqual(0, noGrantLock.ExitCode, Describe(noGrantLock));
+        var missingGrantCheck = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-missing-grant-check", missingGrantRoot, "check", "--json");
+        AssertEqual(1, missingGrantCheck.ExitCode, Describe(missingGrantCheck));
+        var missingGrantDiagnostics = ParseDiagnosticSnapshots(missingGrantCheck.StandardOutput);
+        AssertEqual(1, missingGrantDiagnostics.Length, Describe(missingGrantCheck));
+        AssertEqual("E_CAPABILITY_MISSING", missingGrantDiagnostics[0].Code, Describe(missingGrantCheck));
+        AssertEqual("Command handler requires the root package's fs.read capability grant",
+            missingGrantDiagnostics[0].Message, Describe(missingGrantCheck));
+        var commandSource = await File.ReadAllTextAsync(Path.Combine(missingGrantRoot, "src", "app", "main.lang"));
+        AssertRangeAtToken(commandSource, missingGrantDiagnostics[0], "self", 1);
+        var missingGrantBuild = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-missing-grant-build", missingGrantRoot, "build");
+        AssertTrue(missingGrantBuild.ExitCode != 0, Describe(missingGrantBuild));
+        AssertTrue((missingGrantBuild.StandardOutput + missingGrantBuild.StandardError)
+                .Contains("E_CAPABILITY_MISSING", StringComparison.Ordinal)
+            && (missingGrantBuild.StandardOutput + missingGrantBuild.StandardError)
+                .Contains("Command handler requires the root package's fs.read capability grant", StringComparison.Ordinal),
+            $"A missing root fs.read grant must reject the build with its stable diagnostic. {Describe(missingGrantBuild)}");
+        AssertTrue(!missingGrantBuild.StandardOutput.Contains("Built executable: ", StringComparison.Ordinal),
+            "A missing root fs.read grant must not print a success artifact prefix.");
+        var missingGrantOutput = Path.Combine(missingGrantRoot, "out");
+        AssertTrue(!Directory.Exists(missingGrantOutput)
+            || !Directory.EnumerateFileSystemEntries(missingGrantOutput, "*", SearchOption.AllDirectories).Any(),
+            "A missing root fs.read grant must fail before leaving any build output.");
+
+        await File.WriteAllTextAsync(missingGrantManifestPath, originalManifest, new UTF8Encoding(false));
+        var staleRestoredGrant = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-restored-grant-stale-check", missingGrantRoot, "check", "--json");
+        AssertGenericLockDiagnostic(staleRestoredGrant, "restored scanner fs.read grant");
+        var restoredGrantLock = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-restored-grant-relock", missingGrantRoot, "lock");
+        AssertEqual(0, restoredGrantLock.ExitCode, Describe(restoredGrantLock));
+        var restoredGrantCheck = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-restored-grant-check", missingGrantRoot, "check", "--json");
+        AssertEqual(0, restoredGrantCheck.ExitCode, Describe(restoredGrantCheck));
+        var restoredGrantBuild = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-restored-grant-build", missingGrantRoot, "build");
+        AssertEqual(0, restoredGrantBuild.ExitCode, Describe(restoredGrantBuild));
+        var restoredExecutablePath = ParseBuiltArtifact(restoredGrantBuild, "Built executable: ");
+        using (var restoredSchema = JsonDocument.Parse(
+                   await File.ReadAllBytesAsync(Path.Combine(Path.GetDirectoryName(restoredExecutablePath)!, "command-schema.json"))))
+        {
+            var restoredCapabilities = restoredSchema.RootElement.GetProperty("commands")[0].GetProperty("capabilities");
+            AssertEqual(1, restoredCapabilities.GetArrayLength(),
+                "Restoring the root grant must restore exactly the scanner's fs.read command requirement.");
+            AssertEqual("fs.read", restoredCapabilities[0].GetString(),
+                "The relocked scanner command schema must require only fs.read.");
+        }
+        var restoredNormalizedRun = await harness.InvokePackageDirectoryAsync(
+            "scan-cli-restored-grant-normalized-run", missingGrantRoot,
+            "run", "--", "scan", textPath, "--normalize");
+        AssertRunOutput("scan λ 😀" + Environment.NewLine, restoredNormalizedRun);
     }
 
     private static async Task TestTextValidationExample(Harness harness)
@@ -11355,8 +11566,8 @@ internal static partial class IntegrationTests
                 module app::main;
                 pub fn main() -> Text effects {} {
                     return match self::text::validation::normalize("") {
-                        Ok(value) => "unexpected success",
-                        Err(error) => match error {
+                        self::text::validation::Validation.Valid(value) => "unexpected success",
+                        self::text::validation::Validation.Invalid(error) => match error {
                             self::text::validation::NormalizeError.Empty => "empty",
                         },
                     };
@@ -11366,8 +11577,8 @@ internal static partial class IntegrationTests
                 module app::main;
                 pub fn main() -> Text effects {} {
                     return match self::text::validation::normalize("{{unicodeInput}}") {
-                        Ok(value) => value,
-                        Err(error) => "unexpected error",
+                        self::text::validation::Validation.Valid(value) => value.value,
+                        self::text::validation::Validation.Invalid(error) => "unexpected error",
                     };
                 }
                 """, "hello 😀" + Environment.NewLine)
@@ -11393,6 +11604,73 @@ internal static partial class IntegrationTests
             AssertRunOutput(expectedOutput, run);
         }
 
+        var nominalOptionSource = """
+            module app::main;
+            fn return_normalized(candidate: Option<validation::text::validation::Normalized<Text>>) ->
+                validation::text::validation::Normalized<Text> effects {} {
+                return candidate;
+            }
+            pub fn main() -> i32 effects {} {
+                let normalized: validation::text::validation::Validation<validation::text::validation::Normalized<Text>> =
+                    validation::text::validation::normalize("ready");
+                let maybe: Option<validation::text::validation::Normalized<Text>> = match normalized {
+                    validation::text::validation::Validation.Valid(value) => Some(value),
+                    validation::text::validation::Validation.Invalid(error) => None,
+                };
+                return self::app::main::return_normalized(maybe).value.length;
+            }
+            """;
+        var nominalOptionManifest = CliPackageManifest()
+            .Replace("name = \"harness-package\"", "name = \"text-validation-option-is-not-normalized\"", StringComparison.Ordinal)
+            + "\n[dependencies]\nvalidation = \"../validation\"\n";
+        var nominalOptionRoot = await harness.WritePackageGraphAsync(
+            "text-validation-option-is-not-normalized",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(nominalOptionManifest,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = nominalOptionSource
+                    }),
+                ["validation"] = new PackageFixture(LibraryPackageManifest("text-validation-library"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/text/validation.lang"] = librarySource
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "text-validation-option-is-not-normalized-lock", nominalOptionRoot, "lock"));
+        var nominalOptionCheck = await harness.InvokePackageDirectoryAsync(
+            "text-validation-option-is-not-normalized-check", nominalOptionRoot, "check", "--json");
+        AssertEqual(1, nominalOptionCheck.ExitCode, Describe(nominalOptionCheck));
+        using (var mismatchDocument = JsonDocument.Parse(nominalOptionCheck.StandardOutput))
+        {
+            AssertJsonPropertyOrder(mismatchDocument.RootElement, "schemaVersion,diagnostics");
+            AssertEqual(1, mismatchDocument.RootElement.GetProperty("schemaVersion").GetInt32(),
+                "The cross-package N1 failure must use diagnostics schema 1.");
+            AssertEqual(1, mismatchDocument.RootElement.GetProperty("diagnostics").GetArrayLength(),
+                $"The cross-package N1 failure must contain exactly one diagnostic. {Describe(nominalOptionCheck)}");
+        }
+        var nominalOptionDiagnostics = ParseDiagnosticSnapshots(nominalOptionCheck.StandardOutput);
+        AssertEqual(1, nominalOptionDiagnostics.Length, Describe(nominalOptionCheck));
+        AssertEqual("E_TYPE_MISMATCH", nominalOptionDiagnostics[0].Code, Describe(nominalOptionCheck));
+        AssertEqual(Path.GetFullPath(Path.Combine(nominalOptionRoot, "src", "app", "main.lang")),
+            Path.GetFullPath(nominalOptionDiagnostics[0].File),
+            "The cross-package nominal mismatch must point to the current consumer source.");
+        AssertRangeAtToken(nominalOptionSource, nominalOptionDiagnostics[0], "candidate", 2);
+        var nominalOptionBuild = await harness.InvokePackageDirectoryAsync(
+            "text-validation-option-is-not-normalized-build", nominalOptionRoot, "build");
+        AssertTrue(nominalOptionBuild.ExitCode != 0, Describe(nominalOptionBuild));
+        AssertTrue((nominalOptionBuild.StandardOutput + nominalOptionBuild.StandardError)
+                .Contains("E_TYPE_MISMATCH", StringComparison.Ordinal),
+            $"The cross-package nominal mismatch build must report E_TYPE_MISMATCH. {Describe(nominalOptionBuild)}");
+        AssertTrue(!nominalOptionBuild.StandardOutput.Contains("Built executable: ", StringComparison.Ordinal),
+            "A rejected cross-package nominal mismatch build must not print a success artifact prefix.");
+        var nominalOptionOutput = Path.Combine(nominalOptionRoot, "out");
+        AssertTrue(!Directory.Exists(nominalOptionOutput)
+            || !Directory.EnumerateFiles(nominalOptionOutput, "*", SearchOption.AllDirectories).Any(),
+            "A rejected cross-package nominal mismatch must not leave an artifact, receipt, or schema.");
+
         var genericConsumer = await harness.WritePackageAsync(
             "text-validation-generic-consumer",
             CliPackageManifest(),
@@ -11402,12 +11680,17 @@ internal static partial class IntegrationTests
                 ["src/app/main.lang"] = """
                     module app::main;
                     pub fn main() -> i32 effects {} {
-                        let text_option: Option<Text> = Some("hello 😀");
-                        let text_result: Result<Text, self::text::validation::NormalizeError> = self::text::validation::require(text_option, self::text::validation::NormalizeError.Empty);
+                        let normalized: self::text::validation::Validation<self::text::validation::Normalized<Text>> = self::text::validation::normalize("hello 😀");
+                        let normalized_value: self::text::validation::Normalized<Text> = match normalized {
+                            self::text::validation::Validation.Valid(value) => value,
+                            self::text::validation::Validation.Invalid(error) => self::text::validation::Normalized<Text> { value: "" },
+                        };
+                        let text_option: Option<self::text::validation::Normalized<Text>> = Some(normalized_value);
+                        let text_result: Result<self::text::validation::Normalized<Text>, self::text::validation::NormalizeError> = self::text::validation::require(text_option, self::text::validation::NormalizeError.Empty);
                         let number_option: Option<i32> = Some(35);
                         let number_result: Result<i32, Text> = self::text::validation::require(number_option, "missing");
                         let text_length: i32 = match text_result {
-                            Ok(value) => value.length,
+                            Ok(value) => value.value.length,
                             Err(error) => match error {
                                 self::text::validation::NormalizeError.Empty => 0,
                             },
@@ -11423,10 +11706,284 @@ internal static partial class IntegrationTests
             "text-validation-generic-consumer-check", genericConsumer, "check", "--json");
         AssertEqual(0, genericCheck.ExitCode, Describe(genericCheck));
         AssertEqual(0, ParseDiagnosticSnapshots(genericCheck.StandardOutput).Length,
-            "Both inferred generic instantiations and their exhaustive Result matches should check cleanly.");
+            "Generic trait dispatch, explicit generic wrappers, and both require instantiations should check cleanly.");
         var genericRun = await harness.InvokePackageDirectoryAsync(
             "text-validation-generic-consumer-run", genericConsumer, "run");
         AssertRunOutput("42" + Environment.NewLine, genericRun);
+    }
+
+    private static string GenericValidationLibrarySource(string modulePath) => $$"""
+        module {{modulePath}};
+
+        pub struct Normalized<T> { value: T }
+
+        pub union NormalizeError { Empty }
+
+        pub union Validation<T> { Valid(T), Invalid(self::{{modulePath}}::NormalizeError) }
+
+        pub trait Normalize {
+            fn normalize(input: Self) -> Result<Self, self::{{modulePath}}::NormalizeError> effects {};
+        }
+
+        fn normalize_text(input: Text) -> Result<Text, self::{{modulePath}}::NormalizeError> effects {} {
+            if input.length == 0 {
+                return Err(self::{{modulePath}}::NormalizeError.Empty);
+            }
+
+            return Ok(input.trim());
+        }
+
+        pub impl self::{{modulePath}}::Normalize for Text {
+            normalize = self::{{modulePath}}::normalize_text;
+        }
+
+        pub fn normalize<T: self::{{modulePath}}::Normalize>(input: T) -> self::{{modulePath}}::Validation<self::{{modulePath}}::Normalized<T>> effects {} {
+            return match self::{{modulePath}}::Normalize.normalize(input) {
+                Ok(value) => self::{{modulePath}}::Validation<self::{{modulePath}}::Normalized<T>>.Valid(
+                    self::{{modulePath}}::Normalized<T> { value: value }
+                ),
+                Err(error) => self::{{modulePath}}::Validation<self::{{modulePath}}::Normalized<T>>.Invalid(error),
+            };
+        }
+
+        pub fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
+            return match value {
+                Some(item) => Ok(item),
+                None => Err(error),
+            };
+        }
+        """;
+
+    private static void AssertGenericTraitReportFacts(
+        string apiJson,
+        string auditJson,
+        string dependencyAlias,
+        bool expectVisibleImpl)
+    {
+        using var apiDocument = JsonDocument.Parse(apiJson);
+        using var auditDocument = JsonDocument.Parse(auditJson);
+        var api = apiDocument.RootElement;
+        var audit = auditDocument.RootElement;
+        AssertInspectApiPropertyOrder(api);
+        AssertAuditPropertyOrder(audit);
+        AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses inspect API schema 10.");
+        AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses audit schema 8.");
+
+        bool HasSourceId(JsonElement declaration, string sourceId) =>
+            declaration.TryGetProperty("source_ids", out var sourceIds)
+            && sourceIds.ValueKind == JsonValueKind.Array
+            && sourceIds.EnumerateArray()
+                .Any(candidate => string.Equals(candidate.GetString(), sourceId, StringComparison.Ordinal));
+
+        var normalize = api.GetProperty("functions").EnumerateArray()
+            .Single(item => item.GetProperty("source_ids").EnumerateArray()
+                .Any(sourceId => sourceId.GetString()?.StartsWith(dependencyAlias + "::", StringComparison.Ordinal) == true
+                    && sourceId.GetString()?.EndsWith("::normalize", StringComparison.Ordinal) == true));
+        var normalizeSourceId = normalize.GetProperty("source_ids").EnumerateArray()
+            .Select(sourceId => sourceId.GetString() ?? string.Empty)
+            .Single(sourceId => sourceId.StartsWith(dependencyAlias + "::", StringComparison.Ordinal)
+                && sourceId.EndsWith("::normalize", StringComparison.Ordinal));
+        var normalizeIdentitySuffix = normalizeSourceId[(dependencyAlias.Length + 2)..];
+        var finalSeparator = normalizeIdentitySuffix.LastIndexOf("::", StringComparison.Ordinal);
+        AssertTrue(finalSeparator > 0, "The generic normalize API identity must contain its declaring module.");
+        var modulePath = normalizeIdentitySuffix[..finalSeparator];
+        var normalizedSourceId = $"{dependencyAlias}::{modulePath}::Normalized";
+        var validationSourceId = $"{dependencyAlias}::{modulePath}::Validation";
+        var normalized = api.GetProperty("structs").EnumerateArray()
+            .Single(item => HasSourceId(item, normalizedSourceId));
+        AssertJsonPropertyOrder(normalized, "id,source_ids,package,type_parameters,fields");
+        var normalizedParameter = normalized.GetProperty("type_parameters")[0];
+        AssertJsonPropertyOrder(normalizedParameter, "name,ordinal");
+        AssertEqual("T", normalizedParameter.GetProperty("name").GetString(),
+            "Normalized<T> must preserve its declared generic parameter name.");
+        AssertEqual(0, normalizedParameter.GetProperty("ordinal").GetInt32(),
+            "Normalized<T> must preserve its zero-based type parameter ordinal.");
+        var normalizedField = normalized.GetProperty("fields")[0];
+        AssertEqual("value", normalizedField.GetProperty("name").GetString(),
+            "Normalized<T> must expose its value field in declaration order.");
+        AssertEqual("type_parameter", normalizedField.GetProperty("type").GetProperty("kind").GetString(),
+            "Normalized<T>.value must retain the generic parameter in API types.");
+        AssertEqual("T", normalizedField.GetProperty("type").GetProperty("name").GetString(),
+            "Normalized<T>.value must refer to its declared parameter.");
+
+        var validation = api.GetProperty("unions").EnumerateArray()
+            .Single(item => HasSourceId(item, validationSourceId));
+        AssertJsonPropertyOrder(validation, "id,source_ids,package,type_parameters,variants");
+        var validationParameter = validation.GetProperty("type_parameters")[0];
+        AssertJsonPropertyOrder(validationParameter, "name,ordinal");
+        AssertEqual("T", validationParameter.GetProperty("name").GetString(),
+            "Validation<T> must preserve its declared generic parameter.");
+        var validVariant = validation.GetProperty("variants").EnumerateArray()
+            .Single(variant => variant.GetProperty("name").GetString() == "Valid");
+        AssertEqual("type_parameter", validVariant.GetProperty("payload")[0].GetProperty("type").GetProperty("kind").GetString(),
+            "Validation<T>.Valid must retain its generic payload type.");
+        AssertEqual("T", validVariant.GetProperty("payload")[0].GetProperty("type").GetProperty("name").GetString(),
+            "Validation<T>.Valid must refer to its declared parameter.");
+
+        var trait = api.GetProperty("traits").EnumerateArray()
+            .Single(item => HasSourceId(item, $"{dependencyAlias}::{modulePath}::Normalize"));
+        var traitId = trait.GetProperty("id").GetString() ?? string.Empty;
+        AssertTrue(traitId.StartsWith("lang.trait.v1.", StringComparison.Ordinal),
+            "The Normalize trait must use a stable semantic identity.");
+        var traitMethod = trait.GetProperty("methods").EnumerateArray().Single();
+        AssertEqual("normalize", traitMethod.GetProperty("name").GetString(),
+            "The Normalize trait method name should remain stable.");
+        AssertEqual("self", traitMethod.GetProperty("parameters")[0].GetProperty("type").GetProperty("kind").GetString(),
+            "The Normalize method parameter should remain the implicit Self type.");
+        var traitResult = traitMethod.GetProperty("return_type");
+        AssertEqual("result", traitResult.GetProperty("kind").GetString(),
+            "Normalize.normalize must return Result<Self, NormalizeError>.");
+        AssertEqual("self", traitResult.GetProperty("ok").GetProperty("kind").GetString(),
+            "Normalize.normalize must return Self on success; only generic normalize adds the wrapper.");
+        AssertEqual("NormalizeError", traitResult.GetProperty("error").GetProperty("name").GetString(),
+            "Normalize.normalize must retain the declared NormalizeError failure type.");
+
+        var apiImpls = api.GetProperty("trait_impls").EnumerateArray()
+            .Where(item => item.GetProperty("trait").GetString() == traitId).ToArray();
+        if (expectVisibleImpl)
+        {
+            AssertEqual(1, apiImpls.Length,
+                "The public closed Text implementation should be addressable from the root API.");
+            AssertEqual("public", apiImpls[0].GetProperty("visibility").GetString(),
+                "The closed Text implementation should remain public.");
+            AssertEqual("Text", apiImpls[0].GetProperty("target").GetProperty("name").GetString(),
+                "The public implementation should target Text.");
+            AssertEqual("normalize", apiImpls[0].GetProperty("methods")[0].GetString(),
+                "The API should report the fulfilled method without exposing its binding function.");
+        }
+        else
+        {
+            AssertEqual(0, apiImpls.Length,
+                "A package-private implementation must not appear in the source-facing API.");
+        }
+
+        var apiFunctions = api.GetProperty("functions").EnumerateArray().ToArray();
+        AssertTrue(HasSourceId(normalize, normalizeSourceId),
+            "The dependency generic normalize function should retain its source-facing identity.");
+        var normalizeTypeParameter = normalize.GetProperty("type_parameters")[0];
+        AssertJsonPropertyOrder(normalizeTypeParameter, "name,ordinal,bounds");
+        AssertEqual(traitId, normalizeTypeParameter.GetProperty("bounds")[0].GetProperty("trait").GetString(),
+            "Generic normalize must retain its ordered Normalize bound.");
+        var returnType = normalize.GetProperty("return_type");
+        AssertEqual("nominal", returnType.GetProperty("kind").GetString(),
+            "Generic normalize must expose its nominal Validation return type.");
+        AssertEqual("Validation", returnType.GetProperty("name").GetString(),
+            "Generic normalize must return Validation<Normalized<T>>.");
+        var normalizedArgument = returnType.GetProperty("type_arguments")[0];
+        AssertEqual("nominal", normalizedArgument.GetProperty("kind").GetString(),
+            "The Validation payload must retain its nested nominal Normalized type.");
+        AssertEqual("Normalized", normalizedArgument.GetProperty("name").GetString(),
+            "The Validation payload must be Normalized<T>.");
+        AssertEqual("type_parameter", normalizedArgument.GetProperty("type_arguments")[0].GetProperty("kind").GetString(),
+            "The nested Normalized argument must retain the function's generic type parameter.");
+        var forwardedCall = normalize.GetProperty("trait_calls").EnumerateArray()
+            .Single(item => item.GetProperty("kind").GetString() == "method");
+        AssertEqual(traitId, forwardedCall.GetProperty("trait").GetString(),
+            "Generic Normalize dispatch must identify the checked trait.");
+        AssertEqual("normalize", forwardedCall.GetProperty("method").GetString(),
+            "Generic Normalize dispatch must identify the selected method.");
+        var forwardedWitness = forwardedCall.GetProperty("witness");
+        AssertEqual("bound", forwardedWitness.GetProperty("kind").GetString(),
+            "Generic Normalize dispatch must forward its bound witness.");
+        AssertEqual(0, forwardedWitness.GetProperty("type_parameter_ordinal").GetInt32(),
+            "The forwarded witness must identify its type parameter ordinal.");
+        AssertEqual(0, forwardedWitness.GetProperty("bound_ordinal").GetInt32(),
+            "The forwarded witness must identify its bound ordinal.");
+
+        var apiMain = apiFunctions.Single(item => HasSourceId(item, "self::app::main::main"));
+        var apiNormalizeCall = apiMain.GetProperty("calls").EnumerateArray().Single(call =>
+            call.GetProperty("module").GetString() == modulePath
+            && call.GetProperty("name").GetString() == "normalize");
+        AssertTrue(apiNormalizeCall.GetProperty("source_ids").EnumerateArray()
+                .Any(sourceId => sourceId.GetString() == normalizeSourceId),
+            "Public API direct calls must preserve the dependency source identity of generic normalize.");
+        AssertTrue(!apiMain.GetProperty("calls").EnumerateArray()
+                .Any(call => call.GetProperty("name").GetString() == "normalize_text"),
+            "The public API must not expose a private trait implementation binding as a source-level call.");
+        var concreteApiWitness = apiMain.GetProperty("trait_calls").EnumerateArray()
+            .Single(item => item.GetProperty("kind").GetString() == "function_call")
+            .GetProperty("witnesses").EnumerateArray()
+            .Single(item => item.GetProperty("trait").GetString() == traitId)
+            .GetProperty("witness");
+        if (expectVisibleImpl)
+        {
+            AssertEqual("impl", concreteApiWitness.GetProperty("kind").GetString(),
+                "A public root-to-dependency call should expose the addressable closed implementation witness.");
+            AssertEqual(apiImpls[0].GetProperty("id").GetString(), concreteApiWitness.GetProperty("id").GetString(),
+                "The generic call witness should use the API implementation identity.");
+        }
+        else
+        {
+            AssertEqual(JsonValueKind.Null, concreteApiWitness.ValueKind,
+                "A hidden implementation witness must not disclose a private identity through the API.");
+        }
+        AssertTrue(!apiJson.Contains("normalize_text", StringComparison.Ordinal),
+            "The public API must not expose the private Normalize binding function.");
+
+        var compiler = audit.GetProperty("compiler");
+        var auditTrait = compiler.GetProperty("traits").EnumerateArray()
+            .Single(item => item.GetProperty("id").GetString() == traitId);
+        var auditImpl = compiler.GetProperty("trait_impls").EnumerateArray()
+            .Single(item => item.GetProperty("trait").GetString() == traitId
+                && item.GetProperty("target").GetProperty("name").GetString() == "Text");
+        var bindingFunction = auditImpl.GetProperty("methods")[0].GetProperty("binding_function");
+        if (expectVisibleImpl)
+            AssertEqual(apiImpls[0].GetProperty("id").GetString(), auditImpl.GetProperty("id").GetString(),
+                "API and audit should share the portable closed implementation identity.");
+        AssertEqual("normalize_text", bindingFunction.GetProperty("name").GetString(),
+            "Audit must retain the private Normalize binding function identity.");
+        var auditNormalize = compiler.GetProperty("functions").EnumerateArray()
+            .Single(item => item.GetProperty("module").GetString() == modulePath
+                && item.GetProperty("name").GetString() == "normalize");
+        AssertEqual("normalize", auditNormalize.GetProperty("name").GetString(),
+            "Audit must include the generic Normalize dispatch function.");
+        var auditForwarded = auditNormalize.GetProperty("trait_calls").EnumerateArray()
+            .Single(item => item.GetProperty("kind").GetString() == "method");
+        AssertEqual(auditTrait.GetProperty("id").GetString(), auditForwarded.GetProperty("trait").GetString(),
+            "Audit must retain the stable trait identity on forwarded method dispatch.");
+        AssertEqual("bound", auditForwarded.GetProperty("witness").GetProperty("kind").GetString(),
+            "Audit must retain the generic function's forwarded bound witness.");
+        var auditMain = compiler.GetProperty("functions").EnumerateArray()
+            .Single(item => item.GetProperty("module").GetString() == "app::main"
+                && item.GetProperty("name").GetString() == "main");
+        var auditGenericCall = auditMain.GetProperty("direct_calls").EnumerateArray().Single(call =>
+            call.GetProperty("module").GetString() == modulePath
+            && call.GetProperty("name").GetString() == "normalize"
+            && call.GetProperty("package").GetProperty("name").GetString()
+                == auditNormalize.GetProperty("package").GetProperty("name").GetString()
+            && call.GetProperty("package").GetProperty("version").GetString()
+                == auditNormalize.GetProperty("package").GetProperty("version").GetString()
+            && call.GetProperty("package").GetProperty("path").GetString()
+                == auditNormalize.GetProperty("package").GetProperty("path").GetString());
+        AssertEqual("normalize", auditGenericCall.GetProperty("name").GetString(),
+            "Audit direct-call facts must retain the source-level generic normalize call.");
+        var concreteAuditWitness = auditMain.GetProperty("trait_calls").EnumerateArray()
+            .Single(item => item.GetProperty("kind").GetString() == "function_call")
+            .GetProperty("witnesses").EnumerateArray()
+            .Single(item => item.GetProperty("trait").GetString() == auditTrait.GetProperty("id").GetString())
+            .GetProperty("witness");
+        AssertEqual("impl", concreteAuditWitness.GetProperty("kind").GetString(),
+            "Audit must retain the concrete Text implementation selected by the generic call.");
+        AssertEqual(auditImpl.GetProperty("id").GetString(), concreteAuditWitness.GetProperty("id").GetString(),
+            "Audit's concrete witness must point to the exact checked implementation identity.");
+        AssertEqual("primitive", concreteAuditWitness.GetProperty("target").GetProperty("kind").GetString(),
+            "Audit's concrete witness must retain the implementation's primitive target kind.");
+        AssertEqual(auditImpl.GetProperty("target").GetProperty("name").GetString(),
+            concreteAuditWitness.GetProperty("target").GetProperty("name").GetString(),
+            "Audit's concrete witness must retain the closed target from its implementation declaration.");
+        AssertEqual(modulePath, bindingFunction.GetProperty("module").GetString(),
+            "The implementation binding identity must retain its declaring module.");
+        var bindingPackage = bindingFunction.GetProperty("package");
+        var auditBindingFunction = compiler.GetProperty("functions").EnumerateArray().Single(candidate =>
+            candidate.GetProperty("module").GetString() == modulePath
+            && candidate.GetProperty("name").GetString() == "normalize_text"
+            && candidate.GetProperty("package").GetProperty("name").GetString() == bindingPackage.GetProperty("name").GetString()
+            && candidate.GetProperty("package").GetProperty("version").GetString() == bindingPackage.GetProperty("version").GetString()
+            && candidate.GetProperty("package").GetProperty("path").GetString() == bindingPackage.GetProperty("path").GetString());
+        AssertEqual(bindingFunction.GetProperty("name").GetString(), auditBindingFunction.GetProperty("name").GetString(),
+            "Audit function facts must include the private implementation binding selected by the concrete witness.");
     }
 
     private static async Task TestManagedLanguageTests(Harness harness)
@@ -11436,8 +11993,8 @@ internal static partial class IntegrationTests
             "text-validation-language-tests", packageRoot, "test");
         var expected = string.Join(Environment.NewLine,
         [
-            "PASS text::validation :: normalize empty input returns Empty",
-            "PASS text::validation :: normalize trims nonempty input",
+            "PASS text::validation :: generic normalize empty input returns Invalid",
+            "PASS text::validation :: generic normalize trims nonempty input",
             "PASS text::validation :: Text trim removes surrounding Unicode whitespace",
             "PASS text::validation :: require preserves a present Option<Text>",
             "PASS text::validation :: require maps a missing Option<Text> to its error",
