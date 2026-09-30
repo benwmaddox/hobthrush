@@ -1,0 +1,5 @@
+module fixture::lambda_generic_capture_rejected;
+
+pub fn capture<T>(value: T) -> T effects {} {
+    return (lambda (unused: i32) => value)(0);
+}

@@ -1328,6 +1328,7 @@ internal static class Emitter
             TypedMapKeysExpr map => "global::System.Collections.Immutable.ImmutableArray.CreateRange<string>((" + EmitExpr(map.Target) + ").Keys)",
             TypedMapLengthExpr map => "(" + EmitExpr(map.Target) + ").Count",
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
+            TypedLambdaInvokeExpr lambda => EmitLambdaInvoke(lambda),
             TypedBinaryExpr binary => EmitBinary(binary),
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr { IsAsync: true } => throw new InvalidOperationException("Async calls must be emitted beneath a checked await expression"),
@@ -1352,6 +1353,13 @@ internal static class Emitter
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
+
+        private string EmitLambdaInvoke(TypedLambdaInvokeExpr expression)
+        {
+            var parameter = "Local_" + expression.ParameterLocalId.ToString(CultureInfo.InvariantCulture);
+            return "((global::System.Func<" + EmitType(expression.ParameterType) + ", " + EmitType(expression.Type) + ">)(" +
+                parameter + " => " + EmitExpr(expression.Body) + "))(" + EmitExpr(expression.Argument) + ")";
+        }
 
         private string EmitList(TypedListExpr expression)
         {
@@ -4024,6 +4032,8 @@ internal static class Emitter
                     if (expression is TypedCallExpr call)
                     foreach (var typeArgument in call.TypeArguments)
                         yield return typeArgument;
+                    if (expression is TypedLambdaInvokeExpr lambda)
+                        yield return lambda.ParameterType;
                 }
             }
         }
@@ -4080,6 +4090,10 @@ internal static class Emitter
             yield return expression;
             switch (expression)
             {
+                case TypedLambdaInvokeExpr lambda:
+                    foreach (var nested in EnumerateExpressions(lambda.Argument)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(lambda.Body)) yield return nested;
+                    break;
                 case TypedListExpr list:
                     foreach (var item in list.Items)
                     foreach (var nested in EnumerateExpressions(item)) yield return nested;

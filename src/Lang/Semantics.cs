@@ -331,6 +331,13 @@ internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(LangType.
 internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(LangType.Text, At);
 internal sealed record TypedListExpr(LangType Type, IReadOnlyList<TypedExpr> Items, Token At) : TypedExpr(Type, At);
 internal sealed record TypedLocalExpr(LangType Type, int LocalId, Token At) : TypedExpr(Type, At);
+internal sealed record TypedLambdaInvokeExpr(
+    LangType Type,
+    LangType ParameterType,
+    int ParameterLocalId,
+    TypedExpr Argument,
+    TypedExpr Body,
+    Token At) : TypedExpr(Type, At);
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
@@ -696,6 +703,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly HashSet<int> _activeTransactionLocals = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceMapDiagnosticLocations = [];
+    private HashSet<int>? _activeLambdaCaptureLocalIds;
     private bool[] _resourceReachableDeclarations = [];
     private bool[] _illegalListReachableDeclarations = [];
     private bool[] _illegalMapReachableDeclarations = [];
@@ -2933,6 +2941,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         ValidateResourceListType(expression.Type, expression.At);
         switch (expression)
         {
+            case TypedLambdaInvokeExpr lambda:
+                ValidateResourceListType(lambda.ParameterType, lambda.At);
+                ValidateResourceListExpression(lambda.Argument);
+                ValidateResourceListExpression(lambda.Body);
+                break;
             case TypedListExpr list:
                 foreach (var item in list.Items)
                     ValidateResourceListExpression(item);
@@ -3150,6 +3163,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TextExpr text => new TypedTextExpr(text.At, text.Value),
             ListExpr list => CheckListLiteral(list, expected, locals, depth + 1),
             NameExpr name => CheckName(name, expected, locals),
+            LambdaExpr lambda => UnsupportedLambda(lambda),
+            LambdaInvokeExpr invocation => CheckLambdaInvoke(invocation, locals, depth + 1),
             DeclarationRefExpr reference => CheckDeclarationReference(reference),
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1, isAwaitOperand),
@@ -3166,11 +3181,89 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return result;
     }
 
+    private TypedExpr UnsupportedLambda(LambdaExpr expression)
+    {
+        Add("E_UNSUPPORTED", "A lambda expression must be immediately invoked", expression.At);
+        return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckLambdaInvoke(
+        LambdaInvokeExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (_activeLambdaCaptureLocalIds is not null)
+        {
+            Add("E_UNSUPPORTED", "Nested lambda expressions are not implemented", expression.At);
+            _ = CheckExpr(expression.Argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var parameterType = ResolveType(
+            expression.Lambda.ParameterType,
+            0,
+            _currentFunction?.TypeParametersByName);
+        var argument = CheckExpr(expression.Argument, parameterType, locals, depth);
+        if (parameterType.IsError || argument.Type.IsError)
+            return new TypedErrorExpr(expression.At);
+        if (ContainsTypeParameter(parameterType))
+        {
+            Add("E_UNSUPPORTED", "Lambda parameter types cannot contain unconstrained type parameters", expression.Lambda.ParameterAt);
+            return new TypedErrorExpr(expression.At);
+        }
+        if (ContainsResourceHandle(parameterType))
+        {
+            Add("E_RESOURCE_ESCAPE", "Lambda parameters cannot contain resource or capability handles", expression.Lambda.ParameterAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var parameterLocalId = _nextLocalId++;
+        var lambdaLocals = new Dictionary<string, LocalSymbol>(locals, StringComparer.Ordinal)
+        {
+            [expression.Lambda.ParameterName] = new LocalSymbol(parameterLocalId, parameterType)
+        };
+        _activeLambdaCaptureLocalIds = locals.Values.Select(local => local.Id).ToHashSet();
+        TypedExpr body;
+        try
+        {
+            body = CheckExpr(expression.Lambda.Body, null, lambdaLocals, depth);
+        }
+        finally
+        {
+            _activeLambdaCaptureLocalIds = null;
+        }
+
+        if (ContainsResourceHandle(body.Type))
+        {
+            Add("E_RESOURCE_ESCAPE", "Lambda results cannot contain resource or capability handles", expression.Lambda.Body.At);
+            return new TypedErrorExpr(expression.At);
+        }
+        if (ContainsTypeParameter(body.Type))
+        {
+            Add("E_UNSUPPORTED", "Lambda results cannot contain unconstrained type parameters", expression.Lambda.Body.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        return new TypedLambdaInvokeExpr(
+            body.Type,
+            parameterType,
+            parameterLocalId,
+            argument,
+            body,
+            expression.At);
+    }
+
     private TypedExpr CheckAwait(
         AwaitExpr expression,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
+        if (_activeLambdaCaptureLocalIds is not null)
+        {
+            Add("E_UNSUPPORTED", "Lambda bodies cannot contain await expressions", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (_currentFunction?.Declaration.IsAsync != true)
             Add("E_AWAIT_CONTEXT", "The 'await' expression is only valid inside an async function", expression.At);
 
@@ -3332,6 +3425,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 Add("E_RESOURCE_ESCAPE", $"Transaction '{expression.Name}' may only be used as the direct receiver of execute() or commit() inside its with scope", expression.At);
                 return new TypedErrorExpr(expression.At);
+            }
+            if (_activeLambdaCaptureLocalIds?.Contains(local.Id) == true)
+            {
+                if (local.IsMutable)
+                    Add("E_CLOSURE_CAPTURE_MUTABLE", $"Lambda cannot capture rebindable local '{expression.Name}'", expression.At);
+                if (ContainsTypeParameter(local.Type))
+                {
+                    Add("E_UNSUPPORTED", "Lambda cannot capture an unconstrained type parameter", expression.At);
+                    return new TypedErrorExpr(expression.At);
+                }
+                if (ContainsResourceHandle(local.Type))
+                    Add("E_RESOURCE_ESCAPE", $"Lambda cannot capture resource or capability local '{expression.Name}'", expression.At);
             }
             return new TypedLocalExpr(local.Type, local.Id, expression.At);
         }
@@ -5138,6 +5243,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (type == sought) return true;
         return type.Arguments.Any(argument => ContainsType(argument, sought));
     }
+
+    private static bool ContainsTypeParameter(LangType type) =>
+        type.Kind == LangTypeKind.TypeParameter || type.Arguments.Any(ContainsTypeParameter);
 
     private bool ContainsResourceHandle(LangType type, bool[] resourceReachableDeclarations)
     {

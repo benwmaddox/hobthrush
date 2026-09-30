@@ -55,6 +55,7 @@ internal static partial class IntegrationTests
             ("primitive main values preserve exact output", TestPrimitiveMainOutput),
             ("comparison precedence and all comparison operators execute", TestComparisonAndControlFlow),
             ("immutable values use recursive structural equality without exposing identity", TestStructuralEquality),
+            ("immediately invoked lambdas capture immutable values and reject unsafe captures", TestLambdaCaptures),
             ("if conditions, operand types, returns, and scopes are checked", TestInvalidControlFlow),
             ("Text length counts Unicode scalars and trim removes Unicode whitespace", TestUnicodeTextOperations),
             ("lists infer generic items, append immutably, split exactly, and preserve iteration order", TestListRuntime),
@@ -364,6 +365,38 @@ internal static partial class IntegrationTests
             Path.Combine(harness.RepositoryRoot, "fixtures", "58-structural-equality.lang"));
         var result = await harness.InvokeAsync("structural-equality", "run", source);
         AssertRunOutput("0" + Environment.NewLine, result);
+    }
+
+    private static async Task TestLambdaCaptures(Harness harness)
+    {
+        var source = await File.ReadAllTextAsync(
+            Path.Combine(harness.RepositoryRoot, "fixtures", "61-lambda-value-capture.lang"));
+        var result = await harness.InvokeAsync("lambda-value-capture", "run", source);
+        AssertRunOutput("42" + Environment.NewLine, result);
+
+        var mutableCapture = await File.ReadAllTextAsync(
+            Path.Combine(harness.RepositoryRoot, "fixtures", "62-lambda-var-capture-rejected.lang"));
+        await ExpectDiagnosticsAsync(
+            harness,
+            "lambda-var-capture",
+            mutableCapture,
+            "E_CLOSURE_CAPTURE_MUTABLE");
+
+        var resourceCapture = await File.ReadAllTextAsync(
+            Path.Combine(harness.RepositoryRoot, "fixtures", "63-lambda-resource-capture-rejected.lang"));
+        await ExpectDiagnosticsAsync(
+            harness,
+            "lambda-resource-capture",
+            resourceCapture,
+            "E_RESOURCE_ESCAPE");
+
+        var genericCapture = await File.ReadAllTextAsync(
+            Path.Combine(harness.RepositoryRoot, "fixtures", "64-lambda-generic-capture-rejected.lang"));
+        await ExpectDiagnosticsAsync(
+            harness,
+            "lambda-generic-capture",
+            genericCapture,
+            "E_UNSUPPORTED");
     }
 
     private static async Task TestInvalidControlFlow(Harness harness)
@@ -3850,7 +3883,7 @@ internal static partial class IntegrationTests
                 var call = InvokeFetch("/hold-cancel", inFlightCancellation.Token);
                 server.WaitForRequestAsync("/hold-cancel").WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
                 inFlightCancellation.Cancel();
-                server.ReleaseHeldRequest("/hold-cancel");
+                server.WaitForClientDisconnectAsync("/hold-cancel").WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
                 var observed = false;
                 try
                 {
@@ -9405,7 +9438,7 @@ internal static partial class IntegrationTests
                 var canceledRequest = client.GetAsync("/cancel", cancellation.Token);
                 await cancellationServer.WaitForRequestAsync("/hold-cancel").WaitAsync(TimeSpan.FromSeconds(5));
                 cancellation.Cancel();
-                cancellationServer.ReleaseHeldRequest("/hold-cancel");
+                await cancellationServer.WaitForClientDisconnectAsync("/hold-cancel").WaitAsync(TimeSpan.FromSeconds(5));
                 var cancellationObserved = false;
                 try
                 {
@@ -9422,7 +9455,7 @@ internal static partial class IntegrationTests
                     cancellationObserved = true;
                 }
                 AssertTrue(cancellationObserved,
-                    "Canceling the request while its transaction is open should abort the client request.");
+                    "Canceling the request must abort the awaited HTTP adapter while its transaction is open; the upstream held the request until that abort was observed.");
             }
 
             using (var recovered = await client.GetAsync("/commit-after-unwind"))
@@ -9866,6 +9899,7 @@ internal static partial class IntegrationTests
         private readonly ConcurrentBag<Task> _connections = [];
         private readonly ConcurrentDictionary<string, TaskCompletionSource<RawHttpRequest>> _requestSignals = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _holdReleases = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _clientDisconnectSignals = new(StringComparer.Ordinal);
         private readonly Task _acceptLoop;
 
         public RawHttpServer()
@@ -9881,6 +9915,9 @@ internal static partial class IntegrationTests
 
         public Task<RawHttpRequest> WaitForRequestAsync(string target) =>
             _requestSignals.GetOrAdd(target, static _ => NewCompletion<RawHttpRequest>()).Task;
+
+        public Task WaitForClientDisconnectAsync(string target) =>
+            _clientDisconnectSignals.GetOrAdd(target, static _ => NewCompletion<bool>()).Task;
 
         public void ReleaseHeldRequest(string target) =>
             _holdReleases.GetOrAdd(target, static _ => NewCompletion<bool>()).TrySetResult(true);
@@ -9958,7 +9995,13 @@ internal static partial class IntegrationTests
                         _requestSignals.GetOrAdd(request.Target, static _ => NewCompletion<RawHttpRequest>())
                             .TrySetResult(request);
 
-                        if (request.Target is "/hold-cancel" or "/hold-timeout")
+                        if (request.Target == "/hold-cancel")
+                        {
+                            await ObserveClientDisconnectAsync(request.Target, stream, _stopping.Token);
+                            return;
+                        }
+
+                        if (request.Target == "/hold-timeout")
                             await _holdReleases.GetOrAdd(request.Target, static _ => NewCompletion<bool>()).Task
                                 .WaitAsync(_stopping.Token);
 
@@ -9994,6 +10037,26 @@ internal static partial class IntegrationTests
                 {
                 }
             }
+        }
+
+        private async Task ObserveClientDisconnectAsync(
+            string target,
+            NetworkStream stream,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var buffer = new byte[1];
+                while (await stream.ReadAsync(buffer.AsMemory(), cancellationToken) != 0)
+                {
+                }
+            }
+            catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException)
+            {
+            }
+
+            if (!cancellationToken.IsCancellationRequested)
+                _clientDisconnectSignals.GetOrAdd(target, static _ => NewCompletion<bool>()).TrySetResult(true);
         }
 
         private static async Task<string?> ReadHeaderAsync(NetworkStream stream, CancellationToken cancellationToken)
@@ -10657,7 +10720,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(60, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(64, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -10666,7 +10729,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("60 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("64 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -10843,9 +10906,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b60\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b64\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 60 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 64 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

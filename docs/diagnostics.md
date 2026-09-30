@@ -5,7 +5,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | Code | Meaning | Status |
 | --- | --- | --- |
 | E_SYNTAX | Token or production does not match the grammar | Implemented |
-| E_UNSUPPORTED | Valid V1 construct is not yet implemented | Implemented |
+| E_UNSUPPORTED | Valid V1 construct is not yet implemented, including immediate lambdas with unconstrained generic parameter/capture/result types | Implemented |
 | E_NAME_UNRESOLVED | Name is not declared in scope, or a qualified reference names an unknown alias, module, or declaration | Implemented |
 | E_NAME_DUPLICATE | Duplicate declaration | Implemented |
 | E_ACCESS_PRIVATE | A qualified reference crosses a module or package boundary to a private declaration | Implemented |
@@ -33,6 +33,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_AWAIT_TARGET | `await` target is not an async call or intrinsic | Implemented |
 | E_ASYNC_CALL_UNAWAITED | An async call is used without `await` | Implemented |
 | E_ASSIGN_IMMUTABLE | Assignment targets a `let` local or immutable loop binding | Implemented |
+| E_CLOSURE_CAPTURE_MUTABLE | An immediately invoked lambda captures a rebindable `var` local | Implemented for the one-parameter expression-bodied lambda subset |
 | E_TYPE_VISIBILITY | A public type signature exposes a private union or struct | Implemented |
 | E_FIELD_UNKNOWN | A struct initializer or field read names an unknown field | Implemented |
 | E_FIELD_MISSING | A struct construction omits a declared field | Implemented |
@@ -67,7 +68,7 @@ Compiler diagnostics have stable `code`, `severity`, `message`, `file`, and `ran
 | E_ROUTE_RESPONSE_DUPLICATE | A response variant is mapped more than once | Implemented |
 | E_ROUTE_RESPONSE_MISSING | A declared response variant has no mapping | Implemented |
 | E_ROUTE_CODEC_UNSUPPORTED | Unsupported response payload, content format, or JSON shape | Implemented |
-| E_RESOURCE_ESCAPE | A SQLite transaction handle escapes its `with db.begin() as tx` scope or is used other than as the direct receiver of `execute` or `commit`; a resource handle is stored in a list, a map value, or a rebindable `var` local | Implemented for transaction handles, list elements, map values, and rebindable locals |
+| E_RESOURCE_ESCAPE | A SQLite transaction handle escapes its `with db.begin() as tx` scope or is used other than as the direct receiver of `execute` or `commit`; a resource handle is stored in a list, a map value, or a rebindable `var` local; or a lambda parameter, capture, or result contains a resource/capability handle | Implemented for transaction handles, list elements, map values, rebindable locals, and the immediate lambda subset |
 
 Typed CLI runtime parsing reports stable stderr codes and exits 2: `CLI_UNKNOWN_COMMAND`, `CLI_UNKNOWN_OPTION`, `CLI_MISSING_ARGUMENT`, `CLI_MISSING_VALUE`, `CLI_DUPLICATE_OPTION`, or `CLI_INVALID_VALUE`. Empty or NUL `FilePath` arguments and invalid `i32` values report `CLI_INVALID_VALUE`. Control characters in diagnostic subjects are escaped so each parse error stays on one physical stderr line. These are runtime results, not compiler diagnostics. `Ok(Text)` writes stdout and exits 0; formatted `Err(E)` writes stderr and exits 3; unexpected runtime faults exit 70. Top-level and command help exit 0. Ctrl+C cancellation of an async CLI command exits 130.
 
@@ -79,4 +80,4 @@ Outbound HTTP failures are typed runtime values, not compiler diagnostics. `Http
 
 `lang inspect effects PACKAGE SYMBOL --json` reports malformed command usage through the normal usage message. An unknown, malformed, or non-`self` symbol reports structured `E_NAME_UNRESOLVED`. Compiler errors and missing/stale package locks stop inspection before an effects report is emitted.
 
-An unsupported feature is a compilation failure. It never passes as an unchecked construct. The fixture manifest has 60 active entries and 0 pending entries, and bare `lang test` compares each fixture's complete ordered diagnostic-code list. Structural equality is limited to the immutable value types listed in the memory contract; unsupported values and unconstrained type parameters use `E_TYPE_MISMATCH`. Startup config declarations, accessor checks, grants, snapshots, redaction, and log serialization also have dedicated integration cases. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.
+An unsupported feature is a compilation failure. It never passes as an unchecked construct. The fixture manifest has 64 active entries and 0 pending entries, and bare `lang test` compares each fixture's complete ordered diagnostic-code list. Structural equality is limited to the immutable value types listed in the memory contract; unsupported values and unconstrained type parameters use `E_TYPE_MISMATCH`. Fixtures 61–64 cover immediate lambda execution and immutable capture plus mutable, resource, and generic capture rejection. Startup config declarations, accessor checks, grants, snapshots, redaction, and log serialization also have dedicated integration cases. `lang test FILE_OR_PACKAGE` typechecks module-level tests before running them. A non-boolean assertion uses `E_TYPE_MISMATCH`, a duplicate test name in one module uses `E_NAME_DUPLICATE`, and unsupported test-body statements or malformed blocks use the parser's standard `E_UNSUPPORTED` or `E_SYNTAX` codes. Assertion failures are runtime results printed with the test's module and source location; any failure makes the command exit nonzero while later tests continue.

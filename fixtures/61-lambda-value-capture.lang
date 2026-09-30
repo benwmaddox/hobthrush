@@ -1,0 +1,11 @@
+module fixture::lambda_value_capture;
+
+pub fn main() -> i32 effects {} {
+    let base: i32 = 40;
+    let matches: bool = (lambda (delta: i32) => base + delta == 42)(2);
+    if matches {
+        return 42;
+    } else {
+        return 1;
+    }
+}
