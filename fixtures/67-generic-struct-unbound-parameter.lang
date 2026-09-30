@@ -1,0 +1,3 @@
+module fixture::generic_struct_unbound_parameter;
+
+pub struct Box<T> { value: U }

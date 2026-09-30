@@ -1,0 +1,6 @@
+module fixture::generic_struct_equality_unbound;
+
+pub struct Box<T> { value: T }
+pub fn same<T>(left: self::fixture::generic_struct_equality_unbound::Box<T>, right: self::fixture::generic_struct_equality_unbound::Box<T>) -> bool effects {} {
+    return left == right;
+}

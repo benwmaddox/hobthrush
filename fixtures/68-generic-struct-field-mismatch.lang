@@ -1,0 +1,8 @@
+module fixture::generic_struct_field_mismatch;
+
+pub struct Box<T> { value: T }
+pub fn invalid() -> i32 effects {} {
+    let value: self::fixture::generic_struct_field_mismatch::Box<i32> =
+        self::fixture::generic_struct_field_mismatch::Box<i32> { value: "wrong" };
+    return 0;
+}

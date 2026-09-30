@@ -869,7 +869,11 @@ internal sealed class Parser
         return new TestDecl(name, setup, assertion, at, nameAt, assertAt);
     }
 
-    private List<TypeParameterSyntax> ParseFunctionTypeParameters()
+    private List<TypeParameterSyntax> ParseFunctionTypeParameters() => ParseTypeParameters("generic function");
+
+    private List<TypeParameterSyntax> ParseStructTypeParameters() => ParseTypeParameters("generic struct");
+
+    private List<TypeParameterSyntax> ParseTypeParameters(string owner)
     {
         var typeParameters = new List<TypeParameterSyntax>();
         if (!Is("<")) return typeParameters;
@@ -877,7 +881,7 @@ internal sealed class Parser
         Take();
         if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type parameter");
         if (Current.Kind == "eof")
-            Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+            Fail(Current, "E_SYNTAX", $"Unclosed {owner} type parameter list");
 
         while (true)
         {
@@ -885,12 +889,12 @@ internal sealed class Parser
             typeParameters.Add(new TypeParameterSyntax(parameter.Text, parameter));
             if (Is(">")) break;
             if (Current.Kind == "eof")
-                Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+                Fail(Current, "E_SYNTAX", $"Unclosed {owner} type parameter list");
 
             Expect(",");
             if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type parameter after ','");
             if (Current.Kind == "eof")
-                Fail(Current, "E_SYNTAX", "Unclosed generic function type parameter list");
+                Fail(Current, "E_SYNTAX", $"Unclosed {owner} type parameter list");
         }
 
         Expect(">");
@@ -1160,7 +1164,7 @@ internal sealed class Parser
     {
         Expect("struct");
         var name = ExpectBareIdentifier();
-        if (Is("<")) Fail(Current, "E_UNSUPPORTED", "Generic structs are not implemented yet");
+        var typeParameters = ParseStructTypeParameters();
         Expect("{");
 
         var fields = new List<StructFieldDecl>();
@@ -1183,7 +1187,7 @@ internal sealed class Parser
         }
 
         Expect("}");
-        return new StructDecl(name.Text, isPublic, fields, name);
+        return new StructDecl(name.Text, typeParameters, isPublic, fields, name);
     }
 
     private TypeSyntax ParseType()
@@ -1193,23 +1197,7 @@ internal sealed class Parser
         {
             var reference = ParseSourceDeclarationRef();
 
-            var arguments = new List<TypeSyntax>();
-            if (Is("<"))
-            {
-                Take();
-                if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type argument");
-                while (true)
-                {
-                    arguments.Add(ParseType());
-                    if (Is(","))
-                    {
-                        Take();
-                        continue;
-                    }
-                    break;
-                }
-                Expect(">");
-            }
+            var arguments = ParseTypeArguments();
 
             return new TypeSyntax(reference, arguments, reference.At);
         }
@@ -1217,6 +1205,24 @@ internal sealed class Parser
         {
             _nestingDepth--;
         }
+    }
+
+    private List<TypeSyntax> ParseTypeArguments()
+    {
+        var arguments = new List<TypeSyntax>();
+        if (!Is("<")) return arguments;
+
+        Take();
+        if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type argument");
+        while (true)
+        {
+            arguments.Add(ParseType());
+            if (!Is(",")) break;
+            Take();
+            if (Is(">")) Fail(Current, "E_SYNTAX", "Expected type argument after ','");
+        }
+        Expect(">");
+        return arguments;
     }
 
     private Expr ParseExpr(int minPrecedence = 0, bool allowStructConstruction = true)
@@ -1343,9 +1349,14 @@ internal sealed class Parser
 
             var reference = ParseSourceDeclarationRef();
             Expr expression;
-            if (reference.IsQualified && allowStructConstruction && Is("{"))
+            if (allowStructConstruction && IsTypeArgumentListFollowedByStructBrace())
             {
-                expression = ParseStructConstruction(reference);
+                var type = new TypeSyntax(reference, ParseTypeArguments(), reference.At);
+                expression = ParseStructConstruction(type);
+            }
+            else if (reference.IsQualified && allowStructConstruction && Is("{"))
+            {
+                expression = ParseStructConstruction(new TypeSyntax(reference, [], reference.At));
             }
             else if (reference.IsQualified && Is("("))
             {
@@ -1359,7 +1370,7 @@ internal sealed class Parser
             }
             else if (allowStructConstruction && Is("{"))
             {
-                expression = ParseStructConstruction(reference);
+                expression = ParseStructConstruction(new TypeSyntax(reference, [], reference.At));
             }
             else if (Is("("))
             {
@@ -1386,7 +1397,30 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private Expr ParseStructConstruction(SourceDeclarationRefSyntax typeName)
+    private bool IsTypeArgumentListFollowedByStructBrace()
+    {
+        if (!Is("<")) return false;
+
+        var depth = 0;
+        for (var index = _position; index < _tokens.Count; index++)
+        {
+            var kind = _tokens[index].Kind;
+            if (kind == "eof") return false;
+            if (kind is not ("id" or "::" or "," or "<" or ">")) return false;
+            if (kind == "<") depth++;
+            else if (kind == ">")
+            {
+                depth--;
+                if (depth == 0)
+                    return index + 1 < _tokens.Count && _tokens[index + 1].Kind == "{";
+                if (depth < 0) return false;
+            }
+        }
+
+        return false;
+    }
+
+    private Expr ParseStructConstruction(TypeSyntax typeName)
     {
         Expect("{");
         var fields = new List<StructFieldValue>();

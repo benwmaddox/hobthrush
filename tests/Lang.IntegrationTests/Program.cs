@@ -65,6 +65,7 @@ internal static partial class IntegrationTests
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
             ("struct constructors support nested and chained field reads", TestStructValues),
             ("struct values compose with Option, Result, and unions", TestStructWrappers),
+            ("generic immutable structs substitute fields, compare structurally, and run in managed and NativeAOT builds", TestGenericStructs),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
@@ -128,6 +129,7 @@ internal static partial class IntegrationTests
             ("only the declared package entry module selects main", TestPackageEntrySelection),
             ("qualified union variants participate in exhaustive matching", TestPackageQualifiedUnionExhaustiveness),
             ("same-package declarations use qualified cross-module references", TestPackageQualifiedReferencesCrossModules),
+            ("generic structs construct and substitute fields across dependency aliases", TestGenericStructDependency),
             ("library packages build as managed libraries", TestPackageLibraryBuild),
             ("new and add workflows create projects and resolve pinned Git dependencies offline", TestProjectWorkflow),
             ("path dependency locks are portable, stable, and required for package commands", TestPathDependencyLockLifecycle),
@@ -951,6 +953,161 @@ internal static partial class IntegrationTests
 
         var result = await harness.InvokeAsync("struct-wrappers", "run", source);
         AssertRunOutput("23" + Environment.NewLine, result);
+    }
+
+    private static async Task TestGenericStructs(Harness harness)
+    {
+        const string source = """
+            module harness::generic_structs;
+            pub struct Box<T> { value: T }
+            pub struct Pair<Left, Right> { left: Left, right: Right }
+            pub struct Holder { nested: self::harness::generic_structs::Box<self::harness::generic_structs::Box<i32>> }
+            pub struct Node<T> { value: T, next: Option<self::harness::generic_structs::Node<T>> }
+            pub struct Flip<Left, Right> {
+                left: Left,
+                right: Right,
+                next: Option<self::harness::generic_structs::Flip<Right, Left>>
+            }
+            pub struct MutualA<Left, Right> {
+                child: Option<self::harness::generic_structs::MutualB<Left, Right>>,
+                value: Right
+            }
+            pub struct MutualB<Left, Right> {
+                parent: Option<self::harness::generic_structs::MutualA<Right, Left>>
+            }
+            pub struct PermutedA<Left, Right> {
+                child: Option<self::harness::generic_structs::PermutedB<Right, Left>>,
+                value: Right
+            }
+            pub struct PermutedB<Left, Right> {
+                parent: Option<self::harness::generic_structs::PermutedA<Left, Right>>
+            }
+            pub struct Tag<T> { value: i32 }
+            pub struct Tagged<T> { tag: self::harness::generic_structs::Tag<T> }
+            pub struct Phantom<T> {}
+
+            pub fn swap<Left, Right>(pair: self::harness::generic_structs::Pair<Left, Right>) -> self::harness::generic_structs::Pair<Right, Left> effects {} {
+                return self::harness::generic_structs::Pair<Right, Left> { left: pair.right, right: pair.left };
+            }
+            pub fn unbox<T>(value: self::harness::generic_structs::Box<T>) -> T effects {} { return value.value; }
+            pub fn same_tag<T>(left: self::harness::generic_structs::Tag<T>, right: self::harness::generic_structs::Tag<T>) -> bool effects {} {
+                return left == right;
+            }
+            pub fn same_tagged<T>(left: self::harness::generic_structs::Tagged<T>, right: self::harness::generic_structs::Tagged<T>) -> bool effects {} {
+                return left == right;
+            }
+            pub fn ignore_resource(value: self::harness::generic_structs::Phantom<FsRead>) -> i32 effects {} { return 1; }
+
+            pub fn main() -> i32 effects {} {
+                let nested: self::harness::generic_structs::Box<self::harness::generic_structs::Box<i32>> =
+                    self::harness::generic_structs::Box<self::harness::generic_structs::Box<i32>> {
+                        value: self::harness::generic_structs::Box<i32> { value: 3 }
+                    };
+                let holder: self::harness::generic_structs::Holder = self::harness::generic_structs::Holder {
+                    nested: self::harness::generic_structs::Box<self::harness::generic_structs::Box<i32>> {
+                        value: self::harness::generic_structs::Box<i32> { value: 5 }
+                    }
+                };
+                let pair: self::harness::generic_structs::Pair<i32, Text> =
+                    self::harness::generic_structs::Pair<i32, Text> { left: 10, right: "value" };
+                let swapped: self::harness::generic_structs::Pair<Text, i32> =
+                    self::harness::generic_structs::swap(pair);
+                let first_items: List<i32> = [1, 2];
+                let second_items: List<i32> = [1, 2];
+                let first_box: self::harness::generic_structs::Box<List<i32>> =
+                    self::harness::generic_structs::Box<List<i32>> { value: first_items };
+                let second_box: self::harness::generic_structs::Box<List<i32>> =
+                    self::harness::generic_structs::Box<List<i32>> { value: second_items };
+                if first_box == second_box { } else { return 1; }
+                let node: self::harness::generic_structs::Node<i32> =
+                    self::harness::generic_structs::Node<i32> { value: 7, next: None };
+                let flip: self::harness::generic_structs::Flip<i32, bool> =
+                    self::harness::generic_structs::Flip<i32, bool> { left: 2, right: true, next: None };
+                let mutual_a: self::harness::generic_structs::MutualA<i32, bool> =
+                    self::harness::generic_structs::MutualA<i32, bool> { child: None, value: true };
+                let permuted_a: self::harness::generic_structs::PermutedA<i32, bool> =
+                    self::harness::generic_structs::PermutedA<i32, bool> { child: None, value: true };
+                let expected_flip: self::harness::generic_structs::Flip<i32, bool> =
+                    self::harness::generic_structs::Flip<i32, bool> { left: 2, right: true, next: None };
+                let expected_mutual_a: self::harness::generic_structs::MutualA<i32, bool> =
+                    self::harness::generic_structs::MutualA<i32, bool> { child: None, value: true };
+                let expected_permuted_a: self::harness::generic_structs::PermutedA<i32, bool> =
+                    self::harness::generic_structs::PermutedA<i32, bool> { child: None, value: true };
+                let tag_a: self::harness::generic_structs::Tag<FsRead> =
+                    self::harness::generic_structs::Tag<FsRead> { value: 11 };
+                let tag_b: self::harness::generic_structs::Tag<FsRead> =
+                    self::harness::generic_structs::Tag<FsRead> { value: 11 };
+                let tagged_a: self::harness::generic_structs::Tagged<FsRead> =
+                    self::harness::generic_structs::Tagged<FsRead> { tag: tag_a };
+                let tagged_b: self::harness::generic_structs::Tagged<FsRead> =
+                    self::harness::generic_structs::Tagged<FsRead> { tag: tag_b };
+                if self::harness::generic_structs::same_tag(tag_a, tag_b) { } else { return 2; }
+                if self::harness::generic_structs::same_tagged(tagged_a, tagged_b) { } else { return 3; }
+                if flip == expected_flip { } else { return 4; }
+                if mutual_a == expected_mutual_a { } else { return 5; }
+                if permuted_a == expected_permuted_a { } else { return 6; }
+                let unused_resource: self::harness::generic_structs::Phantom<FsRead> =
+                    self::harness::generic_structs::Phantom<FsRead> {};
+                let leaf: i32 = self::harness::generic_structs::unbox(nested.value);
+                return leaf + holder.nested.value.value + swapped.right + node.value + flip.left
+                    + self::harness::generic_structs::ignore_resource(unused_resource);
+            }
+            """;
+
+        var managed = await harness.InvokeAsync("generic-structs-managed", "run", source);
+        AssertRunOutput("28" + Environment.NewLine, managed);
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("The generic-struct NativeAOT test requires Windows x64 or Linux x64.");
+
+        var build = await harness.InvokeWithTimeoutAsync(
+            "generic-structs-aot", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, build.ExitCode, Describe(build));
+        const string prefix = "Built native executable: ";
+        AssertTrue(build.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(build));
+        AssertTrue(build.StandardOutput.EndsWith(Environment.NewLine, StringComparison.Ordinal), Describe(build));
+        var executablePath = build.StandardOutput[prefix.Length..^Environment.NewLine.Length];
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the generic-struct NativeAOT executable at {executablePath}.");
+        var native = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
+        AssertRunOutput("28" + Environment.NewLine, native);
+
+        var unsupportedEquality = """
+            module harness::generic_struct_equality_unbound;
+            pub struct Box<T> { value: T }
+            pub fn same<T>(left: self::harness::generic_struct_equality_unbound::Box<T>, right: self::harness::generic_struct_equality_unbound::Box<T>) -> bool effects {} {
+                return left == right;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "generic-struct-equality-unbound", unsupportedEquality, "E_TYPE_MISMATCH");
+
+        const string unrelatedResourceEquality = """
+            module harness::generic_struct_equality_resource;
+            pub struct Box<T> { value: T }
+            pub struct HoldsResource { box: self::harness::generic_struct_equality_resource::Box<FsRead> }
+            pub fn main() -> i32 effects {} {
+                if 1 == 1 { return 2; }
+                return 3;
+            }
+            """;
+        var unrelatedResourceRun = await harness.InvokeAsync(
+            "generic-struct-equality-unrelated-resource", "run", unrelatedResourceEquality);
+        AssertRunOutput("2" + Environment.NewLine, unrelatedResourceRun);
+
+        const string storedResourceEquality = """
+            module harness::generic_struct_equality_stored_resource;
+            pub struct Box<T> { value: T }
+            pub fn same(
+                left: self::harness::generic_struct_equality_stored_resource::Box<FsRead>,
+                right: self::harness::generic_struct_equality_stored_resource::Box<FsRead>
+            ) -> bool effects {} {
+                return left == right;
+            }
+            """;
+        await ExpectDiagnosticsAsync(
+            harness, "generic-struct-equality-stored-resource", storedResourceEquality, "E_TYPE_MISMATCH");
     }
 
     private static async Task TestForwardAndGuardedRecursion(Harness harness)
@@ -2266,6 +2423,7 @@ internal static partial class IntegrationTests
                     result: Result<direct::records::Record, direct::records::Status>,
                     snapshots: Map<Text, List<Option<direct::records::Record>>>
                 }
+                pub struct GenericEnvelope<T> { box: direct::records::Box<T> }
                 pub union ApiReply { Found(direct::records::Record), Empty }
                 struct HiddenRoot { note: Text }
                 fn hidden_root() -> i32 effects {} { return 1; }
@@ -2301,6 +2459,7 @@ internal static partial class IntegrationTests
                 """;
             const string recordsSource = """
                 module records;
+                pub struct Box<T> { value: T }
                 pub struct Record {
                     id: i32,
                     origin: Option<foundation::models::Origin>,
@@ -2379,7 +2538,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(7, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
+        AssertEqual(8, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2409,9 +2568,28 @@ internal static partial class IntegrationTests
             "Private declarations must not appear in the API function list.");
         var structIds = api.GetProperty("structs").EnumerateArray()
             .Select(structure => structure.GetProperty("id").GetString() ?? string.Empty).ToArray();
-        AssertTrue(new[] { "direct::records::Record", "self::app::main::Envelope", "self::app::main::ScanArgs" }
+        AssertTrue(new[] { "direct::records::Box", "direct::records::Record", "self::app::main::Envelope", "self::app::main::GenericEnvelope", "self::app::main::ScanArgs" }
                 .SequenceEqual(structIds, StringComparer.Ordinal),
             $"Private root and dependency structs must be filtered, got [{string.Join(", ", structIds)}].");
+        var genericBox = api.GetProperty("structs").EnumerateArray()
+            .Single(structure => structure.GetProperty("id").GetString() == "direct::records::Box");
+        AssertJsonPropertyOrder(genericBox, "id,source_ids,package,type_parameters,fields");
+        AssertEqual("T", genericBox.GetProperty("type_parameters")[0].GetProperty("name").GetString(),
+            "Generic struct declarations should expose their parameter name.");
+        AssertEqual(0, genericBox.GetProperty("type_parameters")[0].GetProperty("ordinal").GetInt32(),
+            "Generic struct parameter ordinals should be zero-based.");
+        var genericEnvelope = api.GetProperty("structs").EnumerateArray()
+            .Single(structure => structure.GetProperty("id").GetString() == "self::app::main::GenericEnvelope");
+        var genericEnvelopeField = genericEnvelope.GetProperty("fields")[0].GetProperty("type");
+        AssertJsonPropertyOrder(genericEnvelopeField,
+            "kind,declaration_kind,source_id,source_ids,package,module,name,type_arguments");
+        AssertEqual("direct::records::Box", genericEnvelopeField.GetProperty("source_id").GetString(),
+            "A generic nominal field should retain its dependency source identity.");
+        AssertJsonPropertyOrder(genericEnvelopeField.GetProperty("type_arguments")[0], "kind,name,ordinal");
+        AssertEqual("type_parameter", genericEnvelopeField.GetProperty("type_arguments")[0].GetProperty("kind").GetString(),
+            "Generic nominal field arguments should retain their recursive type shape.");
+        AssertEqual("T", genericEnvelopeField.GetProperty("type_arguments")[0].GetProperty("name").GetString(),
+            "Generic nominal field arguments should retain their parameter name.");
         var unionIds = api.GetProperty("unions").EnumerateArray()
             .Select(union => union.GetProperty("id").GetString() ?? string.Empty).ToArray();
         AssertTrue(new[] { "direct::records::Status", "self::app::main::ApiReply" }
@@ -2573,7 +2751,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(7, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
+        AssertEqual(8, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -3024,11 +3202,12 @@ internal static partial class IntegrationTests
             "id,source_ids,package,is_async,type_parameters,parameters,return_type,declared_effects,inferred_effects,effect_paths,calls,required_capabilities",
             "name,ordinal",
             "name,type",
+            "kind,declaration_kind,source_id,source_ids,package,module,name,type_arguments",
             "kind,source_id,source_ids,package,module,name",
             "kind,name",
             "effect,steps",
             "source_id,source_ids,package,module,name",
-            "id,source_ids,package,fields",
+            "id,source_ids,package,type_parameters,fields",
             "id,source_ids,package,variants",
             "name,payload",
             "id,package,help,inputs,handler,handler_is_async,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
@@ -3038,7 +3217,6 @@ internal static partial class IntegrationTests
             "kind,item",
             "kind,key,value",
             "kind,ok,error",
-            "kind,declaration_kind,source_id,source_ids,package,module,name",
             "method,path,body_type,handler,handler_is_async,response_type,handler_source_ids,parameters,responses,required_capabilities,capability_parameters",
             "name,in,required,type,handler_parameter_index",
             "variant,status,content_type,payload_type",
@@ -3608,8 +3786,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(7, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 7.");
+            AssertEqual(8, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 8.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3674,8 +3852,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(7, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 7.");
+            AssertEqual(8, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 8.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -5511,7 +5689,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7.");
+            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6275,7 +6453,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(7, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 7 with pinned process metadata.");
+            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -7455,6 +7633,53 @@ internal static partial class IntegrationTests
         AssertEqual(0, check.ExitCode, Describe(check));
         var run = await harness.InvokePackageDirectoryAsync("package-qualified-cross-module-run", packageRoot, "run");
         AssertRunOutput("84" + Environment.NewLine, run);
+    }
+
+    private static async Task TestGenericStructDependency(Harness harness)
+    {
+        var packageRoot = await harness.WritePackageGraphAsync(
+            "generic-struct-dependency",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\nmodel = \"../model\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.lang"] = """
+                            module app::main;
+                            pub fn main() -> i32 effects {} {
+                                let inner: model::types::Box<i32> = model::types::Box<i32> { value: 19 };
+                                let outer: model::types::Box<model::types::Box<i32>> =
+                                    model::types::Box<model::types::Box<i32>> { value: inner };
+                                return model::types::get(outer.value);
+                            }
+                            """
+                    }),
+                ["model"] = new PackageFixture(
+                    LibraryPackageManifest("generic-model"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/types.lang"] = """
+                            module types;
+                            pub struct Box<T> { value: T }
+                            pub fn make<T>(value: T) -> self::types::Box<T> effects {} {
+                                return self::types::Box<T> { value: value };
+                            }
+                            pub fn get<T>(value: self::types::Box<T>) -> T effects {} {
+                                return value.value;
+                            }
+                            """
+                    })
+            });
+
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "generic-struct-dependency-lock", packageRoot, "lock"));
+        var check = await harness.InvokePackageDirectoryAsync(
+            "generic-struct-dependency-check", packageRoot, "check");
+        AssertEqual(0, check.ExitCode, Describe(check));
+        var run = await harness.InvokePackageDirectoryAsync(
+            "generic-struct-dependency-run", packageRoot, "run");
+        AssertRunOutput("19" + Environment.NewLine, run);
     }
 
     private static async Task TestPackageLibraryBuild(Harness harness)
@@ -9815,6 +10040,24 @@ internal static partial class IntegrationTests
             "E_DB_CODEC_UNSUPPORTED",
             "src/app/main.lang");
 
+        const string genericRowSource = "module app::main;\n"
+            + "struct Parameters {}\nstruct Row<T> { id: T }\nunion Reply { Ready }\n"
+            + "fn ready(db: DbRead) -> self::app::main::Reply effects { db.read } {\n"
+            + "    let loaded: Result<Option<self::app::main::Row<i32>>, DbError> = db.query_one(\"SELECT 1 AS id\", self::app::main::Parameters {});\n"
+            + "    return self::app::main::Reply.Ready;\n}\n"
+            + "route GET \"/\" { handler: self::app::main::ready; response Ready: 200; }\n";
+        await ExpectPackageJsonDiagnosticAsync(
+            harness,
+            "sqlite-generic-row-rejected",
+            sqliteManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.lang"] = genericRowSource,
+                ["db/schema.sql"] = sqliteSourceFiles["db/schema.sql"]
+            },
+            "E_DB_CODEC_UNSUPPORTED",
+            "src/app/main.lang");
+
         const string nonDatabaseWebSource = "module app::main;\n"
             + "union Reply { Ready }\n"
             + "fn ready() -> self::app::main::Reply effects {} { return self::app::main::Reply.Ready; }\n"
@@ -10720,7 +10963,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(64, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(73, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -10729,7 +10972,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("64 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("73 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -10906,9 +11149,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b64\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b73\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 64 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 73 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)
@@ -11044,6 +11287,7 @@ internal static partial class IntegrationTests
             ("route-invalid-status", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; response Found: 600 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
             ("route-get-body", Add(header + "\nstruct Body { value: i32 }", "route GET \"/items\" { body: self::harness::route_contract::Body; handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
             ("route-post-missing-body", Add(header, "route POST \"/items\" { handler: self::harness::route_contract::takes_value; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
+            ("route-generic-post-body", Add(header + "\nstruct GenericBody<T> { value: T }", "route POST \"/items\" { body: self::harness::route_contract::GenericBody<i32>; handler: self::harness::route_contract::takes_value; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
             ("route-duplicate-body", Add(header + "\nstruct Body { value: i32 }\nfn post(body: self::harness::route_contract::Body) -> self::harness::route_contract::Reply effects {} { return self::harness::route_contract::Reply.Empty; }", "route POST \"/items\" { body: self::harness::route_contract::Body; body: self::harness::route_contract::Body; handler: self::harness::route_contract::post; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_DECL"),
             ("route-missing-handler", Add(header, "route GET \"/items\" { response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
             ("route-duplicate-handler", Add(header, "route GET \"/items\" { handler: self::harness::route_contract::good; handler: self::harness::route_contract::good; response Found: 200 json Text; response Empty: 204; }"), "E_ROUTE_HANDLER"),
@@ -11205,6 +11449,21 @@ internal static partial class IntegrationTests
             }
             """;
         await ExpectDiagnosticsAsync(harness, "route-unsupported-json-shape", unsupportedJson, "E_ROUTE_CODEC_UNSUPPORTED");
+
+        const string genericJson = """
+            module harness::route_generic_json;
+            struct Envelope<T> { value: T }
+            union Reply { Value(self::harness::route_generic_json::Envelope<i32>), Empty }
+            fn good() -> self::harness::route_generic_json::Reply effects {} {
+                return self::harness::route_generic_json::Reply.Empty;
+            }
+            route GET "/items" {
+                handler: self::harness::route_generic_json::good;
+                response Value: 200 json self::harness::route_generic_json::Envelope<i32>;
+                response Empty: 204;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "route-generic-json-shape", genericJson, "E_ROUTE_CODEC_UNSUPPORTED");
 
         var recursiveJson = """
             module harness::route_recursive_json;

@@ -1,0 +1,4 @@
+module fixture::generic_struct_arity;
+
+pub struct Box<T> { value: T }
+pub fn invalid(value: self::fixture::generic_struct_arity::Box<i32, bool>) -> i32 effects {} { return 0; }

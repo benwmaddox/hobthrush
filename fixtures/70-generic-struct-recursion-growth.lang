@@ -1,0 +1,3 @@
+module fixture::generic_struct_recursion_growth;
+
+pub struct Node<T> { next: Option<self::fixture::generic_struct_recursion_growth::Node<List<T>>> }

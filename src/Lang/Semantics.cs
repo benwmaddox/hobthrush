@@ -41,6 +41,7 @@ internal sealed class LangType : IEquatable<LangType>
     private LangType(
         LangTypeKind kind,
         string displayName,
+        string? nominalName = null,
         int typeParameterOwnerId = -1,
         int typeParameterOrdinal = -1,
         int unionId = -1,
@@ -49,6 +50,7 @@ internal sealed class LangType : IEquatable<LangType>
     {
         Kind = kind;
         DisplayName = displayName;
+        NominalName = nominalName ?? displayName;
         TypeParameterOwnerId = typeParameterOwnerId;
         TypeParameterOrdinal = typeParameterOrdinal;
         UnionId = unionId;
@@ -58,6 +60,7 @@ internal sealed class LangType : IEquatable<LangType>
 
     public LangTypeKind Kind { get; }
     public string DisplayName { get; }
+    internal string NominalName { get; }
     public IReadOnlyList<LangType> Arguments => _arguments;
     public bool IsI32 => Kind == LangTypeKind.I32;
     public bool IsBool => Kind == LangTypeKind.Bool;
@@ -115,7 +118,21 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType ForTypeParameter(int ownerId, int ordinal, string name) =>
         new(LangTypeKind.TypeParameter, name, typeParameterOwnerId: ownerId, typeParameterOrdinal: ordinal);
     internal static LangType ForUnion(int unionId, string name) => new(LangTypeKind.Union, name, unionId: unionId);
-    internal static LangType ForStruct(int structId, string name) => new(LangTypeKind.Struct, name, structId: structId);
+    internal static LangType ForStruct(int structId, string name, IEnumerable<LangType>? arguments = null)
+    {
+        var typeArguments = (arguments ?? []).ToArray();
+        var displayName = typeArguments.Length == 0
+            ? name
+            : name + "<" + string.Join(", ", typeArguments.Select(argument => argument.DisplayName)) + ">";
+        return new LangType(
+            LangTypeKind.Struct,
+            displayName,
+            nominalName: name,
+            structId: structId,
+            arguments: typeArguments);
+    }
+    internal static LangType ForStructTypeParameter(int structId, int ordinal, string name) =>
+        new(LangTypeKind.TypeParameter, name, typeParameterOwnerId: -structId - 1, typeParameterOrdinal: ordinal);
     internal static LangType Option(LangType item) => new(LangTypeKind.Option, $"Option<{item.DisplayName}>", arguments: [item]);
     internal static LangType List(LangType item) => new(LangTypeKind.List, $"List<{item.DisplayName}>", arguments: [item]);
     internal static LangType Map(LangType key, LangType value) =>
@@ -127,7 +144,13 @@ internal sealed class LangType : IEquatable<LangType>
         if (ReferenceEquals(this, other)) return true;
         if (other is null || Kind != other.Kind) return false;
         if (Kind == LangTypeKind.Union) return UnionId == other.UnionId;
-        if (Kind == LangTypeKind.Struct) return StructId == other.StructId;
+        if (Kind == LangTypeKind.Struct)
+        {
+            if (StructId != other.StructId || _arguments.Count != other._arguments.Count) return false;
+            for (var i = 0; i < _arguments.Count; i++)
+                if (!_arguments[i].Equals(other._arguments[i])) return false;
+            return true;
+        }
         if (Kind == LangTypeKind.TypeParameter)
             return TypeParameterOwnerId == other.TypeParameterOwnerId && TypeParameterOrdinal == other.TypeParameterOrdinal;
         if (_arguments.Count != other._arguments.Count) return false;
@@ -149,6 +172,7 @@ internal sealed class LangType : IEquatable<LangType>
         else if (Kind == LangTypeKind.Struct)
         {
             hash.Add(StructId);
+            foreach (var argument in _arguments) hash.Add(argument);
         }
         else if (Kind == LangTypeKind.TypeParameter)
         {
@@ -170,7 +194,16 @@ internal sealed record CheckedVariantField(string? Name, LangType Type, int Inde
 internal sealed record CheckedVariant(int Id, string Name, IReadOnlyList<CheckedVariantField> Fields, Token At);
 internal sealed record CheckedUnion(int Id, string PackageId, string Module, string Name, bool Public, LangType Type, IReadOnlyList<CheckedVariant> Variants, Token At);
 internal sealed record CheckedStructField(string Name, LangType Type, int Index, Token At);
-internal sealed record CheckedStruct(int Id, string PackageId, string Module, string Name, bool Public, LangType Type, IReadOnlyList<CheckedStructField> Fields, Token At);
+internal sealed record CheckedStruct(
+    int Id,
+    string PackageId,
+    string Module,
+    string Name,
+    bool Public,
+    LangType Type,
+    IReadOnlyList<LangType> TypeParameters,
+    IReadOnlyList<CheckedStructField> Fields,
+    Token At);
 internal sealed record CheckedParameter(string Name, LangType Type, int LocalId, Token At);
 internal sealed record CheckedDirectCall(string PackageId, string Module, string Name);
 internal sealed record CheckedManagedAdapterBinding(string BridgeId, string OperationId);
@@ -703,6 +736,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly HashSet<int> _activeTransactionLocals = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceMapDiagnosticLocations = [];
+    private readonly HashSet<int> _invalidStructRecursion = [];
     private HashSet<int>? _activeLambdaCaptureLocalIds;
     private bool[] _resourceReachableDeclarations = [];
     private bool[] _illegalListReachableDeclarations = [];
@@ -897,6 +931,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             symbol.Declaration.Name,
             symbol.Declaration.Public,
             symbol.Type,
+            symbol.TypeParameters,
             ReadOnly(symbol.Fields),
             symbol.Declaration.At));
         var commands = _commands.Select(command => command.ToCheckedCommand());
@@ -981,7 +1016,32 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var symbol = new StructSymbol(_structs.Count, module.Identity, declaration, LangType.ForStruct(_structs.Count, declaration.Name));
+            var structId = _structs.Count;
+            var typeParameters = new List<LangType>();
+            var typeParametersByName = new Dictionary<string, LangType>(StringComparer.Ordinal);
+            foreach (var (typeParameter, ordinal) in declaration.TypeParameters.Select((parameter, index) => (parameter, index)))
+            {
+                var type = LangType.ForStructTypeParameter(structId, ordinal, typeParameter.Name);
+                typeParameters.Add(type);
+                if (!typeParametersByName.TryAdd(typeParameter.Name, type))
+                {
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is already declared", typeParameter.At);
+                    continue;
+                }
+
+                if (IsReservedTypeName(typeParameter.Name))
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
+                else if (module.TypeNames.Contains(typeParameter.Name))
+                    Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
+            }
+
+            var symbol = new StructSymbol(
+                structId,
+                module.Identity,
+                declaration,
+                LangType.ForStruct(structId, declaration.Name, typeParameters),
+                ReadOnly(typeParameters),
+                typeParametersByName);
             _structs.Add(symbol);
             module.DeclaredStructs.Add(declaration.Name, symbol);
         }
@@ -1110,7 +1170,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             input.Name,
             TypeSyntaxForCommandInput(input.Type, command.At),
             inputTokens[index])).ToArray();
-        var generatedDecl = new StructDecl(generatedName, true, generatedFields, command.At);
+        var generatedDecl = new StructDecl(generatedName, [], true, generatedFields, command.At);
         var argsType = LangType.ForStruct(_structs.Count, generatedName);
         var argsStruct = new StructSymbol(_structs.Count, module.Identity, generatedDecl, argsType);
         argsStruct.Fields.AddRange(inputs.Select((input, index) => new CheckedStructField(
@@ -1998,6 +2058,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var structure = _structs[type.StructId];
         if (!IsSourceDeclaredStruct(structure))
             return false;
+        if (structure.TypeParameters.Count != 0)
+            return false;
         if (!activeStructs.Add(type.StructId))
             return false;
 
@@ -2083,7 +2145,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
                 symbol.Fields.Add(new CheckedStructField(
                     field.Name,
-                    ResolveType(field.Type, 0),
+                    ResolveType(field.Type, 0, symbol.TypeParametersByName),
                     fieldIndex,
                     field.At));
             }
@@ -2092,44 +2154,145 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private void ValidateStructRecursion()
     {
-        var state = new byte[_structs.Count];
-        var reported = false;
-
+        var reportedDirectCycle = false;
+        var reportedExpandingInstantiation = false;
         foreach (var root in _structs)
+            Visit(root.Type, true, [], [], new HashSet<int>(), root.Declaration.At, 0);
+
+        void Visit(
+            LangType type,
+            bool valuePath,
+            List<LangType> activeStructTypes,
+            List<LangType> activeValueStructTypes,
+            HashSet<int> activeUnions,
+            Token at,
+            int depth)
         {
-            if (state[root.Id] != 0) continue;
-            var stack = new Stack<(StructSymbol Symbol, int NextField)>();
-            state[root.Id] = 1;
-            stack.Push((root, 0));
-
-            while (stack.Count != 0)
+            if (type.IsError || type.Kind == LangTypeKind.TypeParameter) return;
+            if (depth >= MaximumSemanticDepth)
             {
-                var frame = stack.Pop();
-                if (frame.NextField >= frame.Symbol.Fields.Count)
+                if (type.Kind == LangTypeKind.Struct && !reportedExpandingInstantiation)
                 {
-                    state[frame.Symbol.Id] = 2;
-                    continue;
+                    Add("E_TYPE_MISMATCH", "Generic struct recursion exceeds the semantic checker limit", at);
+                    reportedExpandingInstantiation = true;
                 }
+                if (type.Kind == LangTypeKind.Struct) MarkInvalid(type.StructId, activeStructTypes);
+                return;
+            }
 
-                stack.Push((frame.Symbol, frame.NextField + 1));
-                var field = frame.Symbol.Fields[frame.NextField];
-                if (field.Type.Kind != LangTypeKind.Struct) continue;
-
-                var target = _structs[field.Type.StructId];
-                if (state[target.Id] == 1)
+            if (type.Kind == LangTypeKind.Union)
+            {
+                if (!activeUnions.Add(type.UnionId)) return;
+                try
                 {
-                    if (!reported)
+                    foreach (var field in _unions[type.UnionId].Variants.SelectMany(variant => variant.Fields))
+                        Visit(field.Type, false, activeStructTypes, activeValueStructTypes, activeUnions, field.At, depth + 1);
+                }
+                finally
+                {
+                    activeUnions.Remove(type.UnionId);
+                }
+                return;
+            }
+
+            if (type.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Map or LangTypeKind.Result)
+            {
+                foreach (var argument in type.Arguments)
+                    Visit(argument, false, activeStructTypes, activeValueStructTypes, activeUnions, at, depth + 1);
+                return;
+            }
+
+            if (type.Kind != LangTypeKind.Struct) return;
+
+            var structure = _structs[type.StructId];
+            if (valuePath && activeValueStructTypes.Contains(type))
+            {
+                if (!reportedDirectCycle)
+                {
+                    Add("E_TYPE_MISMATCH", "Structs cannot form cycles through only direct struct fields; use Option, Result, or a tagged union to break the cycle", at);
+                    reportedDirectCycle = true;
+                }
+                MarkInvalid(structure.Id, activeStructTypes);
+                return;
+            }
+
+            // A recursive declaration may permute its type parameters and return to an
+            // earlier instantiation after several guarded steps (for example Flip<A,B>
+            // -> Flip<B,A> -> Flip<A,B>). Stop on any exact active instantiation, not
+            // merely the most recent instance of this declaration.
+            if (activeStructTypes.Contains(type)) return;
+
+            var priorInstantiation = activeStructTypes.LastOrDefault(active => active.StructId == structure.Id);
+            if (priorInstantiation is not null)
+            {
+                if (HasExpandedTypeArguments(priorInstantiation, type))
+                {
+                    if (!reportedExpandingInstantiation)
                     {
-                        Add("E_TYPE_MISMATCH", "Structs cannot form cycles through only direct struct fields; use Option, Result, or a tagged union to break the cycle", field.At);
-                        reported = true;
+                        Add("E_TYPE_MISMATCH", "Recursive generic structs cannot grow their type arguments; use a recursive field that preserves its type arguments", at);
+                        reportedExpandingInstantiation = true;
                     }
-                }
-                else if (state[target.Id] == 0)
-                {
-                    state[target.Id] = 1;
-                    stack.Push((target, 0));
+                    MarkInvalid(structure.Id, activeStructTypes);
+                    return;
                 }
             }
+
+            activeStructTypes.Add(type);
+            if (valuePath) activeValueStructTypes.Add(type);
+            try
+            {
+                foreach (var field in structure.Fields)
+                {
+                    var fieldType = InstantiateStructFieldType(structure, type, field.Type);
+                    Visit(fieldType, valuePath, activeStructTypes, activeValueStructTypes, activeUnions, field.At, depth + 1);
+                }
+            }
+            finally
+            {
+                if (valuePath) activeValueStructTypes.RemoveAt(activeValueStructTypes.Count - 1);
+                activeStructTypes.RemoveAt(activeStructTypes.Count - 1);
+            }
+        }
+
+        static bool HasExpandedTypeArguments(LangType previous, LangType current)
+        {
+            if (previous.Arguments.Count != current.Arguments.Count) return false;
+            var matchedPrevious = new bool[previous.Arguments.Count];
+            var unmatchedCurrent = new List<LangType>();
+            foreach (var currentArgument in current.Arguments)
+            {
+                var exactMatch = -1;
+                for (var index = 0; index < previous.Arguments.Count; index++)
+                {
+                    if (!matchedPrevious[index] && previous.Arguments[index] == currentArgument)
+                    {
+                        exactMatch = index;
+                        break;
+                    }
+                }
+                if (exactMatch >= 0)
+                    matchedPrevious[exactMatch] = true;
+                else
+                    unmatchedCurrent.Add(currentArgument);
+            }
+
+            // First consume unchanged arguments, including permutations. Any remaining
+            // current argument that contains a remaining prior argument is growing under
+            // a type constructor, even if another parameter is dropped or fixed.
+            foreach (var currentArgument in unmatchedCurrent)
+                foreach (var (previousArgument, index) in previous.Arguments.Select((argument, index) => (argument, index)))
+                {
+                    if (!matchedPrevious[index] && ContainsType(currentArgument, previousArgument))
+                        return true;
+                }
+            return false;
+        }
+
+        void MarkInvalid(int structId, IEnumerable<LangType> activeTypes)
+        {
+            _invalidStructRecursion.Add(structId);
+            foreach (var active in activeTypes)
+                _invalidStructRecursion.Add(active.StructId);
         }
     }
 
@@ -2858,18 +3021,33 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool ContainsIllegalResourceList(LangType type)
     {
         var pending = new Stack<LangType>();
+        var visited = new HashSet<LangType>();
         pending.Push(type);
         while (pending.TryPop(out var current))
         {
             if (current.IsList && ContainsResourceHandle(current.Arguments[0], _resourceReachableDeclarations))
                 return true;
 
-            if (TryGetDeclarationNode(current, out var declaration)
-                && _illegalListReachableDeclarations[declaration])
-                return true;
-
-            if (current.Kind is LangTypeKind.Struct or LangTypeKind.Union)
+            if (current.Kind == LangTypeKind.Struct)
+            {
+                if (_invalidStructRecursion.Contains(current.StructId)) continue;
+                if (_illegalListReachableDeclarations[current.StructId]) return true;
+                if (!visited.Add(current)) continue;
+                var structure = _structs[current.StructId];
+                foreach (var field in structure.Fields)
+                    pending.Push(InstantiateStructFieldType(structure, current, field.Type));
                 continue;
+            }
+
+            if (current.Kind == LangTypeKind.Union)
+            {
+                var declaration = _structs.Count + current.UnionId;
+                if (_illegalListReachableDeclarations[declaration]) return true;
+                if (!visited.Add(current)) continue;
+                foreach (var field in _unions[current.UnionId].Variants.SelectMany(variant => variant.Fields))
+                    pending.Push(field.Type);
+                continue;
+            }
 
             foreach (var argument in current.Arguments)
                 pending.Push(argument);
@@ -2881,18 +3059,33 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool ContainsIllegalResourceMap(LangType type)
     {
         var pending = new Stack<LangType>();
+        var visited = new HashSet<LangType>();
         pending.Push(type);
         while (pending.TryPop(out var current))
         {
             if (current.IsMap && ContainsResourceHandle(current.Arguments[1], _resourceReachableDeclarations))
                 return true;
 
-            if (TryGetDeclarationNode(current, out var declaration)
-                && _illegalMapReachableDeclarations[declaration])
-                return true;
-
-            if (current.Kind is LangTypeKind.Struct or LangTypeKind.Union)
+            if (current.Kind == LangTypeKind.Struct)
+            {
+                if (_invalidStructRecursion.Contains(current.StructId)) continue;
+                if (_illegalMapReachableDeclarations[current.StructId]) return true;
+                if (!visited.Add(current)) continue;
+                var structure = _structs[current.StructId];
+                foreach (var field in structure.Fields)
+                    pending.Push(InstantiateStructFieldType(structure, current, field.Type));
                 continue;
+            }
+
+            if (current.Kind == LangTypeKind.Union)
+            {
+                var declaration = _structs.Count + current.UnionId;
+                if (_illegalMapReachableDeclarations[declaration]) return true;
+                if (!visited.Add(current)) continue;
+                foreach (var field in _unions[current.UnionId].Variants.SelectMany(variant => variant.Fields))
+                    pending.Push(field.Type);
+                continue;
+            }
 
             foreach (var argument in current.Arguments)
                 pending.Push(argument);
@@ -3472,7 +3665,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
-        if (!expression.Reference.IsQualified && expression.Reference.Declaration == "ProcessOutput")
+        var reference = expression.Type.Reference;
+        if (!reference.IsQualified && reference.Declaration == "ProcessOutput")
         {
             foreach (var field in expression.Fields)
                 _ = CheckExpr(field.Value, null, locals, depth);
@@ -3484,16 +3678,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        var (union, structure) = ResolveTypeDeclaration(expression.Reference);
+        var (union, structure) = ResolveTypeDeclaration(reference);
         if (structure is null)
         {
             foreach (var value in expression.Fields)
                 _ = CheckExpr(value.Value, null, locals, depth);
 
             if (union is not null)
-                Add("E_TYPE_MISMATCH", $"Type '{FormatReference(expression.Reference)}' is a union, not a struct", expression.At);
+                Add("E_TYPE_MISMATCH", $"Type '{FormatReference(reference)}' is a union, not a struct", expression.At);
             return new TypedErrorExpr(expression.At);
         }
+
+        var instantiatedType = ResolveType(expression.Type, 0, _currentFunction?.TypeParametersByName);
 
         var values = new List<TypedStructFieldValue>();
         var supplied = new HashSet<int>();
@@ -3507,7 +3703,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 continue;
             }
 
-            var value = CheckExpr(initializer.Value, field.Type, locals, depth);
+            var fieldType = instantiatedType.IsError
+                ? LangType.Error
+                : InstantiateStructFieldType(structure, instantiatedType, field.Type);
+            var value = CheckExpr(initializer.Value, fieldType.IsError ? null : fieldType, locals, depth);
             if (!supplied.Add(field.Index))
                 Add("E_FIELD_DUPLICATE", $"Field '{initializer.Name}' is initialized more than once", initializer.At);
             values.Add(new TypedStructFieldValue(field.Index, value));
@@ -3519,7 +3718,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 Add("E_FIELD_MISSING", $"Field '{field.Name}' is missing from construction of '{structure.Declaration.Name}'", expression.At);
         }
 
-        return new TypedStructConstructExpr(structure.Type, structure.Id, ReadOnly(values), expression.At);
+        return instantiatedType.IsError
+            ? new TypedErrorExpr(expression.At)
+            : new TypedStructConstructExpr(instantiatedType, structure.Id, ReadOnly(values), expression.At);
     }
 
     private TypedExpr CheckFieldAccess(
@@ -3645,7 +3846,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             Add("E_FIELD_UNKNOWN", $"Struct '{structure.Declaration.Name}' has no field '{expression.Field}'", expression.At);
             return new TypedErrorExpr(expression.At);
         }
-        return new TypedFieldAccessExpr(field.Type, target, field.Index, expression.At);
+        return new TypedFieldAccessExpr(
+            InstantiateStructFieldType(structure, target.Type, field.Type),
+            target,
+            field.Index,
+            expression.At);
     }
 
     private TypedExpr CheckBinary(BinaryExpr expression, Dictionary<string, LocalSymbol> locals, int depth)
@@ -3698,11 +3903,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private bool SupportsStructuralEquality(LangType type) =>
-        SupportsStructuralEquality(type, new HashSet<(LangTypeKind Kind, int DeclarationId)>());
+        SupportsStructuralEquality(type, new HashSet<LangType>());
 
     private bool SupportsStructuralEquality(
         LangType type,
-        HashSet<(LangTypeKind Kind, int DeclarationId)> activeDeclarations)
+        HashSet<LangType> activeTypes)
     {
         if (type.IsError || ContainsResourceHandle(type)) return false;
 
@@ -3722,37 +3927,41 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return true;
             case LangTypeKind.Option:
             case LangTypeKind.List:
-                return type.Arguments.Count == 1 && SupportsStructuralEquality(type.Arguments[0], activeDeclarations);
+                return type.Arguments.Count == 1 && SupportsStructuralEquality(type.Arguments[0], activeTypes);
             case LangTypeKind.Map:
                 return type.Arguments.Count == 2 && type.Arguments[0].IsText &&
-                    SupportsStructuralEquality(type.Arguments[1], activeDeclarations);
+                    SupportsStructuralEquality(type.Arguments[1], activeTypes);
             case LangTypeKind.Result:
                 return type.Arguments.Count == 2 &&
-                    SupportsStructuralEquality(type.Arguments[0], activeDeclarations) &&
-                    SupportsStructuralEquality(type.Arguments[1], activeDeclarations);
+                    SupportsStructuralEquality(type.Arguments[0], activeTypes) &&
+                    SupportsStructuralEquality(type.Arguments[1], activeTypes);
             case LangTypeKind.Struct:
                 if (type.StructId < 0 || type.StructId >= _structs.Count) return false;
-                if (!activeDeclarations.Add((LangTypeKind.Struct, type.StructId))) return true;
+                if (_invalidStructRecursion.Contains(type.StructId)) return false;
+                if (!activeTypes.Add(type)) return true;
                 try
                 {
-                    return _structs[type.StructId].Fields.All(field =>
-                        SupportsStructuralEquality(field.Type, activeDeclarations));
+                    var structure = _structs[type.StructId];
+                    return structure.Fields.All(field => SupportsStructuralEquality(
+                        InstantiateStructFieldType(structure, type, field.Type),
+                        activeTypes));
                 }
                 finally
                 {
-                    activeDeclarations.Remove((LangTypeKind.Struct, type.StructId));
+                    activeTypes.Remove(type);
                 }
             case LangTypeKind.Union:
                 if (type.UnionId < 0 || type.UnionId >= _unions.Count) return false;
-                if (!activeDeclarations.Add((LangTypeKind.Union, type.UnionId))) return true;
+                var activeUnion = LangType.ForUnion(type.UnionId, _unions[type.UnionId].Declaration.Name);
+                if (!activeTypes.Add(activeUnion)) return true;
                 try
                 {
                     return _unions[type.UnionId].Variants.SelectMany(variant => variant.Fields).All(field =>
-                        SupportsStructuralEquality(field.Type, activeDeclarations));
+                        SupportsStructuralEquality(field.Type, activeTypes));
                 }
                 finally
                 {
-                    activeDeclarations.Remove((LangTypeKind.Union, type.UnionId));
+                    activeTypes.Remove(activeUnion);
                 }
             default:
                 return false;
@@ -4815,6 +5024,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return null;
         }
 
+        if (structure.TypeParameters.Count != 0)
+        {
+            Add("E_DB_CODEC_UNSUPPORTED", $"SQLite {role} values cannot use generic struct '{structure.Declaration.Name}'", at);
+            return null;
+        }
+
         var valid = true;
         foreach (var field in structure.Fields)
         {
@@ -5250,16 +5465,32 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool ContainsResourceHandle(LangType type, bool[] resourceReachableDeclarations)
     {
         var pending = new Stack<LangType>();
+        var visited = new HashSet<LangType>();
         pending.Push(type);
         while (pending.TryPop(out var current))
         {
             if (IsResourceHandle(current))
                 return true;
 
-            if (TryGetDeclarationNode(current, out var declaration))
+            if (current.Kind == LangTypeKind.Struct)
             {
-                if (resourceReachableDeclarations[declaration])
+                if (_invalidStructRecursion.Contains(current.StructId)) continue;
+                if (resourceReachableDeclarations[current.StructId])
                     return true;
+                if (!visited.Add(current)) continue;
+                var structure = _structs[current.StructId];
+                foreach (var field in structure.Fields)
+                    pending.Push(InstantiateStructFieldType(structure, current, field.Type));
+                continue;
+            }
+
+            if (current.Kind == LangTypeKind.Union)
+            {
+                var declaration = _structs.Count + current.UnionId;
+                if (resourceReachableDeclarations[declaration]) return true;
+                if (!visited.Add(current)) continue;
+                foreach (var field in _unions[current.UnionId].Variants.SelectMany(variant => variant.Fields))
+                    pending.Push(field.Type);
                 continue;
             }
 
@@ -5315,9 +5546,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return previous == actual;
         }
 
-        if (formal.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Map or LangTypeKind.Result)
+        if (formal.Kind is LangTypeKind.Option or LangTypeKind.List or LangTypeKind.Map or LangTypeKind.Result or LangTypeKind.Struct)
         {
-            if (formal.Kind != actual.Kind || formal.Arguments.Count != actual.Arguments.Count)
+            if (formal.Kind != actual.Kind ||
+                formal.Kind == LangTypeKind.Struct && formal.StructId != actual.StructId ||
+                formal.Arguments.Count != actual.Arguments.Count)
                 return false;
             for (var i = 0; i < formal.Arguments.Count; i++)
                 if (!TryUnifyType(formal.Arguments[i], actual.Arguments[i], bindings)) return false;
@@ -5327,24 +5560,50 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return formal == actual;
     }
 
-    private static LangType SubstituteType(LangType type, IReadOnlyDictionary<LangType, LangType> bindings)
+    private static LangType SubstituteType(
+        LangType type,
+        IReadOnlyDictionary<LangType, LangType> bindings,
+        bool preserveUnboundTypeParameters = false)
     {
         if (type.Kind == LangTypeKind.TypeParameter)
-            return bindings.TryGetValue(type, out var inferred) ? inferred : LangType.Error;
+            return bindings.TryGetValue(type, out var inferred)
+                ? inferred
+                : preserveUnboundTypeParameters ? type : LangType.Error;
         if (type.Kind == LangTypeKind.Option)
-            return LangType.Option(SubstituteType(type.Arguments[0], bindings));
+            return LangType.Option(SubstituteType(type.Arguments[0], bindings, preserveUnboundTypeParameters));
         if (type.Kind == LangTypeKind.List)
-            return LangType.List(SubstituteType(type.Arguments[0], bindings));
+            return LangType.List(SubstituteType(type.Arguments[0], bindings, preserveUnboundTypeParameters));
         if (type.Kind == LangTypeKind.Map)
             return LangType.Map(
-                SubstituteType(type.Arguments[0], bindings),
-                SubstituteType(type.Arguments[1], bindings));
+                SubstituteType(type.Arguments[0], bindings, preserveUnboundTypeParameters),
+                SubstituteType(type.Arguments[1], bindings, preserveUnboundTypeParameters));
         if (type.Kind == LangTypeKind.Result)
             return LangType.Result(
-                SubstituteType(type.Arguments[0], bindings),
-                SubstituteType(type.Arguments[1], bindings));
+                SubstituteType(type.Arguments[0], bindings, preserveUnboundTypeParameters),
+                SubstituteType(type.Arguments[1], bindings, preserveUnboundTypeParameters));
+        if (type.Kind == LangTypeKind.Struct && type.Arguments.Count != 0)
+            return LangType.ForStruct(
+                type.StructId,
+                type.NominalName,
+                type.Arguments.Select(argument => SubstituteType(argument, bindings, preserveUnboundTypeParameters)));
         return type;
     }
+
+    private static IReadOnlyDictionary<LangType, LangType> StructTypeBindings(StructSymbol structure, LangType instantiatedType)
+    {
+        var bindings = new Dictionary<LangType, LangType>();
+        for (var index = 0; index < structure.TypeParameters.Count; index++)
+        {
+            if (index < instantiatedType.Arguments.Count)
+                bindings[structure.TypeParameters[index]] = instantiatedType.Arguments[index];
+        }
+        return bindings;
+    }
+
+    private static LangType InstantiateStructFieldType(StructSymbol structure, LangType instantiatedType, LangType fieldType) =>
+        structure.TypeParameters.Count == 0
+            ? fieldType
+            : SubstituteType(fieldType, StructTypeBindings(structure, instantiatedType), preserveUnboundTypeParameters: true);
 
     private LangType ResolveType(TypeSyntax syntax, int depth) => ResolveType(syntax, depth, null);
 
@@ -5499,12 +5758,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
         if (structure is not null)
         {
-            if (syntax.Args.Count != 0)
+            if (syntax.Args.Count != structure.TypeParameters.Count)
             {
-                Add("E_TYPE_MISMATCH", $"Struct type '{name}' does not take type arguments", syntax.At);
+                Add(
+                    "E_TYPE_MISMATCH",
+                    $"Struct type '{name}' expects {structure.TypeParameters.Count} type arguments, got {syntax.Args.Count}",
+                    syntax.At);
                 return LangType.Error;
             }
-            return structure.Type;
+
+            if (structure.TypeParameters.Count == 0)
+                return structure.Type;
+
+            var arguments = syntax.Args.Select(argument => ResolveType(argument, depth + 1, typeParameters)).ToArray();
+            return arguments.Any(ContainsError)
+                ? LangType.Error
+                : LangType.ForStruct(structure.Id, structure.Declaration.Name, arguments);
         }
         return LangType.Error;
     }
@@ -5599,13 +5868,22 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public List<CheckedVariant> Variants { get; } = [];
     }
 
-    private sealed class StructSymbol(int id, ModuleIdentity moduleIdentity, StructDecl declaration, LangType type)
+    private sealed class StructSymbol(
+        int id,
+        ModuleIdentity moduleIdentity,
+        StructDecl declaration,
+        LangType type,
+        IReadOnlyList<LangType>? typeParameters = null,
+        IReadOnlyDictionary<string, LangType>? typeParametersByName = null)
     {
         public int Id { get; } = id;
         public ModuleIdentity ModuleIdentity { get; } = moduleIdentity;
         public string Module => ModuleIdentity.ModuleName;
         public StructDecl Declaration { get; } = declaration;
         public LangType Type { get; } = type;
+        public IReadOnlyList<LangType> TypeParameters { get; } = typeParameters ?? [];
+        public IReadOnlyDictionary<string, LangType> TypeParametersByName { get; } =
+            typeParametersByName ?? new Dictionary<string, LangType>(StringComparer.Ordinal);
         public List<CheckedStructField> Fields { get; } = [];
     }
 

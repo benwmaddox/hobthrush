@@ -1,0 +1,4 @@
+module fixture::generic_struct_recursion_cycle;
+
+pub struct Box<T> { value: T }
+pub struct Cycle { value: self::fixture::generic_struct_recursion_cycle::Box<self::fixture::generic_struct_recursion_cycle::Cycle> }

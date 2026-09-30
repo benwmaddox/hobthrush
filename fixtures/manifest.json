@@ -323,5 +323,50 @@
     "file": "64-lambda-generic-capture-rejected.lang",
     "status": "active",
     "expectedCodes": ["E_UNSUPPORTED"]
+  },
+  {
+    "file": "65-valid-generic-structs.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "66-generic-struct-arity.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "67-generic-struct-unbound-parameter.lang",
+    "status": "active",
+    "expectedCodes": ["E_NAME_UNRESOLVED"]
+  },
+  {
+    "file": "68-generic-struct-field-mismatch.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "69-generic-struct-recursion-cycle.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "70-generic-struct-recursion-growth.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "71-generic-struct-function-conflict.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "72-generic-struct-resource-escape.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "73-generic-struct-equality-unbound.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
   }
 ]
