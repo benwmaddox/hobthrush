@@ -238,7 +238,7 @@ internal sealed class Parser
 
     private static readonly HashSet<string> BareExpressionKeywords = new(StringComparer.Ordinal)
     {
-        "await", "false", "if", "match", "null", "true"
+        "await", "false", "if", "lambda", "match", "null", "true"
     };
 
     private readonly IReadOnlyList<Token> _tokens;
@@ -1334,6 +1334,8 @@ internal sealed class Parser
                 Fail(token, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
             if (Is("match"))
                 return ParsePostfix(ParseMatch(Take()));
+            if (Is("lambda"))
+                return ParsePostfix(ParseLambda(Take()));
             if (Is("if"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
             if (!IsBareIdentifier(token))
@@ -1410,10 +1412,42 @@ internal sealed class Parser
         return RegisterExpression(new StructConstructExpr(typeName.At, typeName, fields), depth);
     }
 
+    private Expr ParseLambda(Token at)
+    {
+        Expect("(");
+        var parameterAt = ExpectBareIdentifier();
+        Expect(":");
+        var parameterType = ParseType();
+        if (Is(","))
+            Fail(Current, "E_UNSUPPORTED", "Lambda expressions currently support exactly one parameter");
+        Expect(")");
+        Expect("=>");
+        var body = ParseExpr();
+        return RegisterExpression(
+            new LambdaExpr(at, parameterAt.Text, parameterAt, parameterType, body),
+            ExpressionDepth(body) + 1);
+    }
+
     private Expr ParsePostfix(Expr expression)
     {
-        while (Is("."))
+        while (true)
         {
+            if (Is("("))
+            {
+                if (expression is not LambdaExpr)
+                    Fail(Current, "E_UNSUPPORTED", "Only an immediately invoked lambda expression is supported");
+                var lambda = (LambdaExpr)expression;
+                var arguments = ParseArguments();
+                if (arguments.Count != 1)
+                    Fail(lambda.At, "E_UNSUPPORTED", "Lambda invocation requires exactly one argument");
+                var argument = arguments[0];
+                var depth = Math.Max(ExpressionDepth(expression), ExpressionDepth(argument)) + 1;
+                expression = RegisterExpression(new LambdaInvokeExpr(lambda.At, lambda, argument), depth);
+                continue;
+            }
+
+            if (!Is("."))
+                break;
             Take();
             var fieldAt = ExpectMemberIdentifier();
             if (Is("("))

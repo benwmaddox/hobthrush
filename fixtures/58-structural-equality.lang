@@ -1,0 +1,86 @@
+module fixture::structural_equality;
+
+struct Item { id: i32, label: Text }
+struct Link { value: i32, next: Option<self::fixture::structural_equality::Link> }
+struct Empty {}
+union Choice { Held(self::fixture::structural_equality::Item), Empty }
+union Fault { Invalid(i32), Missing }
+
+fn echo(item: self::fixture::structural_equality::Item) -> self::fixture::structural_equality::Item effects {} {
+    return item;
+}
+
+fn same_items(left: self::fixture::structural_equality::Item, right: self::fixture::structural_equality::Item) -> bool effects {} {
+    return left == right;
+}
+
+pub fn main() -> i32 effects {} {
+    let original: self::fixture::structural_equality::Item = self::fixture::structural_equality::Item { id: 7, label: "seven" };
+    let shared: self::fixture::structural_equality::Item = original;
+    var rebound: self::fixture::structural_equality::Item = shared;
+    rebound = self::fixture::structural_equality::Item { id: 7, label: "seven" };
+    let different: self::fixture::structural_equality::Item = self::fixture::structural_equality::Item { id: 7, label: "different" };
+
+    if self::fixture::structural_equality::same_items(original, self::fixture::structural_equality::echo(rebound)) == false {
+        return 1;
+    }
+    if original != different {
+        if original == shared {
+            let items: List<self::fixture::structural_equality::Item> = [original, shared];
+            let copied_items: List<self::fixture::structural_equality::Item> = items;
+            let changed_items: List<self::fixture::structural_equality::Item> = items.append(self::fixture::structural_equality::Item { id: 8, label: "eight" });
+            if items != copied_items { return 2; }
+            if items == changed_items { return 3; }
+
+            let empty_first_map: Map<Text, self::fixture::structural_equality::Item> = Map.empty();
+            let empty_reordered_map: Map<Text, self::fixture::structural_equality::Item> = Map.empty();
+            let first_map: Map<Text, self::fixture::structural_equality::Item> = empty_first_map.set("a", original).set("b", shared);
+            let reordered_map: Map<Text, self::fixture::structural_equality::Item> = empty_reordered_map.set("b", shared).set("a", original);
+            let extended_map: Map<Text, self::fixture::structural_equality::Item> = first_map.set("c", original);
+            if first_map != reordered_map { return 4; }
+            if first_map == extended_map { return 5; }
+
+            let choice_a: self::fixture::structural_equality::Choice = self::fixture::structural_equality::Choice.Held(original);
+            let choice_b: self::fixture::structural_equality::Choice = self::fixture::structural_equality::Choice.Held(shared);
+            let choice_empty: self::fixture::structural_equality::Choice = self::fixture::structural_equality::Choice.Empty;
+            if choice_a != choice_b { return 6; }
+            if choice_a == choice_empty { return 7; }
+
+            let wrapped_a: Result<Option<self::fixture::structural_equality::Choice>, self::fixture::structural_equality::Fault> = Ok(Some(choice_a));
+            let wrapped_b: Result<Option<self::fixture::structural_equality::Choice>, self::fixture::structural_equality::Fault> = Ok(Some(choice_b));
+            let wrapped_failure_a: Result<self::fixture::structural_equality::Item, self::fixture::structural_equality::Fault> = Err(self::fixture::structural_equality::Fault.Invalid(9));
+            let wrapped_failure_b: Result<self::fixture::structural_equality::Item, self::fixture::structural_equality::Fault> = Err(self::fixture::structural_equality::Fault.Invalid(9));
+            if wrapped_a != wrapped_b { return 8; }
+            if wrapped_failure_a != wrapped_failure_b { return 9; }
+
+            let none_a: Option<self::fixture::structural_equality::Item> = None;
+            let none_b: Option<self::fixture::structural_equality::Item> = None;
+            if none_a != none_b { return 10; }
+
+            let link_a: self::fixture::structural_equality::Link = self::fixture::structural_equality::Link {
+                value: 2,
+                next: Some(self::fixture::structural_equality::Link { value: 1, next: None })
+            };
+            let link_b: self::fixture::structural_equality::Link = self::fixture::structural_equality::Link {
+                value: 2,
+                next: Some(self::fixture::structural_equality::Link { value: 1, next: None })
+            };
+            if link_a != link_b { return 11; }
+
+            let empty_a: self::fixture::structural_equality::Empty = self::fixture::structural_equality::Empty {};
+            let empty_b: self::fixture::structural_equality::Empty = self::fixture::structural_equality::Empty {};
+            if empty_a != empty_b { return 12; }
+
+            let html_a: Html = html.paragraph("same");
+            let html_b: Html = html.paragraph("same");
+            let html_different: Html = html.paragraph("different");
+            if html_a != html_b { return 13; }
+            if html_a == html_different { return 14; }
+            return 0;
+        } else {
+            return 15;
+        }
+    } else {
+        return 16;
+    }
+}

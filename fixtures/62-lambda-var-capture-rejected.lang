@@ -1,0 +1,6 @@
+module fixture::lambda_var_capture_rejected;
+
+pub fn invalid() -> i32 effects {} {
+    var total: i32 = 40;
+    return (lambda (delta: i32) => total + delta)(2);
+}

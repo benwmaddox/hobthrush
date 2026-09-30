@@ -102,6 +102,10 @@ internal static class CheckedReportFacts
         {
             switch (expression)
             {
+                case TypedLambdaInvokeExpr lambda:
+                    VisitExpression(lambda.Argument);
+                    VisitExpression(lambda.Body);
+                    break;
                 case TypedAwaitExpr awaited:
                     VisitExpression(awaited.Value);
                     break;

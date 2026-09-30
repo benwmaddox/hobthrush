@@ -288,5 +288,40 @@
     "file": "57-map-resource-generic.lang",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "58-structural-equality.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "59-generic-equality-needs-bound.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "60-resource-equality-rejected.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "61-lambda-value-capture.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "62-lambda-var-capture-rejected.lang",
+    "status": "active",
+    "expectedCodes": ["E_CLOSURE_CAPTURE_MUTABLE"]
+  },
+  {
+    "file": "63-lambda-resource-capture-rejected.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "64-lambda-generic-capture-rejected.lang",
+    "status": "active",
+    "expectedCodes": ["E_UNSUPPORTED"]
   }
 ]

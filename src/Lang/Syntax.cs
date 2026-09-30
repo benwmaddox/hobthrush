@@ -109,6 +109,8 @@ internal sealed record BoolExpr(Token At, bool Value) : Expr(At);
 internal sealed record TextExpr(Token At, string Value) : Expr(At);
 internal sealed record ListExpr(Token At, IReadOnlyList<Expr> Items) : Expr(At);
 internal sealed record NameExpr(Token At, string Name) : Expr(At);
+internal sealed record LambdaExpr(Token At, string ParameterName, Token ParameterAt, TypeSyntax ParameterType, Expr Body) : Expr(At);
+internal sealed record LambdaInvokeExpr(Token At, LambdaExpr Lambda, Expr Argument) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
 internal sealed record DeclarationRefExpr(Token At, SourceDeclarationRefSyntax Reference) : Expr(At);
 internal sealed record CallExpr(Token At, SourceDeclarationRefSyntax Reference, IReadOnlyList<Expr> Arguments) : Expr(At);

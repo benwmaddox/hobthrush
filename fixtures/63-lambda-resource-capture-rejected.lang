@@ -1,0 +1,9 @@
+module fixture::lambda_resource_capture_rejected;
+
+fn uses_read(db: DbRead) -> bool effects { db.read } {
+    return true;
+}
+
+pub fn invalid(db: DbRead) -> bool effects { db.read } {
+    return (lambda (unused: i32) => self::fixture::lambda_resource_capture_rejected::uses_read(db))(0);
+}
