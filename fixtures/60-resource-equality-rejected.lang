@@ -1,0 +1,5 @@
+module fixture::resource_equality_rejected;
+
+pub fn same_database(left: DbRead, right: DbRead) -> bool effects {} {
+    return left == right;
+}

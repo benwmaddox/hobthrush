@@ -3551,13 +3551,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var comparedRight = CheckExpr(expression.Right, null, locals, depth);
             if (comparedLeft.Type.IsError || comparedRight.Type.IsError) return new TypedErrorExpr(expression.At);
 
-            if (comparedLeft.Type == comparedRight.Type &&
-                (comparedLeft.Type.IsI32 || comparedLeft.Type.IsBool || comparedLeft.Type.IsText))
+            if (comparedLeft.Type == comparedRight.Type && SupportsStructuralEquality(comparedLeft.Type))
                 return new TypedCompareExpr(expression.Op, comparedLeft, comparedRight, expression.At);
 
             Add(
                 "E_TYPE_MISMATCH",
-                $"Comparison '{expression.Op}' requires matching operands of type i32, bool, or Text",
+                $"Comparison '{expression.Op}' requires matching immutable values with structural equality; found '{comparedLeft.Type.DisplayName}' and '{comparedRight.Type.DisplayName}'",
                 expression.At);
             return new TypedErrorExpr(expression.At);
         }
@@ -3591,6 +3590,68 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
         return new TypedBinaryExpr(LangType.I32, expression.Op, left, right, expression.At);
+    }
+
+    private bool SupportsStructuralEquality(LangType type) =>
+        SupportsStructuralEquality(type, new HashSet<(LangTypeKind Kind, int DeclarationId)>());
+
+    private bool SupportsStructuralEquality(
+        LangType type,
+        HashSet<(LangTypeKind Kind, int DeclarationId)> activeDeclarations)
+    {
+        if (type.IsError || ContainsResourceHandle(type)) return false;
+
+        switch (type.Kind)
+        {
+            case LangTypeKind.I32:
+            case LangTypeKind.Bool:
+            case LangTypeKind.Text:
+            case LangTypeKind.Html:
+            case LangTypeKind.FilePath:
+            case LangTypeKind.HttpResponse:
+            case LangTypeKind.ProcessOutput:
+            case LangTypeKind.FsError:
+            case LangTypeKind.ProcessError:
+            case LangTypeKind.HttpError:
+            case LangTypeKind.DbError:
+                return true;
+            case LangTypeKind.Option:
+            case LangTypeKind.List:
+                return type.Arguments.Count == 1 && SupportsStructuralEquality(type.Arguments[0], activeDeclarations);
+            case LangTypeKind.Map:
+                return type.Arguments.Count == 2 && type.Arguments[0].IsText &&
+                    SupportsStructuralEquality(type.Arguments[1], activeDeclarations);
+            case LangTypeKind.Result:
+                return type.Arguments.Count == 2 &&
+                    SupportsStructuralEquality(type.Arguments[0], activeDeclarations) &&
+                    SupportsStructuralEquality(type.Arguments[1], activeDeclarations);
+            case LangTypeKind.Struct:
+                if (type.StructId < 0 || type.StructId >= _structs.Count) return false;
+                if (!activeDeclarations.Add((LangTypeKind.Struct, type.StructId))) return true;
+                try
+                {
+                    return _structs[type.StructId].Fields.All(field =>
+                        SupportsStructuralEquality(field.Type, activeDeclarations));
+                }
+                finally
+                {
+                    activeDeclarations.Remove((LangTypeKind.Struct, type.StructId));
+                }
+            case LangTypeKind.Union:
+                if (type.UnionId < 0 || type.UnionId >= _unions.Count) return false;
+                if (!activeDeclarations.Add((LangTypeKind.Union, type.UnionId))) return true;
+                try
+                {
+                    return _unions[type.UnionId].Variants.SelectMany(variant => variant.Fields).All(field =>
+                        SupportsStructuralEquality(field.Type, activeDeclarations));
+                }
+                finally
+                {
+                    activeDeclarations.Remove((LangTypeKind.Union, type.UnionId));
+                }
+            default:
+                return false;
+        }
     }
 
     private TypedExpr CheckCall(

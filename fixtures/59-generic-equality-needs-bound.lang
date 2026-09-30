@@ -1,0 +1,5 @@
+module fixture::generic_equality_needs_bound;
+
+pub fn equal<T>(left: T, right: T) -> bool effects {} {
+    return left == right;
+}

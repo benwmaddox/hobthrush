@@ -408,6 +408,7 @@ internal static class Emitter
         private readonly WebDatabaseOptions? _webDatabaseOptions = webDatabaseOptions;
         private readonly string? _httpOrigin = httpOrigin;
         private readonly ProcessRunnerRuntimeOptions? _processRunnerOptions = processRunnerOptions;
+        private int _structuralEqualityTemporaryId;
 
         private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
             !_testFunctionIds.Contains(function.Id) || _includedTestFunctionIds.Contains(function.Id));
@@ -480,6 +481,7 @@ internal static class Emitter
             if (NeedsProcessRunnerRuntime) EmitProcessRunnerRuntime();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
+            if (UsesStructuralEquality) EmitStructuralEqualityHelpers();
             foreach (var function in EmittedFunctions) EmitFunction(function);
             if (UsesFsReadText) EmitFsReadTextHelper();
             if (UsesFsReadTextAsync) EmitFsReadTextAsyncHelper();
@@ -1584,20 +1586,247 @@ internal static class Emitter
         {
             var left = EmitExpr(expression.Left);
             var right = EmitExpr(expression.Right);
+            if (expression.Op is "==" or "!=")
+            {
+                var equality = EmitStructuralEquality(expression.Left.Type, left, right);
+                return expression.Op == "==" ? equality : "!(" + equality + ")";
+            }
+
             if (expression.Left.Type.IsText)
             {
-                if (expression.Op is not ("==" or "!="))
-                    throw new InvalidOperationException("Text comparison only supports equality");
-                var equals = "string.Equals(" + left + ", " + right + ", StringComparison.Ordinal)";
-                return expression.Op == "==" ? equals : "!" + equals;
+                throw new InvalidOperationException("Text ordering is not supported");
             }
 
             return expression.Op switch
             {
-                "==" or "!=" or "<" or "<=" or ">" or ">=" =>
+                "<" or "<=" or ">" or ">=" =>
                     "(" + left + " " + expression.Op + " " + right + ")",
                 _ => throw new InvalidOperationException("Unknown comparison operator")
             };
+        }
+
+        private void EmitStructuralEqualityHelpers()
+        {
+            _source.AppendLine("    private static bool SequenceStructuralEquals<T>(global::System.Collections.Immutable.ImmutableArray<T> left, global::System.Collections.Immutable.ImmutableArray<T> right, global::System.Func<T, T, bool> equals)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (left.Length != right.Length) return false;");
+            _source.AppendLine("        for (var index = 0; index < left.Length; index++)");
+            _source.AppendLine("            if (!equals(left[index], right[index])) return false;");
+            _source.AppendLine("        return true;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    private static bool MapStructuralEquals<T>(global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> left, global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> right, global::System.Func<T, T, bool> equals)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (left.Count != right.Count) return false;");
+            _source.AppendLine("        foreach (var entry in left)");
+            _source.AppendLine("            if (!right.TryGetValue(entry.Key, out var value) || !equals(entry.Value, value)) return false;");
+            _source.AppendLine("        return true;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+
+            foreach (var structure in program.Structs.Where(structure => CanEmitStructuralEquality(structure.Type)))
+            {
+                var comparison = structure.Fields.Count == 0
+                    ? "true"
+                    : string.Join(" && ", structure.Fields.Select(field =>
+                        EmitStructuralEquality(field.Type,
+                            "left.Field_" + field.Index.ToString(CultureInfo.InvariantCulture),
+                            "right.Field_" + field.Index.ToString(CultureInfo.InvariantCulture))));
+                _source.Append("    private static bool StructuralEqualsStruct_")
+                    .Append(structure.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append("(Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" left, Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" right) => ").Append(comparison).AppendLine(";");
+            }
+
+            foreach (var union in program.Unions.Where(union => CanEmitStructuralEquality(union.Type)))
+            {
+                var cases = new List<string>();
+                foreach (var variant in union.Variants)
+                {
+                    var leftName = "leftVariant_" + union.Id.ToString(CultureInfo.InvariantCulture) + "_" +
+                        variant.Id.ToString(CultureInfo.InvariantCulture);
+                    var rightName = "rightVariant_" + union.Id.ToString(CultureInfo.InvariantCulture) + "_" +
+                        variant.Id.ToString(CultureInfo.InvariantCulture);
+                    var variantType = "Union_" + union.Id.ToString(CultureInfo.InvariantCulture) + ".Variant_" +
+                        union.Id.ToString(CultureInfo.InvariantCulture) + "_" + variant.Id.ToString(CultureInfo.InvariantCulture);
+                    var payloadEquality = variant.Fields.Count == 0
+                        ? "true"
+                        : string.Join(" && ", variant.Fields.Select(field =>
+                            EmitStructuralEquality(field.Type,
+                                leftName + ".Payload_" + field.Index.ToString(CultureInfo.InvariantCulture),
+                                rightName + ".Payload_" + field.Index.ToString(CultureInfo.InvariantCulture))));
+                    cases.Add("(" + variantType + " " + leftName + ", " + variantType + " " + rightName + ") => " + payloadEquality);
+                }
+                cases.Add("_ => false");
+                _source.Append("    private static bool StructuralEqualsUnion_")
+                    .Append(union.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append("(Union_").Append(union.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" left, Union_").Append(union.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" right) => (left, right) switch { ")
+                    .Append(string.Join(", ", cases)).AppendLine(" };");
+            }
+
+            EmitEmptyUnionStructuralEquality(LangTypeKind.FsError, "FsError",
+                ["NotFound", "PermissionDenied", "InvalidPath", "InvalidText", "Io"]);
+            EmitEmptyUnionStructuralEquality(LangTypeKind.ProcessError, "ProcessError",
+                ["InvalidArgument", "InputTooLarge", "OutputTooLarge", "InvalidText", "StartFailed", "TimedOut"]);
+            EmitEmptyUnionStructuralEquality(LangTypeKind.HttpError, "HttpError",
+                ["InvalidTarget", "Transport", "Timeout", "ResponseTooLarge", "InvalidText"]);
+            EmitEmptyUnionStructuralEquality(LangTypeKind.DbError, "DbError", ["Statement", "RowShape"]);
+
+            if (UsesTypeKind(LangTypeKind.FilePath))
+                _source.AppendLine("    private static bool StructuralEqualsFilePath(FilePath left, FilePath right) => global::System.String.Equals(left.Value, right.Value, global::System.StringComparison.Ordinal);");
+            if (UsesTypeKind(LangTypeKind.Html))
+                _source.AppendLine("    private static bool StructuralEqualsHtml(Html left, Html right) => global::System.String.Equals(left.Value, right.Value, global::System.StringComparison.Ordinal);");
+            if (UsesTypeKind(LangTypeKind.HttpResponse))
+                _source.AppendLine("    private static bool StructuralEqualsHttpResponse(HttpResponse left, HttpResponse right) => left.Field_0 == right.Field_0 && global::System.String.Equals(left.Field_1, right.Field_1, global::System.StringComparison.Ordinal);");
+            if (UsesTypeKind(LangTypeKind.ProcessOutput))
+                _source.AppendLine("    private static bool StructuralEqualsProcessOutput(ProcessOutput left, ProcessOutput right) => left.Field_0 == right.Field_0 && global::System.String.Equals(left.Field_1, right.Field_1, global::System.StringComparison.Ordinal) && global::System.String.Equals(left.Field_2, right.Field_2, global::System.StringComparison.Ordinal);");
+            _source.AppendLine();
+        }
+
+        private void EmitEmptyUnionStructuralEquality(LangTypeKind kind, string typeName, IReadOnlyList<string> variants)
+        {
+            if (!UsesTypeKind(kind)) return;
+            var cases = variants.Select(variant =>
+                "(" + typeName + "." + variant + " _, " + typeName + "." + variant + " _) => true").ToList();
+            cases.Add("_ => false");
+            _source.Append("    private static bool StructuralEquals").Append(typeName)
+                .Append('(').Append(typeName).Append(" left, ").Append(typeName)
+                .Append(" right) => (left, right) switch { ")
+                .Append(string.Join(", ", cases)).AppendLine(" };");
+        }
+
+        private string EmitStructuralEquality(LangType type, string left, string right)
+        {
+            switch (type.Kind)
+            {
+                case LangTypeKind.I32:
+                case LangTypeKind.Bool:
+                    return "(" + left + " == " + right + ")";
+                case LangTypeKind.Text:
+                    return "global::System.String.Equals(" + left + ", " + right + ", global::System.StringComparison.Ordinal)";
+                case LangTypeKind.Struct:
+                    return "StructuralEqualsStruct_" + type.StructId.ToString(CultureInfo.InvariantCulture) + "(" + left + ", " + right + ")";
+                case LangTypeKind.Union:
+                    return "StructuralEqualsUnion_" + type.UnionId.ToString(CultureInfo.InvariantCulture) + "(" + left + ", " + right + ")";
+                case LangTypeKind.Option:
+                {
+                    var tempId = _structuralEqualityTemporaryId++;
+                    var leftSome = "leftSome_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var rightSome = "rightSome_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var optionType = EmitType(type);
+                    var someType = optionType + ".Some";
+                    var noneType = optionType + ".None";
+                    return "(" + left + ", " + right + ") switch { (" + someType + " " + leftSome + ", " + someType + " " + rightSome + ") => " +
+                        EmitStructuralEquality(type.Arguments[0], leftSome + ".Value", rightSome + ".Value") +
+                        ", (" + noneType + " _, " + noneType + " _) => true, _ => false }";
+                }
+                case LangTypeKind.Result:
+                {
+                    var tempId = _structuralEqualityTemporaryId++;
+                    var leftOk = "leftOk_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var rightOk = "rightOk_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var leftErr = "leftErr_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var rightErr = "rightErr_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var resultType = EmitType(type);
+                    var okType = resultType + ".Ok";
+                    var errType = resultType + ".Err";
+                    return "(" + left + ", " + right + ") switch { (" + okType + " " + leftOk + ", " + okType + " " + rightOk + ") => " +
+                        EmitStructuralEquality(type.Arguments[0], leftOk + ".Value", rightOk + ".Value") +
+                        ", (" + errType + " " + leftErr + ", " + errType + " " + rightErr + ") => " +
+                        EmitStructuralEquality(type.Arguments[1], leftErr + ".Error", rightErr + ".Error") +
+                        ", _ => false }";
+                }
+                case LangTypeKind.List:
+                {
+                    var tempId = _structuralEqualityTemporaryId++;
+                    var leftItem = "leftItem_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var rightItem = "rightItem_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    return "SequenceStructuralEquals(" + left + ", " + right + ", (" + leftItem + ", " + rightItem + ") => " +
+                        EmitStructuralEquality(type.Arguments[0], leftItem, rightItem) + ")";
+                }
+                case LangTypeKind.Map:
+                {
+                    var tempId = _structuralEqualityTemporaryId++;
+                    var leftValue = "leftValue_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    var rightValue = "rightValue_" + tempId.ToString(CultureInfo.InvariantCulture);
+                    return "MapStructuralEquals(" + left + ", " + right + ", (" + leftValue + ", " + rightValue + ") => " +
+                        EmitStructuralEquality(type.Arguments[1], leftValue, rightValue) + ")";
+                }
+                case LangTypeKind.FilePath:
+                    return "StructuralEqualsFilePath(" + left + ", " + right + ")";
+                case LangTypeKind.Html:
+                    return "StructuralEqualsHtml(" + left + ", " + right + ")";
+                case LangTypeKind.HttpResponse:
+                    return "StructuralEqualsHttpResponse(" + left + ", " + right + ")";
+                case LangTypeKind.ProcessOutput:
+                    return "StructuralEqualsProcessOutput(" + left + ", " + right + ")";
+                case LangTypeKind.FsError:
+                case LangTypeKind.ProcessError:
+                case LangTypeKind.HttpError:
+                case LangTypeKind.DbError:
+                    return "StructuralEquals" + type.DisplayName + "(" + left + ", " + right + ")";
+                default:
+                    throw new InvalidOperationException("Unsupported type reached structural equality emission: " + type.DisplayName);
+            }
+        }
+
+        private bool CanEmitStructuralEquality(LangType type) =>
+            CanEmitStructuralEquality(type, new HashSet<(LangTypeKind Kind, int DeclarationId)>());
+
+        private bool CanEmitStructuralEquality(LangType type, HashSet<(LangTypeKind Kind, int DeclarationId)> activeDeclarations)
+        {
+            switch (type.Kind)
+            {
+                case LangTypeKind.I32:
+                case LangTypeKind.Bool:
+                case LangTypeKind.Text:
+                case LangTypeKind.Html:
+                case LangTypeKind.FilePath:
+                case LangTypeKind.HttpResponse:
+                case LangTypeKind.ProcessOutput:
+                case LangTypeKind.FsError:
+                case LangTypeKind.ProcessError:
+                case LangTypeKind.HttpError:
+                case LangTypeKind.DbError:
+                    return true;
+                case LangTypeKind.Option:
+                case LangTypeKind.List:
+                    return type.Arguments.Count == 1 && CanEmitStructuralEquality(type.Arguments[0], activeDeclarations);
+                case LangTypeKind.Map:
+                    return type.Arguments.Count == 2 && type.Arguments[0].IsText &&
+                        CanEmitStructuralEquality(type.Arguments[1], activeDeclarations);
+                case LangTypeKind.Result:
+                    return type.Arguments.Count == 2 && CanEmitStructuralEquality(type.Arguments[0], activeDeclarations) &&
+                        CanEmitStructuralEquality(type.Arguments[1], activeDeclarations);
+                case LangTypeKind.Struct:
+                    if (type.StructId < 0 || type.StructId >= program.Structs.Count) return false;
+                    if (!activeDeclarations.Add((LangTypeKind.Struct, type.StructId))) return true;
+                    try
+                    {
+                        return program.Structs[type.StructId].Fields.All(field => CanEmitStructuralEquality(field.Type, activeDeclarations));
+                    }
+                    finally
+                    {
+                        activeDeclarations.Remove((LangTypeKind.Struct, type.StructId));
+                    }
+                case LangTypeKind.Union:
+                    if (type.UnionId < 0 || type.UnionId >= program.Unions.Count) return false;
+                    if (!activeDeclarations.Add((LangTypeKind.Union, type.UnionId))) return true;
+                    try
+                    {
+                        return program.Unions[type.UnionId].Variants.SelectMany(variant => variant.Fields)
+                            .All(field => CanEmitStructuralEquality(field.Type, activeDeclarations));
+                    }
+                    finally
+                    {
+                        activeDeclarations.Remove((LangTypeKind.Union, type.UnionId));
+                    }
+                default:
+                    return false;
+            }
         }
 
         private string EmitBuiltinConstruct(TypedBuiltinConstructExpr expression)
@@ -3755,6 +3984,13 @@ internal static class Emitter
 
         private bool UsesTypeKind(LangTypeKind kind) => EnumerateDeclaredTypes()
             .Any(type => ContainsTypeKind(type, kind));
+
+        private bool UsesStructuralEquality => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedCompareExpr>()
+            .Any(comparison => comparison.Op is "==" or "!=");
 
         private IEnumerable<LangType> EnumerateDeclaredTypes()
         {

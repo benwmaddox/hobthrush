@@ -288,5 +288,20 @@
     "file": "57-map-resource-generic.lang",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "58-structural-equality.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "59-generic-equality-needs-bound.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "60-resource-equality-rejected.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
   }
 ]
