@@ -113,7 +113,7 @@ text            = '"', { character | escape }, '"' ;
 escape          = '\"' | '\\' | '\n' | '\r' | '\t' | '\0' ;
 lexical_identifier = letter | "_", { letter | digit | "_" } ;
 member_identifier = lexical_identifier ;
-bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await" ;
+bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await", "lambda" ;
 ```
 
 Within a route body, `path` and `query` are contextual item keywords; binding names use lexical identifiers. The binding-type productions above are the checked supported types: path values are `Text` or `i32`, and query values may additionally be `Option<Text>` or `Option<i32>`. A POST body type is a fully qualified, non-generic declared struct. Body, binding, and handler items precede response mappings; GET has no body and POST has exactly one.
