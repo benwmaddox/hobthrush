@@ -1,0 +1,34 @@
+module fixture::generic_structs;
+
+pub struct Box<T> { value: T }
+pub struct Pair<Left, Right> { left: Left, right: Right }
+pub struct Holder { nested: self::fixture::generic_structs::Box<self::fixture::generic_structs::Box<i32>> }
+pub struct Node<T> { value: T, next: Option<self::fixture::generic_structs::Node<T>> }
+pub struct Flip<Left, Right> {
+    left: Left,
+    right: Right,
+    next: Option<self::fixture::generic_structs::Flip<Right, Left>>
+}
+pub struct MutualA<Left, Right> { child: Option<self::fixture::generic_structs::MutualB<Left, Right>>, value: Right }
+pub struct MutualB<Left, Right> { parent: Option<self::fixture::generic_structs::MutualA<Right, Left>> }
+pub struct PermutedA<Left, Right> { child: Option<self::fixture::generic_structs::PermutedB<Right, Left>>, value: Right }
+pub struct PermutedB<Left, Right> { parent: Option<self::fixture::generic_structs::PermutedA<Left, Right>> }
+pub struct Tag<T> { value: i32 }
+pub struct Tagged<T> { tag: self::fixture::generic_structs::Tag<T> }
+pub struct Phantom<T> {}
+
+pub fn preserve<T>(value: self::fixture::generic_structs::Box<T>) -> self::fixture::generic_structs::Box<T> effects {} {
+    return value;
+}
+pub fn swap<Left, Right>(pair: self::fixture::generic_structs::Pair<Left, Right>) -> self::fixture::generic_structs::Pair<Right, Left> effects {} {
+    return self::fixture::generic_structs::Pair<Right, Left> { left: pair.right, right: pair.left };
+}
+pub fn same_tag<T>(left: self::fixture::generic_structs::Tag<T>, right: self::fixture::generic_structs::Tag<T>) -> bool effects {} {
+    return left == right;
+}
+pub fn same_tagged<T>(left: self::fixture::generic_structs::Tagged<T>, right: self::fixture::generic_structs::Tagged<T>) -> bool effects {} {
+    return left == right;
+}
+pub fn unused_resource(value: self::fixture::generic_structs::Phantom<FsRead>) -> i32 effects {} {
+    return 0;
+}

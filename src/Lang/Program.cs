@@ -682,6 +682,13 @@ internal static class Driver
                 id = ApiDeclarationId(structure.PackageId, structure.Module, structure.Name, packageReferences),
                 source_ids = ApiDeclarationIds(structure.PackageId, structure.Module, structure.Name, sourceAliasesByPackageId),
                 package = packageReferences[structure.PackageId],
+                type_parameters = structure.TypeParameters
+                    .Select(typeParameter => new
+                    {
+                        name = typeParameter.DisplayName,
+                        ordinal = typeParameter.TypeParameterOrdinal
+                    })
+                    .ToArray(),
                 fields = structure.Fields
                     .Select(field => new
                     {
@@ -774,9 +781,12 @@ internal static class Driver
                     unionsById[route.ReplyUnionId].PackageId,
                     unionsById[route.ReplyUnionId].Module,
                     unionsById[route.ReplyUnionId].Name,
+                    [],
                     packageReferences,
                     packageIdentities,
-                    sourceAliasesByPackageId),
+                    sourceAliasesByPackageId,
+                    structsById,
+                    unionsById),
                 handler_source_ids = ApiFunctionSourceIds(route.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
                 parameters = route.Bindings
                     .OrderBy(binding => binding.HandlerParameterIndex)
@@ -844,7 +854,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 7,
+            schema_version = 8,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -878,78 +888,101 @@ internal static class Driver
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
         IReadOnlyDictionary<int, CheckedUnion> unionsById) => type.Kind switch
-    {
-        LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
-        LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
-        LangTypeKind.Text => new { kind = "primitive", name = "Text" },
-        LangTypeKind.Html => new { kind = "primitive", name = "Html" },
-        LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
-        LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
-        LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
-        LangTypeKind.Config => new { kind = "primitive", name = "Config" },
-        LangTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
-        LangTypeKind.Logger => new { kind = "primitive", name = "Logger" },
-        LangTypeKind.SecretText => new
         {
-            kind = "secret",
-            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
-        },
-        LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
-        LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
-        LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
-        LangTypeKind.HttpError => new { kind = "primitive", name = "HttpError" },
-        LangTypeKind.ProcessRunner => new { kind = "primitive", name = "ProcessRunner" },
-        LangTypeKind.ProcessOutput => new { kind = "primitive", name = "ProcessOutput" },
-        LangTypeKind.ProcessError => new { kind = "primitive", name = "ProcessError" },
-        LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
-        LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
-        LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
-        LangTypeKind.DbError => new { kind = "primitive", name = "DbError" },
-        LangTypeKind.TypeParameter => new
-        {
-            kind = "type_parameter",
-            name = type.DisplayName,
-            ordinal = type.TypeParameterOrdinal
-        },
-        LangTypeKind.List => new
-        {
-            kind = "list",
-            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
-        },
-        LangTypeKind.Map => new
-        {
-            kind = "map",
-            key = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
-            value = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
-        },
-        LangTypeKind.Option => new
-        {
-            kind = "option",
-            item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
-        },
-        LangTypeKind.Result => new
-        {
-            kind = "result",
-            ok = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
-            error = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
-        },
-        LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) =>
-            ApiNominalType("struct", structure.PackageId, structure.Module, structure.Name, packageReferences, packageIdentities, sourceAliasesByPackageId),
-        LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) =>
-            ApiNominalType("union", union.PackageId, union.Module, union.Name, packageReferences, packageIdentities, sourceAliasesByPackageId),
-        LangTypeKind.Error => throw new InvalidOperationException("A checked API cannot contain an error type"),
-        LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
-        _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
-    };
+            LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
+            LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
+            LangTypeKind.Text => new { kind = "primitive", name = "Text" },
+            LangTypeKind.Html => new { kind = "primitive", name = "Html" },
+            LangTypeKind.FilePath => new { kind = "primitive", name = "FilePath" },
+            LangTypeKind.FsRead => new { kind = "primitive", name = "FsRead" },
+            LangTypeKind.FsWrite => new { kind = "primitive", name = "FsWrite" },
+            LangTypeKind.Config => new { kind = "primitive", name = "Config" },
+            LangTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
+            LangTypeKind.Logger => new { kind = "primitive", name = "Logger" },
+            LangTypeKind.SecretText => new
+            {
+                kind = "secret",
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+            },
+            LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
+            LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
+            LangTypeKind.HttpResponse => new { kind = "primitive", name = "HttpResponse" },
+            LangTypeKind.HttpError => new { kind = "primitive", name = "HttpError" },
+            LangTypeKind.ProcessRunner => new { kind = "primitive", name = "ProcessRunner" },
+            LangTypeKind.ProcessOutput => new { kind = "primitive", name = "ProcessOutput" },
+            LangTypeKind.ProcessError => new { kind = "primitive", name = "ProcessError" },
+            LangTypeKind.DbRead => new { kind = "primitive", name = "DbRead" },
+            LangTypeKind.DbWrite => new { kind = "primitive", name = "DbWrite" },
+            LangTypeKind.Transaction => new { kind = "primitive", name = "Transaction" },
+            LangTypeKind.DbError => new { kind = "primitive", name = "DbError" },
+            LangTypeKind.TypeParameter => new
+            {
+                kind = "type_parameter",
+                name = type.DisplayName,
+                ordinal = type.TypeParameterOrdinal
+            },
+            LangTypeKind.List => new
+            {
+                kind = "list",
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+            },
+            LangTypeKind.Map => new
+            {
+                kind = "map",
+                key = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                value = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+            },
+            LangTypeKind.Option => new
+            {
+                kind = "option",
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+            },
+            LangTypeKind.Result => new
+            {
+                kind = "result",
+                ok = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                error = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+            },
+            LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) =>
+                        ApiNominalType(
+                            "struct",
+                            structure.PackageId,
+                            structure.Module,
+                            structure.Name,
+                            type.Arguments,
+                            packageReferences,
+                            packageIdentities,
+                            sourceAliasesByPackageId,
+                            structsById,
+                            unionsById),
+            LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) =>
+                        ApiNominalType(
+                            "union",
+                            union.PackageId,
+                            union.Module,
+                            union.Name,
+                            [],
+                            packageReferences,
+                            packageIdentities,
+                            sourceAliasesByPackageId,
+                            structsById,
+                            unionsById),
+            LangTypeKind.Error => throw new InvalidOperationException("A checked API cannot contain an error type"),
+            LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
+            _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
+        };
 
     private static object ApiNominalType(
         string declarationKind,
         string packageId,
         string module,
         string name,
+        IReadOnlyList<LangType> typeArguments,
         IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
         IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
-        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId)
+        IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
+        IReadOnlyDictionary<int, CheckedStruct> structsById,
+        IReadOnlyDictionary<int, CheckedUnion> unionsById)
     {
         if (!packageIdentities.TryGetValue(packageId, out var package))
             throw new InvalidOperationException("A checked nominal type has no resolved package identity");
@@ -963,7 +996,10 @@ internal static class Driver
             source_ids = sourceIds,
             package,
             module,
-            name
+            name,
+            type_arguments = typeArguments
+                .Select(argument => ApiType(argument, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById))
+                .ToArray()
         };
     }
 

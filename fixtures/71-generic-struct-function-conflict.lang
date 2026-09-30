@@ -1,0 +1,12 @@
+module fixture::generic_struct_function_conflict;
+
+pub struct Box<T> { value: T }
+fn first<T>(left: self::fixture::generic_struct_function_conflict::Box<T>, right: self::fixture::generic_struct_function_conflict::Box<T>) -> self::fixture::generic_struct_function_conflict::Box<T> effects {} {
+    return left;
+}
+pub fn invalid() -> i32 effects {} {
+    let mismatch: self::fixture::generic_struct_function_conflict::Box<i32> = self::fixture::generic_struct_function_conflict::first(
+        self::fixture::generic_struct_function_conflict::Box<i32> { value: 1 },
+        self::fixture::generic_struct_function_conflict::Box<bool> { value: true });
+    return 0;
+}

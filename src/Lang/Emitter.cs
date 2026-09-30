@@ -401,6 +401,9 @@ internal static class Emitter
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
+        private CheckedStruct? _emittingStruct;
+        private readonly Dictionary<LangType, string> _structTypeParameterEqualityNames = [];
+        private int[][]? _structEqualityParameterOrdinals;
         private readonly HashSet<int> _testFunctionIds = program.Tests
             .Select(test => test.FunctionId)
             .ToHashSet();
@@ -1199,8 +1202,12 @@ internal static class Emitter
 
         private void EmitStruct(CheckedStruct structure)
         {
+            _emittingStruct = structure;
             _source.Append("    ").Append(structure.Public ? "public" : "private")
-                .Append(" sealed record Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture)).Append('(');
+                .Append(" sealed record Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture));
+            if (structure.TypeParameters.Count != 0)
+                _source.Append('<').Append(string.Join(", ", structure.TypeParameters.Select((_, index) => TypeParameterName(index)))).Append('>');
+            _source.Append('(');
             for (var i = 0; i < structure.Fields.Count; i++)
             {
                 if (i != 0) _source.Append(", ");
@@ -1210,6 +1217,7 @@ internal static class Emitter
             }
             _source.AppendLine(");");
             _source.AppendLine();
+            _emittingStruct = null;
         }
 
         private void EmitFunction(CheckedFunction function)
@@ -1634,6 +1642,11 @@ internal static class Emitter
 
             foreach (var structure in program.Structs.Where(structure => CanEmitStructuralEquality(structure.Type)))
             {
+                _emittingStruct = structure;
+                var equalityParameterOrdinals = StructEqualityParameterOrdinals(structure);
+                foreach (var index in equalityParameterOrdinals)
+                    _structTypeParameterEqualityNames.Add(structure.TypeParameters[index], "equals_" + index.ToString(CultureInfo.InvariantCulture));
+
                 var comparison = structure.Fields.Count == 0
                     ? "true"
                     : string.Join(" && ", structure.Fields.Select(field =>
@@ -1641,10 +1654,21 @@ internal static class Emitter
                             "left.Field_" + field.Index.ToString(CultureInfo.InvariantCulture),
                             "right.Field_" + field.Index.ToString(CultureInfo.InvariantCulture))));
                 _source.Append("    private static bool StructuralEqualsStruct_")
-                    .Append(structure.Id.ToString(CultureInfo.InvariantCulture))
-                    .Append("(Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture))
-                    .Append(" left, Struct_").Append(structure.Id.ToString(CultureInfo.InvariantCulture))
-                    .Append(" right) => ").Append(comparison).AppendLine(";");
+                    .Append(structure.Id.ToString(CultureInfo.InvariantCulture));
+                if (structure.TypeParameters.Count != 0)
+                    _source.Append('<').Append(string.Join(", ", structure.TypeParameters.Select((_, index) => TypeParameterName(index)))).Append('>');
+                _source.Append('(').Append(EmitType(structure.Type)).Append(" left, ")
+                    .Append(EmitType(structure.Type)).Append(" right");
+                foreach (var index in equalityParameterOrdinals)
+                {
+                    var typeParameter = TypeParameterName(index);
+                    _source.Append(", global::System.Func<").Append(typeParameter).Append(", ")
+                        .Append(typeParameter).Append(", bool> equals_")
+                        .Append(index.ToString(CultureInfo.InvariantCulture));
+                }
+                _source.Append(") => ").Append(comparison).AppendLine(";");
+                _structTypeParameterEqualityNames.Clear();
+                _emittingStruct = null;
             }
 
             foreach (var union in program.Unions.Where(union => CanEmitStructuralEquality(union.Type)))
@@ -1716,9 +1740,29 @@ internal static class Emitter
                 case LangTypeKind.Text:
                     return "global::System.String.Equals(" + left + ", " + right + ", global::System.StringComparison.Ordinal)";
                 case LangTypeKind.Struct:
-                    return "StructuralEqualsStruct_" + type.StructId.ToString(CultureInfo.InvariantCulture) + "(" + left + ", " + right + ")";
+                    {
+                        var comparerArguments = new List<string>();
+                        foreach (var index in StructEqualityParameterOrdinals(program.Structs[type.StructId]))
+                        {
+                            if (index >= type.Arguments.Count)
+                                throw new InvalidOperationException("A generic struct equality call is missing a type argument");
+                            var leftArgument = "structLeft_" + _structuralEqualityTemporaryId.ToString(CultureInfo.InvariantCulture);
+                            var rightArgument = "structRight_" + _structuralEqualityTemporaryId.ToString(CultureInfo.InvariantCulture);
+                            _structuralEqualityTemporaryId++;
+                            comparerArguments.Add("(" + leftArgument + ", " + rightArgument + ") => " +
+                                EmitStructuralEquality(type.Arguments[index], leftArgument, rightArgument));
+                        }
+                        var arguments = left + ", " + right;
+                        if (comparerArguments.Count != 0)
+                            arguments += ", " + string.Join(", ", comparerArguments);
+                        return "StructuralEqualsStruct_" + type.StructId.ToString(CultureInfo.InvariantCulture) + "(" + arguments + ")";
+                    }
                 case LangTypeKind.Union:
                     return "StructuralEqualsUnion_" + type.UnionId.ToString(CultureInfo.InvariantCulture) + "(" + left + ", " + right + ")";
+                case LangTypeKind.TypeParameter:
+                    if (_structTypeParameterEqualityNames.TryGetValue(type, out var equalityName))
+                        return equalityName + "(" + left + ", " + right + ")";
+                    throw new InvalidOperationException("Unresolved type parameter reached structural equality emission");
                 case LangTypeKind.Option:
                 {
                     var tempId = _structuralEqualityTemporaryId++;
@@ -1781,59 +1825,168 @@ internal static class Emitter
             }
         }
 
-        private bool CanEmitStructuralEquality(LangType type) =>
-            CanEmitStructuralEquality(type, new HashSet<(LangTypeKind Kind, int DeclarationId)>());
-
-        private bool CanEmitStructuralEquality(LangType type, HashSet<(LangTypeKind Kind, int DeclarationId)> activeDeclarations)
+        private bool CanEmitStructuralEquality(LangType type)
         {
-            switch (type.Kind)
+            var pending = new Stack<LangType>();
+            var visited = new HashSet<LangType>();
+            pending.Push(type);
+
+            while (pending.TryPop(out var current))
             {
-                case LangTypeKind.I32:
-                case LangTypeKind.Bool:
-                case LangTypeKind.Text:
-                case LangTypeKind.Html:
-                case LangTypeKind.FilePath:
-                case LangTypeKind.HttpResponse:
-                case LangTypeKind.ProcessOutput:
-                case LangTypeKind.FsError:
-                case LangTypeKind.ProcessError:
-                case LangTypeKind.HttpError:
-                case LangTypeKind.DbError:
-                    return true;
-                case LangTypeKind.Option:
-                case LangTypeKind.List:
-                    return type.Arguments.Count == 1 && CanEmitStructuralEquality(type.Arguments[0], activeDeclarations);
-                case LangTypeKind.Map:
-                    return type.Arguments.Count == 2 && type.Arguments[0].IsText &&
-                        CanEmitStructuralEquality(type.Arguments[1], activeDeclarations);
-                case LangTypeKind.Result:
-                    return type.Arguments.Count == 2 && CanEmitStructuralEquality(type.Arguments[0], activeDeclarations) &&
-                        CanEmitStructuralEquality(type.Arguments[1], activeDeclarations);
-                case LangTypeKind.Struct:
-                    if (type.StructId < 0 || type.StructId >= program.Structs.Count) return false;
-                    if (!activeDeclarations.Add((LangTypeKind.Struct, type.StructId))) return true;
-                    try
-                    {
-                        return program.Structs[type.StructId].Fields.All(field => CanEmitStructuralEquality(field.Type, activeDeclarations));
-                    }
-                    finally
-                    {
-                        activeDeclarations.Remove((LangTypeKind.Struct, type.StructId));
-                    }
-                case LangTypeKind.Union:
-                    if (type.UnionId < 0 || type.UnionId >= program.Unions.Count) return false;
-                    if (!activeDeclarations.Add((LangTypeKind.Union, type.UnionId))) return true;
-                    try
-                    {
-                        return program.Unions[type.UnionId].Variants.SelectMany(variant => variant.Fields)
-                            .All(field => CanEmitStructuralEquality(field.Type, activeDeclarations));
-                    }
-                    finally
-                    {
-                        activeDeclarations.Remove((LangTypeKind.Union, type.UnionId));
-                    }
-                default:
-                    return false;
+                switch (current.Kind)
+                {
+                    case LangTypeKind.TypeParameter:
+                    case LangTypeKind.I32:
+                    case LangTypeKind.Bool:
+                    case LangTypeKind.Text:
+                    case LangTypeKind.Html:
+                    case LangTypeKind.FilePath:
+                    case LangTypeKind.HttpResponse:
+                    case LangTypeKind.ProcessOutput:
+                    case LangTypeKind.FsError:
+                    case LangTypeKind.ProcessError:
+                    case LangTypeKind.HttpError:
+                    case LangTypeKind.DbError:
+                        break;
+                    case LangTypeKind.Option:
+                    case LangTypeKind.List:
+                        if (current.Arguments.Count != 1) return false;
+                        pending.Push(current.Arguments[0]);
+                        break;
+                    case LangTypeKind.Map:
+                        if (current.Arguments.Count != 2 || !current.Arguments[0].IsText) return false;
+                        pending.Push(current.Arguments[1]);
+                        break;
+                    case LangTypeKind.Result:
+                        if (current.Arguments.Count != 2) return false;
+                        pending.Push(current.Arguments[0]);
+                        pending.Push(current.Arguments[1]);
+                        break;
+                    case LangTypeKind.Struct:
+                        if (current.StructId < 0 || current.StructId >= program.Structs.Count) return false;
+                        if (!visited.Add(current)) break;
+                        var structure = program.Structs[current.StructId];
+                        foreach (var field in structure.Fields)
+                            pending.Push(SubstituteStructTypeParameters(field.Type, structure, current));
+                        break;
+                    case LangTypeKind.Union:
+                        if (current.UnionId < 0 || current.UnionId >= program.Unions.Count) return false;
+                        if (!visited.Add(current)) break;
+                        foreach (var field in program.Unions[current.UnionId].Variants.SelectMany(variant => variant.Fields))
+                            pending.Push(field.Type);
+                        break;
+                    default:
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static LangType SubstituteStructTypeParameters(
+            LangType type,
+            CheckedStruct structure,
+            LangType instantiatedType)
+        {
+            if (type.Kind == LangTypeKind.TypeParameter &&
+                type.TypeParameterOwnerId == -structure.Id - 1 &&
+                type.TypeParameterOrdinal >= 0 && type.TypeParameterOrdinal < instantiatedType.Arguments.Count)
+                return instantiatedType.Arguments[type.TypeParameterOrdinal];
+
+            if (type.Arguments.Count == 0) return type;
+            var arguments = type.Arguments.Select(argument =>
+                SubstituteStructTypeParameters(argument, structure, instantiatedType)).ToArray();
+            return type.Kind switch
+            {
+                LangTypeKind.Option => LangType.Option(arguments[0]),
+                LangTypeKind.List => LangType.List(arguments[0]),
+                LangTypeKind.Map => LangType.Map(arguments[0], arguments[1]),
+                LangTypeKind.Result => LangType.Result(arguments[0], arguments[1]),
+                LangTypeKind.Struct => LangType.ForStruct(type.StructId, type.NominalName, arguments),
+                _ => type
+            };
+        }
+
+        private int[] StructEqualityParameterOrdinals(CheckedStruct structure)
+        {
+            _structEqualityParameterOrdinals ??= ComputeStructEqualityParameterOrdinals();
+            return _structEqualityParameterOrdinals[structure.Id];
+        }
+
+        private int[][] ComputeStructEqualityParameterOrdinals()
+        {
+            var requiredByStruct = program.Structs
+                .Select(_ => new HashSet<int>())
+                .ToArray();
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var structure in program.Structs)
+                {
+                    var required = new HashSet<int>(requiredByStruct[structure.Id]);
+                    foreach (var field in structure.Fields)
+                        CollectStructEqualityParameterOrdinals(
+                            field.Type,
+                            structure,
+                            required,
+                            requiredByStruct,
+                            new HashSet<int>());
+                    if (required.SetEquals(requiredByStruct[structure.Id])) continue;
+                    requiredByStruct[structure.Id] = required;
+                    changed = true;
+                }
+            } while (changed);
+
+            return requiredByStruct
+                .Select(required => required.Order().ToArray())
+                .ToArray();
+        }
+
+        private void CollectStructEqualityParameterOrdinals(
+            LangType type,
+            CheckedStruct owner,
+            HashSet<int> requiredOrdinals,
+            IReadOnlyList<HashSet<int>> requiredByStruct,
+            HashSet<int> activeUnionIds)
+        {
+            if (type.Kind == LangTypeKind.TypeParameter)
+            {
+                if (type.TypeParameterOwnerId == -owner.Id - 1 &&
+                    type.TypeParameterOrdinal >= 0 && type.TypeParameterOrdinal < owner.TypeParameters.Count)
+                    requiredOrdinals.Add(type.TypeParameterOrdinal);
+                return;
+            }
+
+            if (type.Kind == LangTypeKind.Struct)
+            {
+                if (type.StructId < 0 || type.StructId >= program.Structs.Count) return;
+                var nested = program.Structs[type.StructId];
+                foreach (var ordinal in requiredByStruct[nested.Id])
+                {
+                    if (ordinal < type.Arguments.Count)
+                        CollectStructEqualityParameterOrdinals(
+                            type.Arguments[ordinal], owner, requiredOrdinals, requiredByStruct, activeUnionIds);
+                }
+                return;
+            }
+
+            foreach (var argument in type.Arguments)
+                CollectStructEqualityParameterOrdinals(argument, owner, requiredOrdinals, requiredByStruct, activeUnionIds);
+
+            if (type.Kind == LangTypeKind.Union && type.UnionId >= 0 && type.UnionId < program.Unions.Count &&
+                activeUnionIds.Add(type.UnionId))
+            {
+                try
+                {
+                    foreach (var field in program.Unions[type.UnionId].Variants.SelectMany(variant => variant.Fields))
+                        CollectStructEqualityParameterOrdinals(
+                            field.Type, owner, requiredOrdinals, requiredByStruct, activeUnionIds);
+                }
+                finally
+                {
+                    activeUnionIds.Remove(type.UnionId);
+                }
             }
         }
 
@@ -1870,7 +2023,7 @@ internal static class Emitter
             string.Join(", ", expression.Arguments.Select(EmitExpr)) + ")";
 
         private string EmitStructConstruct(TypedStructConstructExpr expression) =>
-            "new Struct_" + expression.StructId.ToString(CultureInfo.InvariantCulture) + "(" +
+            "new " + EmitType(expression.Type) + "(" +
             string.Join(", ", expression.Fields.Select(field =>
                 "Field_" + field.FieldIndex.ToString(CultureInfo.InvariantCulture) + ": " + EmitExpr(field.Value))) + ")";
 
@@ -3774,7 +3927,7 @@ internal static class Emitter
             LangTypeKind.FilePath => "FilePath",
             LangTypeKind.Html => "Html",
             LangTypeKind.Union => "Union_" + type.UnionId.ToString(CultureInfo.InvariantCulture),
-            LangTypeKind.Struct => "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture),
+            LangTypeKind.Struct => EmitStructType(type),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
             LangTypeKind.TypeParameter => EmitTypeParameter(type),
@@ -3806,13 +3959,31 @@ internal static class Emitter
                 EmitType(type.Arguments[1]) + ">";
         }
 
+        private string EmitStructType(LangType type)
+        {
+            var name = "Struct_" + type.StructId.ToString(CultureInfo.InvariantCulture);
+            return type.Arguments.Count == 0
+                ? name
+                : name + "<" + string.Join(", ", type.Arguments.Select(EmitType)) + ">";
+        }
+
         private string EmitTypeParameter(LangType type)
         {
             var ordinal = type.TypeParameterOrdinal;
-            if (_emittingFunction is null ||
-                type.TypeParameterOwnerId != _emittingFunction.Id ||
-                ordinal < 0 || ordinal >= _emittingFunction.TypeParameters.Count)
-                throw new InvalidOperationException("Type parameter reached emitter outside its defining function");
+            if (type.TypeParameterOwnerId >= 0)
+            {
+                if (_emittingFunction is null ||
+                    type.TypeParameterOwnerId != _emittingFunction.Id ||
+                    ordinal < 0 || ordinal >= _emittingFunction.TypeParameters.Count)
+                    throw new InvalidOperationException("Type parameter reached emitter outside its defining function");
+            }
+            else
+            {
+                var structId = -type.TypeParameterOwnerId - 1;
+                if (_emittingStruct is null || _emittingStruct.Id != structId ||
+                    ordinal < 0 || ordinal >= _emittingStruct.TypeParameters.Count)
+                    throw new InvalidOperationException("Type parameter reached emitter outside its defining struct");
+            }
             return TypeParameterName(ordinal);
         }
 

@@ -1,0 +1,4 @@
+module fixture::generic_struct_resource_escape;
+
+pub struct Box<T> { value: T }
+pub fn escape(values: List<self::fixture::generic_struct_resource_escape::Box<FsRead>>) -> i32 effects {} { return 0; }
