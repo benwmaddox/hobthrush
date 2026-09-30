@@ -368,5 +368,65 @@
     "file": "73-generic-struct-equality-unbound.lang",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "74-valid-generic-unions.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "75-generic-union-arity.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "76-generic-union-unbound-parameter.lang",
+    "status": "active",
+    "expectedCodes": ["E_NAME_UNRESOLVED"]
+  },
+  {
+    "file": "77-generic-union-payload-mismatch.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "78-generic-union-function-conflict.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "79-generic-union-recursion-growth.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "80-generic-union-resource-escape.lang",
+    "status": "active",
+    "expectedCodes": ["E_RESOURCE_ESCAPE", "E_RESOURCE_ESCAPE"]
+  },
+  {
+    "file": "81-generic-union-match-missing-arm.lang",
+    "status": "active",
+    "expectedCodes": ["E_MATCH_NONEXHAUSTIVE"]
+  },
+  {
+    "file": "82-generic-union-route-reply.lang",
+    "status": "active",
+    "expectedCodes": ["E_ROUTE_HANDLER"]
+  },
+  {
+    "file": "83-generic-union-route-codec.lang",
+    "status": "active",
+    "expectedCodes": ["E_ROUTE_CODEC_UNSUPPORTED"]
+  },
+  {
+    "file": "84-generic-union-sqlite-codec.lang",
+    "status": "active",
+    "expectedCodes": ["E_DB_CODEC_UNSUPPORTED", "E_DB_CODEC_UNSUPPORTED"]
+  },
+  {
+    "file": "85-generic-union-pattern-type-arguments.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
   }
 ]

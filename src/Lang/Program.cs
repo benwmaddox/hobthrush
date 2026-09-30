@@ -707,6 +707,13 @@ internal static class Driver
                 id = ApiDeclarationId(union.PackageId, union.Module, union.Name, packageReferences),
                 source_ids = ApiDeclarationIds(union.PackageId, union.Module, union.Name, sourceAliasesByPackageId),
                 package = packageReferences[union.PackageId],
+                type_parameters = union.TypeParameters
+                    .Select(typeParameter => new
+                    {
+                        name = typeParameter.DisplayName,
+                        ordinal = typeParameter.TypeParameterOrdinal
+                    })
+                    .ToArray(),
                 variants = union.Variants
                     .Select(variant => new
                     {
@@ -854,7 +861,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 8,
+            schema_version = 9,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -961,7 +968,7 @@ internal static class Driver
                             union.PackageId,
                             union.Module,
                             union.Name,
-                            [],
+                            type.Arguments,
                             packageReferences,
                             packageIdentities,
                             sourceAliasesByPackageId,

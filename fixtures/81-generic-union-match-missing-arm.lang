@@ -1,0 +1,14 @@
+module fixture::generic_union_match_missing_arm;
+
+pub union Choice<T> {
+    Value(T),
+    Empty,
+}
+
+pub fn main() -> i32 effects {} {
+    let choice: self::fixture::generic_union_match_missing_arm::Choice<i32> =
+        self::fixture::generic_union_match_missing_arm::Choice<i32>.Value(1);
+    return match choice {
+        self::fixture::generic_union_match_missing_arm::Choice.Value(value) => value,
+    };
+}

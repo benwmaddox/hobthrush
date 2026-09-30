@@ -1,0 +1,17 @@
+module fixture::generic_union_sqlite_codec;
+
+pub union Value<T> {
+    Item(T),
+}
+
+pub struct Parameters {
+    value: self::fixture::generic_union_sqlite_codec::Value<i32>,
+}
+
+pub struct Row {
+    value: self::fixture::generic_union_sqlite_codec::Value<i32>,
+}
+
+pub fn read(db: DbRead, parameters: self::fixture::generic_union_sqlite_codec::Parameters) -> Result<Option<self::fixture::generic_union_sqlite_codec::Row>, DbError> effects { db.read } {
+    return db.query_one("SELECT value FROM records", parameters);
+}

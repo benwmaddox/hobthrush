@@ -1,0 +1,10 @@
+module fixture::generic_union_resource_escape;
+
+pub union Carrier<T> {
+    Hold(T),
+    Empty,
+}
+
+pub fn escape(value: self::fixture::generic_union_resource_escape::Carrier<FsRead>) -> List<self::fixture::generic_union_resource_escape::Carrier<FsRead>> effects {} {
+    return [value];
+}

@@ -1,0 +1,9 @@
+module fixture::generic_union_arity;
+
+pub union Choice<T> {
+    Value(T),
+}
+
+pub fn read(value: self::fixture::generic_union_arity::Choice) -> i32 effects {} {
+    return 0;
+}

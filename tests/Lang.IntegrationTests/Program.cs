@@ -66,6 +66,7 @@ internal static partial class IntegrationTests
             ("struct constructors support nested and chained field reads", TestStructValues),
             ("struct values compose with Option, Result, and unions", TestStructWrappers),
             ("generic immutable structs substitute fields, compare structurally, and run in managed and NativeAOT builds", TestGenericStructs),
+            ("generic tagged unions substitute payloads, match exhaustively, compare structurally, and run in managed and NativeAOT builds", TestGenericUnions),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
             ("struct field initializers and reads are checked", TestStructFieldDiagnostics),
@@ -1108,6 +1109,304 @@ internal static partial class IntegrationTests
             """;
         await ExpectDiagnosticsAsync(
             harness, "generic-struct-equality-stored-resource", storedResourceEquality, "E_TYPE_MISMATCH");
+    }
+
+    private static async Task TestGenericUnions(Harness harness)
+    {
+        const string source = """
+            module harness::generic_unions;
+            pub struct Box<T> { value: T }
+            pub union Maybe<T> { Some(T), None }
+            pub struct Envelope<T> { choice: self::harness::generic_unions::Maybe<self::harness::generic_unions::Box<T>> }
+            pub union Tree<T> { Leaf(T), Branch(List<self::harness::generic_unions::Tree<T>>) }
+            pub union Tag<T> { Mark(i32) }
+            pub union Cycle<First, Second> {
+                Next(self::harness::generic_unions::Cycle<Second, First>),
+                Done(Second)
+            }
+            pub struct CompareA<Left, Right> {
+                child: Option<self::harness::generic_unions::CompareB<Right, Left>>,
+                value: Left
+            }
+            pub union CompareB<Left, Right> {
+                Parent(Option<self::harness::generic_unions::CompareA<Right, Left>>),
+                Value(Left),
+                Empty
+            }
+
+            pub fn project<T>(value: self::harness::generic_unions::Maybe<T>) -> Option<T> effects {} {
+                return match value {
+                    self::harness::generic_unions::Maybe.Some(item) => Some(item),
+                    self::harness::generic_unions::Maybe.None => None
+                };
+            }
+            pub fn same_tag<T>(left: self::harness::generic_unions::Tag<T>, right: self::harness::generic_unions::Tag<T>) -> bool effects {} {
+                return left == right;
+            }
+            pub fn main() -> i32 effects {} {
+                let maybe: self::harness::generic_unions::Maybe<i32> =
+                    self::harness::generic_unions::Maybe<i32>.Some(9);
+                let projected: Option<i32> = self::harness::generic_unions::project(maybe);
+                let projected_value: i32 = match projected {
+                    Some(value) => value,
+                    None => 0
+                };
+                let envelope: self::harness::generic_unions::Envelope<i32> =
+                    self::harness::generic_unions::Envelope<i32> {
+                        choice: self::harness::generic_unions::Maybe<self::harness::generic_unions::Box<i32>>.Some(
+                            self::harness::generic_unions::Box<i32> { value: 5 })
+                    };
+                let contained: i32 = match envelope.choice {
+                    self::harness::generic_unions::Maybe.Some(boxed) => boxed.value,
+                    self::harness::generic_unions::Maybe.None => 0
+                };
+                let tree: self::harness::generic_unions::Tree<i32> =
+                    self::harness::generic_unions::Tree<i32>.Branch([
+                        self::harness::generic_unions::Tree<i32>.Leaf(4)]);
+                let tree_count: i32 = match tree {
+                    self::harness::generic_unions::Tree.Leaf(value) => value,
+                    self::harness::generic_unions::Tree.Branch(children) => children.length
+                };
+                let list_left: self::harness::generic_unions::Maybe<List<i32>> =
+                    self::harness::generic_unions::Maybe<List<i32>>.Some([1, 2]);
+                let list_right: self::harness::generic_unions::Maybe<List<i32>> =
+                    self::harness::generic_unions::Maybe<List<i32>>.Some([1, 2]);
+                if list_left == list_right { } else { return 1; }
+                let leaf_a: self::harness::generic_unions::CompareA<i32, Text> =
+                    self::harness::generic_unions::CompareA<i32, Text> { child: None, value: 7 };
+                let leaf_b: self::harness::generic_unions::CompareA<i32, Text> =
+                    self::harness::generic_unions::CompareA<i32, Text> { child: None, value: 7 };
+                let nested_a: self::harness::generic_unions::CompareA<i32, Text> =
+                    self::harness::generic_unions::CompareA<i32, Text> {
+                        child: Some(self::harness::generic_unions::CompareB<Text, i32>.Parent(Some(leaf_a))),
+                        value: 3
+                    };
+                let nested_b: self::harness::generic_unions::CompareA<i32, Text> =
+                    self::harness::generic_unions::CompareA<i32, Text> {
+                        child: Some(self::harness::generic_unions::CompareB<Text, i32>.Parent(Some(leaf_b))),
+                        value: 3
+                    };
+                if nested_a == nested_b { } else { return 2; }
+                let cycle_left: self::harness::generic_unions::Cycle<Text, i32> =
+                    self::harness::generic_unions::Cycle<Text, i32>.Next(
+                        self::harness::generic_unions::Cycle<i32, Text>.Next(
+                            self::harness::generic_unions::Cycle<Text, i32>.Done(10)));
+                let cycle_right: self::harness::generic_unions::Cycle<Text, i32> =
+                    self::harness::generic_unions::Cycle<Text, i32>.Next(
+                        self::harness::generic_unions::Cycle<i32, Text>.Next(
+                            self::harness::generic_unions::Cycle<Text, i32>.Done(10)));
+                if cycle_left == cycle_right { } else { return 4; }
+                let tag_left: self::harness::generic_unions::Tag<FsRead> =
+                    self::harness::generic_unions::Tag<FsRead>.Mark(11);
+                let tag_right: self::harness::generic_unions::Tag<FsRead> =
+                    self::harness::generic_unions::Tag<FsRead>.Mark(11);
+                if self::harness::generic_unions::same_tag(tag_left, tag_right) { } else { return 3; }
+                return projected_value + contained + tree_count;
+            }
+            """;
+
+        var managed = await harness.InvokeAsync("generic-unions-managed", "run", source);
+        AssertRunOutput("15" + Environment.NewLine, managed);
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("The generic-union NativeAOT test requires Windows x64 or Linux x64.");
+
+        var build = await harness.InvokeWithTimeoutAsync(
+            "generic-unions-aot", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, build.ExitCode, Describe(build));
+        const string prefix = "Built native executable: ";
+        AssertTrue(build.StandardOutput.StartsWith(prefix, StringComparison.Ordinal), Describe(build));
+        var executablePath = build.StandardOutput[prefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(executablePath) && File.Exists(executablePath),
+            $"Expected the generic-union NativeAOT executable at {executablePath}.");
+        AssertRunOutput("15" + Environment.NewLine,
+            await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30)));
+
+        const string storedResource = """
+            module harness::generic_union_stored_resource;
+            pub union Carrier<T> { Hold(T), Empty }
+            pub fn escape(value: self::harness::generic_union_stored_resource::Carrier<FsRead>) -> List<self::harness::generic_union_stored_resource::Carrier<FsRead>> effects {} {
+                return [value];
+            }
+        """;
+        await ExpectDiagnosticsAsync(harness, "generic-union-stored-resource", storedResource, "E_RESOURCE_ESCAPE");
+
+        const string permutedStoredResource = """
+            module harness::generic_union_permuted_resource;
+            pub union Cycle<First, Second> {
+                Next(self::harness::generic_union_permuted_resource::Cycle<Second, First>),
+                Done(Second)
+            }
+            pub fn same(
+                left: self::harness::generic_union_permuted_resource::Cycle<FsRead, i32>,
+                right: self::harness::generic_union_permuted_resource::Cycle<FsRead, i32>
+            ) -> bool effects {} {
+                return left == right;
+            }
+            """;
+        await ExpectDiagnosticsAsync(
+            harness, "generic-union-permuted-stored-resource", permutedStoredResource, "E_TYPE_MISMATCH");
+
+        const string crossKindGrowth = """
+            module harness::generic_union_cross_kind_growth;
+            pub struct Holder<T> { item: self::harness::generic_union_cross_kind_growth::Growing<T> }
+            pub union Growing<T> {
+                Again(self::harness::generic_union_cross_kind_growth::Holder<List<T>>),
+                Done
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "generic-union-cross-kind-growth", crossKindGrowth, "E_TYPE_MISMATCH");
+
+        var rotationParameters = Enumerable.Range(0, 193).Select(index => $"T{index}").ToArray();
+        var rotatedParameters = rotationParameters.Skip(1).Append(rotationParameters[0]);
+        var longPermutation = "module harness::generic_union_long_permutation;\n"
+            + $"pub union Rotate<{string.Join(", ", rotationParameters)}> {{\n"
+            + $"    Next(self::harness::generic_union_long_permutation::Rotate<{string.Join(", ", rotatedParameters)}>),\n"
+            + "    Done\n}\n";
+        var longPermutationCheck = await harness.InvokeAsync(
+            "generic-union-long-permutation", "check", longPermutation);
+        AssertEqual(0, longPermutationCheck.ExitCode, Describe(longPermutationCheck));
+
+        const string unrelatedResourceEquality = """
+            module harness::generic_union_equality_resource;
+            pub union Choice<T> { Value(T), Empty }
+            pub union Tag<T> { Mark(i32) }
+            pub fn main() -> i32 effects {} {
+                if 1 == 1 { return 2; }
+                return 3;
+            }
+            """;
+        AssertRunOutput("2" + Environment.NewLine,
+            await harness.InvokeAsync("generic-union-unrelated-resource-equality", "run", unrelatedResourceEquality));
+
+        var genericReply = """
+            module harness::generic_union_route_reply;
+            pub union Reply<T> { Found(T), Empty }
+            route GET "/items" {
+                handler: self::harness::generic_union_route_reply::get_items;
+                response Found: 200 json Text;
+                response Empty: 204;
+            }
+            pub fn get_items() -> self::harness::generic_union_route_reply::Reply<Text> effects {} {
+                return self::harness::generic_union_route_reply::Reply<Text>.Found("ok");
+            }
+            """;
+        var routeDiagnostics = await ExpectDiagnosticsAsync(
+            harness, "generic-union-route-reply", genericReply, "E_ROUTE_HANDLER");
+        AssertEqual("Route handler reply unions must be nongeneric",
+            routeDiagnostics.Single().Message,
+            "A generic reply union must fail early with one stable route-handler diagnostic.");
+
+        var nestedRouteCodec = """
+            module harness::generic_union_route_codec;
+            pub union Payload<T> { Value(T) }
+            pub struct Response { payload: self::harness::generic_union_route_codec::Payload<Text> }
+            pub union Reply { Found(self::harness::generic_union_route_codec::Response), Empty }
+            route GET "/items" {
+                handler: self::harness::generic_union_route_codec::get_items;
+                response Found: 200 json self::harness::generic_union_route_codec::Response;
+                response Empty: 204;
+            }
+            pub fn get_items() -> self::harness::generic_union_route_codec::Reply effects {} {
+                return self::harness::generic_union_route_codec::Reply.Empty;
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "generic-union-route-codec", nestedRouteCodec, "E_ROUTE_CODEC_UNSUPPORTED");
+
+        var sqliteCodec = """
+            module harness::generic_union_sqlite_codec;
+            pub union Value<T> { Item(T) }
+            pub struct Parameters { value: self::harness::generic_union_sqlite_codec::Value<i32> }
+            pub struct Row { value: self::harness::generic_union_sqlite_codec::Value<i32> }
+            pub fn read(db: DbRead, parameters: self::harness::generic_union_sqlite_codec::Parameters) -> Result<Option<self::harness::generic_union_sqlite_codec::Row>, DbError> effects { db.read } {
+                return db.query_one("SELECT value FROM records", parameters);
+            }
+            """;
+        await ExpectDiagnosticsAsync(harness, "generic-union-sqlite-codec", sqliteCodec, "E_DB_CODEC_UNSUPPORTED");
+
+        const string rootManifest = """
+            name = "generic-union-root"
+            version = "0.1.0"
+            kind = "cli"
+            source_root = "src"
+            entry_module = "app::main"
+
+            [dependencies]
+            models = "../models"
+            """;
+        const string rootSource = """
+            module app::main;
+            pub fn roundtrip(value: models::choices::Choice<List<i32>>) -> models::choices::Choice<List<i32>> effects {} {
+                return value;
+            }
+            pub fn main() -> i32 effects {} {
+                let choice: models::choices::Choice<List<i32>> =
+                    models::choices::Choice<List<i32>>.Value([17]);
+                let copied: models::choices::Choice<List<i32>> = self::app::main::roundtrip(choice);
+                return match copied {
+                    models::choices::Choice.Value(values) => match values.get(0) {
+                        Some(value) => value,
+                        None => 0
+                    },
+                    models::choices::Choice.Empty => 0
+                };
+            }
+            """;
+        var dependencyRoot = await harness.WritePackageGraphAsync(
+            "generic-union-dependency",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(rootManifest, new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.lang"] = rootSource
+                }),
+                ["models"] = new PackageFixture(LibraryPackageManifest("generic-union-models"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/choices.lang"] = """
+                            module choices;
+                            pub union Choice<T> { Value(T), Empty }
+                            """
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "generic-union-dependency-lock", dependencyRoot, "lock"));
+        var dependencyRun = await harness.InvokePackageDirectoryAsync("generic-union-dependency-run", dependencyRoot, "run");
+        AssertRunOutput("17" + Environment.NewLine, dependencyRun);
+        var apiRun = await harness.InvokeCompilerCommandAsync("inspect", "api", dependencyRoot, "--json");
+        AssertEqual(0, apiRun.ExitCode, Describe(apiRun));
+        using (var apiDocument = JsonDocument.Parse(apiRun.StandardOutput))
+        {
+            var api = apiDocument.RootElement;
+            AssertInspectApiPropertyOrder(api);
+            AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 9.");
+            var union = api.GetProperty("unions").EnumerateArray().Single();
+            AssertJsonPropertyOrder(union, "id,source_ids,package,type_parameters,variants");
+            AssertEqual("T", union.GetProperty("type_parameters")[0].GetProperty("name").GetString(),
+                "Generic union declarations should expose ordered type parameter names.");
+            AssertEqual(0, union.GetProperty("type_parameters")[0].GetProperty("ordinal").GetInt32(),
+                "Generic union type parameter ordinals should be zero-based.");
+            var function = api.GetProperty("functions").EnumerateArray()
+                .Single(item => item.GetProperty("id").GetString() == "self::app::main::roundtrip");
+            var argument = function.GetProperty("parameters")[0].GetProperty("type");
+            AssertEqual("nominal", argument.GetProperty("kind").GetString(),
+                "API function types should retain generic union nominal identity.");
+            var listArgument = argument.GetProperty("type_arguments")[0];
+            AssertEqual("list", listArgument.GetProperty("kind").GetString(),
+                "API union arguments should serialize nested generic types recursively.");
+            AssertEqual("i32", listArgument.GetProperty("item").GetProperty("name").GetString(),
+                "API union arguments should preserve their nested primitive type.");
+        }
+        var repeatedApi = await harness.InvokeCompilerCommandAsync("inspect", "api", dependencyRoot, "--json");
+        AssertEqual(apiRun.StandardOutput, repeatedApi.StandardOutput,
+            "Repeated generic-union inspect API calls should be byte-identical.");
+        var auditRun = await harness.InvokeCompilerCommandAsync("audit", dependencyRoot, "--json");
+        AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
+        using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
+        AssertEqual(7, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+            "Generic-union source changes should leave the unchanged audit contract at version 7.");
     }
 
     private static async Task TestForwardAndGuardedRecursion(Harness harness)
@@ -2538,7 +2837,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(8, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
+        AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -2751,7 +3050,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(8, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
+        AssertEqual(9, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -3208,7 +3507,7 @@ internal static partial class IntegrationTests
             "effect,steps",
             "source_id,source_ids,package,module,name",
             "id,source_ids,package,type_parameters,fields",
-            "id,source_ids,package,variants",
+            "id,source_ids,package,type_parameters,variants",
             "name,payload",
             "id,package,help,inputs,handler,handler_is_async,handler_source_ids,error_formatter,error_formatter_source_ids,error_type,required_capabilities",
             "name,kind,type,help,default_value",
@@ -3786,8 +4085,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(8, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 8.");
+            AssertEqual(9, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 9.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -3852,8 +4151,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(8, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 8.");
+            AssertEqual(9, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 9.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -5689,7 +5988,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8.");
+            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6231,8 +6530,8 @@ internal static partial class IntegrationTests
             """;
 
         var limitCases = new StringBuilder();
-        AppendCase("argc-exact", ["count", ..Enumerable.Repeat("x", 127)]);
-        AppendCase("argc-over", ["count", ..Enumerable.Repeat("x", 128)]);
+        AppendCase("argc-exact", ["count", .. Enumerable.Repeat("x", 127)]);
+        AppendCase("argc-over", ["count", .. Enumerable.Repeat("x", 128)]);
         AppendCase("argv-bytes-exact", ["size", new string('x', 16_380)]);
         AppendCase("argv-bytes-over", ["size", new string('x', 16_381)]);
 
@@ -6453,7 +6752,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 8 with pinned process metadata.");
+            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 9 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -9157,9 +9456,9 @@ internal static partial class IntegrationTests
             var oversizedBytes = Encoding.UTF8.GetBytes(oversizedJson);
             using (var chunkedContent = new StreamContent(new NonSeekableMemoryStream(oversizedBytes)))
             using (var chunkedRequest = new HttpRequestMessage(HttpMethod.Post, "/api/greeting")
-                   {
-                       Content = chunkedContent
-                   })
+            {
+                Content = chunkedContent
+            })
             {
                 chunkedContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 chunkedRequest.Headers.TransferEncodingChunked = true;
@@ -10963,7 +11262,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(73, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(85, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -10972,7 +11271,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("73 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("85 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -11149,9 +11448,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b73\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b85\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 73 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 85 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)
@@ -12222,10 +12521,10 @@ internal static partial class IntegrationTests
                 "The AOT command schema should retain its command declaration.");
             AssertJsonStringArray(schema.RootElement.GetProperty("commands")[0].GetProperty("capabilities"), ["net.client"]);
         }
-            AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["net.client"]);
-            var httpClaim = receipt.RootElement.GetProperty("trusted_components").EnumerateArray()
-                .Single(item => item.GetProperty("operation").GetString() == "HttpClient.get_text_async");
-            AssertJsonStringArray(httpClaim.GetProperty("effects"), ["net.client"]);
+        AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["net.client"]);
+        var httpClaim = receipt.RootElement.GetProperty("trusted_components").EnumerateArray()
+            .Single(item => item.GetProperty("operation").GetString() == "HttpClient.get_text_async");
+        AssertJsonStringArray(httpClaim.GetProperty("effects"), ["net.client"]);
 
         var execution = await ExecuteNativeAsync(
             executablePath,
@@ -13083,11 +13382,11 @@ internal static partial class IntegrationTests
         public Task<ProcessResult> InvokeCompilerCommandAsync(params string[] arguments) =>
             InvokeCompilerCommandWithEnvironmentAsync(null, arguments);
 
-    public async Task<ProcessResult> InvokeCompilerCommandWithEnvironmentAsync(
-            IReadOnlyDictionary<string, string>? environment,
-            params string[] arguments)
-            => await InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
-                repositoryRoot, environment, arguments);
+        public async Task<ProcessResult> InvokeCompilerCommandWithEnvironmentAsync(
+                IReadOnlyDictionary<string, string>? environment,
+                params string[] arguments)
+                => await InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+                    repositoryRoot, environment, arguments);
 
         public async Task<ProcessResult> InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
             string workingDirectory,

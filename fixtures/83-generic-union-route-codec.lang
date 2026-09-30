@@ -1,0 +1,24 @@
+module fixture::generic_union_route_codec;
+
+pub union Payload<T> {
+    Value(T),
+}
+
+pub struct Response {
+    payload: self::fixture::generic_union_route_codec::Payload<Text>,
+}
+
+pub union Reply {
+    Found(self::fixture::generic_union_route_codec::Response),
+    Empty,
+}
+
+route GET "/items" {
+    handler: self::fixture::generic_union_route_codec::get_items;
+    response Found: 200 json self::fixture::generic_union_route_codec::Response;
+    response Empty: 204;
+}
+
+pub fn get_items() -> self::fixture::generic_union_route_codec::Reply effects {} {
+    return self::fixture::generic_union_route_codec::Reply.Empty;
+}

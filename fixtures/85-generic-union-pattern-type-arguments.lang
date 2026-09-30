@@ -1,0 +1,13 @@
+module fixture::generic_union_pattern_type_arguments;
+
+pub union Choice<T> {
+    Value(T),
+    Empty,
+}
+
+pub fn read(choice: self::fixture::generic_union_pattern_type_arguments::Choice<i32>) -> i32 effects {} {
+    return match choice {
+        self::fixture::generic_union_pattern_type_arguments::Choice<i32>.Value(value) => value,
+        self::fixture::generic_union_pattern_type_arguments::Choice<i32>.Empty => 0,
+    };
+}

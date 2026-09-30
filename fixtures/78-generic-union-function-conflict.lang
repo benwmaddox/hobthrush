@@ -1,0 +1,15 @@
+module fixture::generic_union_function_conflict;
+
+pub union Choice<T> {
+    Value(T),
+}
+
+pub fn same<T>(left: self::fixture::generic_union_function_conflict::Choice<T>, right: self::fixture::generic_union_function_conflict::Choice<T>) -> i32 effects {} {
+    return 1;
+}
+
+pub fn main() -> i32 effects {} {
+    return self::fixture::generic_union_function_conflict::same(
+        self::fixture::generic_union_function_conflict::Choice<i32>.Value(1),
+        self::fixture::generic_union_function_conflict::Choice<Text>.Value("text"));
+}
