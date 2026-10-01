@@ -905,6 +905,7 @@ internal static class AuditReport
             HobTypeKind.U32 => new { kind = "primitive", name = "u32" },
             HobTypeKind.U64 => new { kind = "primitive", name = "u64" },
             HobTypeKind.F64 => new { kind = "primitive", name = "f64" },
+            HobTypeKind.ArithmeticError => new { kind = "primitive", name = "ArithmeticError" },
             HobTypeKind.Unit => new { kind = "primitive", name = "Unit" },
             HobTypeKind.Bool => new { kind = "primitive", name = "bool" },
             HobTypeKind.Text => new { kind = "primitive", name = "Text" },

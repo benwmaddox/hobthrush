@@ -1,6 +1,6 @@
 # Hobthrush
 
-**A language for software written with agents and reviewed by people.**
+**An AI-built language for reliable software under clear constraints.**
 
 Named for a folklore helper that quietly finishes people's work while they sleep.
 

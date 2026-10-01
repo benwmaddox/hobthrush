@@ -1,0 +1,31 @@
+module fixture::integer_arithmetic_modes;
+
+pub fn main() -> i32 effects {} {
+    let checked_add: Result<i32, ArithmeticError> = 1.checked_add(2);
+    let checked_sub: Result<i32, ArithmeticError> = 1.checked_sub(2);
+    let checked_mul: Result<i32, ArithmeticError> = 1.checked_mul(2);
+    let saturating_add: i32 = 1.saturating_add(2);
+    let saturating_sub: i32 = 1.saturating_sub(2);
+    let saturating_mul: i32 = 1.saturating_mul(2);
+    let wrapping_add: i32 = 1.wrapping_add(2);
+    let wrapping_sub: i32 = 1.wrapping_sub(2);
+    let wrapping_mul: i32 = 1.wrapping_mul(2);
+    let negative: Result<i32, ArithmeticError> = -1.checked_add(2);
+    let grouped_positive: Result<i32, ArithmeticError> = (1).checked_add(2);
+    let grouped: Result<i32, ArithmeticError> = (-1).checked_add(2);
+    let wide: Result<i64, ArithmeticError> = -1i64.checked_add(2i64);
+    let dot_trivia: Result<i32, ArithmeticError> = 1. // trivia between dot and member
+        checked_add(2);
+    let call_trivia: Result<i32, ArithmeticError> = 1.checked_add // trivia before call
+        (2);
+    let both_trivia: Result<i32, ArithmeticError> = 1. // dot trivia
+        checked_add // call trivia
+        (2);
+    let result: i32 = match checked_add {
+        Ok(value) => value,
+        Err(error) => match error {
+            ArithmeticError.Overflow => 0,
+        },
+    };
+    return result;
+}

@@ -169,7 +169,8 @@ internal static class Lexer
         }
         var integerDigitsEnd = i;
 
-        if (!leadingDot && i < source.Length && source[i] == '.')
+        if (!leadingDot && i < source.Length && source[i] == '.' &&
+            !StartsIntegerArithmeticMemberCall(source, i))
         {
             hasDecimalPoint = true;
             i++;
@@ -266,6 +267,48 @@ internal static class Lexer
         }
 
         tokens.Add(new Token("number", source[start..i], line, startColumn, file));
+    }
+
+    private static bool StartsIntegerArithmeticMemberCall(string source, int dot)
+    {
+        var index = SkipTrivia(source, dot + 1);
+        var nameStart = index;
+        if (index >= source.Length || !(char.IsLetter(source[index]) || source[index] == '_'))
+            return false;
+
+        index++;
+        while (index < source.Length && (char.IsLetterOrDigit(source[index]) || source[index] == '_'))
+            index++;
+
+        if (!IntegerArithmeticMember.TryParse(source.AsSpan(nameStart, index - nameStart), out _, out _))
+            return false;
+
+        index = SkipTrivia(source, index);
+        return index < source.Length && source[index] == '(';
+    }
+
+    private static int SkipTrivia(string source, int index)
+    {
+        while (index < source.Length)
+        {
+            if (char.IsWhiteSpace(source[index]))
+            {
+                index++;
+                continue;
+            }
+
+            if (source[index] == '/' && index + 1 < source.Length && source[index + 1] == '/')
+            {
+                index += 2;
+                while (index < source.Length && source[index] is not ('\r' or '\n'))
+                    index++;
+                continue;
+            }
+
+            break;
+        }
+
+        return index;
     }
 
     private static bool HasNumericSuffix(string source, int start, string suffix) =>

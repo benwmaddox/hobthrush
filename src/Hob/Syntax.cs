@@ -10,6 +10,88 @@ internal sealed record Token(string Kind, string Text, int Line, int Column, str
     public Range Range => new(Line, Column, Line, Column + Math.Max(Text.Length, 1));
 }
 
+internal enum IntegerArithmeticMode
+{
+    Checked,
+    Saturating,
+    Wrapping
+}
+
+internal enum IntegerArithmeticOperator
+{
+    Add,
+    Subtract,
+    Multiply
+}
+
+internal static class IntegerArithmeticMember
+{
+    internal static bool TryParse(
+        ReadOnlySpan<char> name,
+        out IntegerArithmeticMode mode,
+        out IntegerArithmeticOperator operation)
+    {
+        if (name.SequenceEqual("checked_add"))
+        {
+            mode = IntegerArithmeticMode.Checked;
+            operation = IntegerArithmeticOperator.Add;
+            return true;
+        }
+        if (name.SequenceEqual("checked_sub"))
+        {
+            mode = IntegerArithmeticMode.Checked;
+            operation = IntegerArithmeticOperator.Subtract;
+            return true;
+        }
+        if (name.SequenceEqual("checked_mul"))
+        {
+            mode = IntegerArithmeticMode.Checked;
+            operation = IntegerArithmeticOperator.Multiply;
+            return true;
+        }
+        if (name.SequenceEqual("saturating_add"))
+        {
+            mode = IntegerArithmeticMode.Saturating;
+            operation = IntegerArithmeticOperator.Add;
+            return true;
+        }
+        if (name.SequenceEqual("saturating_sub"))
+        {
+            mode = IntegerArithmeticMode.Saturating;
+            operation = IntegerArithmeticOperator.Subtract;
+            return true;
+        }
+        if (name.SequenceEqual("saturating_mul"))
+        {
+            mode = IntegerArithmeticMode.Saturating;
+            operation = IntegerArithmeticOperator.Multiply;
+            return true;
+        }
+        if (name.SequenceEqual("wrapping_add"))
+        {
+            mode = IntegerArithmeticMode.Wrapping;
+            operation = IntegerArithmeticOperator.Add;
+            return true;
+        }
+        if (name.SequenceEqual("wrapping_sub"))
+        {
+            mode = IntegerArithmeticMode.Wrapping;
+            operation = IntegerArithmeticOperator.Subtract;
+            return true;
+        }
+        if (name.SequenceEqual("wrapping_mul"))
+        {
+            mode = IntegerArithmeticMode.Wrapping;
+            operation = IntegerArithmeticOperator.Multiply;
+            return true;
+        }
+
+        mode = default;
+        operation = default;
+        return false;
+    }
+}
+
 internal sealed record SourceDeclarationRefSyntax(
     string? Root,
     IReadOnlyList<string> Module,

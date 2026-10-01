@@ -1,0 +1,40 @@
+module fixture::invalid_integer_arithmetic_modes;
+
+fn mixed_rhs() -> i32 effects {} {
+    let ignored: Result<i32, ArithmeticError> = 1.checked_add(2i64);
+    return 0;
+}
+
+fn missing_argument() -> i32 effects {} {
+    let ignored: Result<i32, ArithmeticError> = 1.checked_add();
+    return 0;
+}
+
+fn extra_argument() -> i32 effects {} {
+    let ignored: i32 = 1.saturating_mul(2, 3);
+    return 0;
+}
+
+fn wide_literal_mismatch() -> i64 effects {} {
+    let ignored: Result<i64, ArithmeticError> = 1i64.checked_add(2);
+    return 0i64;
+}
+
+fn f64_receiver() -> f64 effects {} {
+    let ignored: f64 = 1.0f64.wrapping_add(2.0f64);
+    return 0.0f64;
+}
+
+fn forge_call() -> ArithmeticError effects {} {
+    return ArithmeticError.Overflow();
+}
+
+fn forge_field() -> ArithmeticError effects {} {
+    return ArithmeticError.Overflow;
+}
+
+union ArithmeticError { Fake }
+
+fn forge_type_parameter<ArithmeticError>(value: ArithmeticError) -> i32 effects {} {
+    return 0;
+}
