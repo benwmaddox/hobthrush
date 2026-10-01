@@ -12,9 +12,9 @@ The goal is one practical toolchain for reliable libraries, CLI tools, and small
 
 We want AI systems to design and implement components within strong, explicit constraints. A component should approach a black box for its callers: a clear interface and checked contract let them use it without following every internal implementation detail.
 
-The intended development process is heavily AI-driven, including the core compiler and standard libraries. AI systems design, build, test, and review changes, with independent review by other agents and contributors. People collaborate on project goals, guide priorities, and oversee consequential decisions; AI systems carry out day-to-day development.
+The intended development process is heavily AI-driven, including the core compiler and standard libraries. AI systems design, build, and test changes, with independent review by other AI systems. Human guidance stays at a high level: people collaborate on project goals, guide priorities, and oversee consequential decisions. AI systems carry out day-to-day development and review.
 
-Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports categorizing and reviewing bugs and feature requests. Approved items are prioritized and open for sponsorship. Dedicated funds can then support specific features once their designs are approved and align with project goals. Funding supports the work; acceptance still depends on independent review and technical checks.
+Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports categorizing and reviewing bugs and feature requests. Approved items are prioritized and open for sponsorship. Dedicated funds can then support specific features once their designs are approved and align with project goals. Up to 10% of funds may support human management of the project. Funding supports the work; acceptance still depends on independent AI review and technical checks.
 
 Focused issues, examples, documentation, and pull requests are welcome. Contributions and feedback may be used directly as input to future AI-assisted updates to this project. Please share only material you are comfortable having incorporated into those updates.
 
