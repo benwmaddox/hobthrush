@@ -901,6 +901,9 @@ internal static class AuditReport
         IReadOnlyDictionary<int, CheckedNewtype> newtypesById) => type.Kind switch
         {
             LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
+            LangTypeKind.I64 => new { kind = "primitive", name = "i64" },
+            LangTypeKind.U32 => new { kind = "primitive", name = "u32" },
+            LangTypeKind.U64 => new { kind = "primitive", name = "u64" },
             LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
             LangTypeKind.Text => new { kind = "primitive", name = "Text" },
             LangTypeKind.Bytes => new { kind = "primitive", name = "Bytes" },

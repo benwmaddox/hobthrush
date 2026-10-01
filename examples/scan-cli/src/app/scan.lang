@@ -69,6 +69,7 @@ fn map_normalize_error(
 ) -> self::app::main::ScanError effects {} {
     return match error {
         validation::text::validation::NormalizeError.Empty => self::app::main::ScanError.EmptyInput,
+        validation::text::validation::NormalizeError.TooLong(max) => self::app::main::ScanError.TooLong,
     };
 }
 
@@ -80,5 +81,6 @@ pub fn describe_error(error: self::app::main::ScanError) -> Text effects {} {
         self::app::main::ScanError.InvalidText => "File is not valid UTF-8",
         self::app::main::ScanError.Io => "File read failed",
         self::app::main::ScanError.EmptyInput => "File contains no text to normalize",
+        self::app::main::ScanError.TooLong => "File exceeds the requested maximum length",
     };
 }

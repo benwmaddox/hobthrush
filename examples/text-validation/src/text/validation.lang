@@ -2,7 +2,7 @@ module text::validation;
 
 pub struct Normalized<T> { value: T }
 
-pub union NormalizeError { Empty }
+pub union NormalizeError { Empty, TooLong(max: u32) }
 
 pub union Validation<T> { Valid(T), Invalid(self::text::validation::NormalizeError) }
 
@@ -44,6 +44,7 @@ test "generic normalize empty input returns Invalid" {
         self::text::validation::Validation.Valid(value) => false,
         self::text::validation::Validation.Invalid(error) => match error {
             self::text::validation::NormalizeError.Empty => true,
+            self::text::validation::NormalizeError.TooLong(max) => false,
         },
     };
 }
@@ -77,6 +78,23 @@ test "require maps a missing Option<Text> to its error" {
         Ok(text) => false,
         Err(error) => match error {
             self::text::validation::NormalizeError.Empty => true,
+            self::text::validation::NormalizeError.TooLong(max) => false,
+        },
+    };
+}
+
+test "require preserves a TooLong maximum as u32" {
+    let max: u32 = 4294967295u32;
+    let missing: Option<u32> = None;
+    let result: Result<u32, self::text::validation::NormalizeError> = self::text::validation::require(
+        missing,
+        self::text::validation::NormalizeError.TooLong(max)
+    );
+    assert match result {
+        Ok(value) => false,
+        Err(error) => match error {
+            self::text::validation::NormalizeError.Empty => false,
+            self::text::validation::NormalizeError.TooLong(value) => value == max,
         },
     };
 }

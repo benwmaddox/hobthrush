@@ -147,7 +147,9 @@ internal sealed record TestDecl(
     Token AssertAt);
 
 internal abstract record Expr(Token At);
-internal sealed record NumberExpr(Token At, int Value) : Expr(At);
+internal enum IntegerLiteralKind { I32, I64, U32, U64 }
+internal sealed record NumberExpr(Token At, string Value, IntegerLiteralKind LiteralKind) : Expr(At);
+internal sealed record UnaryExpr(Token At, string Op, Expr Operand) : Expr(At);
 internal sealed record BoolExpr(Token At, bool Value) : Expr(At);
 internal sealed record TextExpr(Token At, string Value) : Expr(At);
 internal sealed record ListExpr(Token At, IReadOnlyList<Expr> Items) : Expr(At);

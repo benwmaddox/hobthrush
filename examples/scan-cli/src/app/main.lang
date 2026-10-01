@@ -7,6 +7,7 @@ pub union ScanError {
     InvalidText,
     Io,
     EmptyInput,
+    TooLong,
 }
 
 command scan {

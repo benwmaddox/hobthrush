@@ -1460,7 +1460,7 @@ internal static class Emitter
 
         private string EmitExpr(TypedExpr expression) => expression switch
         {
-            TypedNumberExpr number => number.Value.ToString(CultureInfo.InvariantCulture),
+            TypedNumberExpr number => EmitIntegerLiteral(number),
             TypedBoolExpr boolean => boolean.Value ? "true" : "false",
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
             TypedListExpr list => EmitList(list),
@@ -1503,6 +1503,23 @@ internal static class Emitter
             TypedMatchExpr match => EmitMatch(match),
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
+
+        private static string EmitIntegerLiteral(TypedNumberExpr number)
+        {
+            if (number.Type.IsI32)
+                return number.Value == int.MinValue.ToString(CultureInfo.InvariantCulture)
+                    ? "int.MinValue"
+                    : number.Value;
+            if (number.Type.IsI64)
+                return number.Value == long.MinValue.ToString(CultureInfo.InvariantCulture)
+                    ? "long.MinValue"
+                    : number.Value + "L";
+            if (number.Type.IsU32)
+                return number.Value + "U";
+            if (number.Type.IsU64)
+                return number.Value + "UL";
+            throw new InvalidOperationException("Unknown checked integer literal type");
+        }
 
         private string EmitLambdaInvoke(TypedLambdaInvokeExpr expression)
         {
@@ -1947,6 +1964,9 @@ internal static class Emitter
             switch (type.Kind)
             {
                 case LangTypeKind.I32:
+                case LangTypeKind.I64:
+                case LangTypeKind.U32:
+                case LangTypeKind.U64:
                 case LangTypeKind.Bool:
                     return "(" + left + " == " + right + ")";
                 case LangTypeKind.Text:
@@ -2070,6 +2090,9 @@ internal static class Emitter
                 {
                     case LangTypeKind.TypeParameter:
                     case LangTypeKind.I32:
+                    case LangTypeKind.I64:
+                    case LangTypeKind.U32:
+                    case LangTypeKind.U64:
                     case LangTypeKind.Bool:
                     case LangTypeKind.Text:
                     case LangTypeKind.Bytes:
@@ -2348,8 +2371,17 @@ internal static class Emitter
         private void EmitArithmeticHelpers()
         {
             _source.AppendLine("    private static int CheckedAdd(int left, int right) => checked(left + right);");
+            _source.AppendLine("    private static long CheckedAdd(long left, long right) => checked(left + right);");
+            _source.AppendLine("    private static uint CheckedAdd(uint left, uint right) => checked(left + right);");
+            _source.AppendLine("    private static ulong CheckedAdd(ulong left, ulong right) => checked(left + right);");
             _source.AppendLine("    private static int CheckedSubtract(int left, int right) => checked(left - right);");
+            _source.AppendLine("    private static long CheckedSubtract(long left, long right) => checked(left - right);");
+            _source.AppendLine("    private static uint CheckedSubtract(uint left, uint right) => checked(left - right);");
+            _source.AppendLine("    private static ulong CheckedSubtract(ulong left, ulong right) => checked(left - right);");
             _source.AppendLine("    private static int CheckedMultiply(int left, int right) => checked(left * right);");
+            _source.AppendLine("    private static long CheckedMultiply(long left, long right) => checked(left * right);");
+            _source.AppendLine("    private static uint CheckedMultiply(uint left, uint right) => checked(left * right);");
+            _source.AppendLine("    private static ulong CheckedMultiply(ulong left, ulong right) => checked(left * right);");
             _source.AppendLine();
         }
 
@@ -4177,6 +4209,9 @@ internal static class Emitter
         private string EmitType(LangType type) => type.Kind switch
         {
             LangTypeKind.I32 => "int",
+            LangTypeKind.I64 => "long",
+            LangTypeKind.U32 => "uint",
+            LangTypeKind.U64 => "ulong",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.Bytes => "Bytes",

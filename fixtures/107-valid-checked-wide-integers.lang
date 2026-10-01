@@ -1,0 +1,77 @@
+module fixture::checked_wide_integers;
+
+pub struct Cell<T> { value: T }
+pub newtype Signed = i64;
+pub union Number<T> { Signed(i64), Narrow(u32), Wide(u64), Other(T) }
+
+pub trait Positive {
+    fn positive(value: Self) -> bool effects {};
+}
+
+fn positive_i64(value: i64) -> bool effects {} { return value > 0i64; }
+fn positive_u32(value: u32) -> bool effects {} { return value > 0u32; }
+fn positive_u64(value: u64) -> bool effects {} { return value > 0u64; }
+
+pub impl self::fixture::checked_wide_integers::Positive for i64 {
+    positive = self::fixture::checked_wide_integers::positive_i64;
+}
+pub impl self::fixture::checked_wide_integers::Positive for u32 {
+    positive = self::fixture::checked_wide_integers::positive_u32;
+}
+pub impl self::fixture::checked_wide_integers::Positive for u64 {
+    positive = self::fixture::checked_wide_integers::positive_u64;
+}
+
+fn identity<T>(value: T) -> T effects {} { return value; }
+
+pub fn main() -> i32 effects {} {
+    let signed_min: i64 = -9223372036854775808i64;
+    let signed_max: i64 = 9223372036854775807i64;
+    let zero_padded: i64 = 0000000000000000000000000000000000000000000000000000000000000000i64;
+    let narrow_min: u32 = 0u32;
+    let narrow_max: u32 = 4294967295u32;
+    let wide_min: u64 = 0u64;
+    let wide_max: u64 = 18446744073709551615u64;
+    let signed: i64 = self::fixture::checked_wide_integers::identity(20i64) + 2i64;
+    let signed_difference: i64 = signed - 1i64;
+    let signed_product: i64 = signed_difference * 2i64;
+    let narrow: u32 = 20u32 + 2u32;
+    let narrow_difference: u32 = narrow - 1u32;
+    let narrow_product: u32 = narrow_difference * 2u32;
+    let wide: u64 = 20u64 + 2u64;
+    let wide_difference: u64 = wide - 1u64;
+    let wide_product: u64 = wide_difference * 2u64;
+
+    let list: List<i64> = [signed_min, signed_max, signed];
+    let empty_map: Map<Text, u32> = Map.empty();
+    let map: Map<Text, u32> = empty_map.set("maximum", narrow_max).set("minimum", narrow_min);
+    let cell: self::fixture::checked_wide_integers::Cell<u64> =
+        self::fixture::checked_wide_integers::Cell<u64> { value: wide_max };
+    let signed_value: self::fixture::checked_wide_integers::Number<i64> =
+        self::fixture::checked_wide_integers::Number<i64>.Signed(signed);
+    let narrow_value: self::fixture::checked_wide_integers::Number<u32> =
+        self::fixture::checked_wide_integers::Number<u32>.Other(narrow);
+    let wrapped: self::fixture::checked_wide_integers::Signed =
+        self::fixture::checked_wide_integers::Signed.wrap(signed);
+    let list_copy: List<i64> = list;
+    let map_copy: Map<Text, u32> = map;
+    let boxed_copy: self::fixture::checked_wide_integers::Cell<u64> = cell;
+
+    if signed_min >= signed_max { return 1; }
+    if zero_padded != 0i64 { return 1; }
+    if narrow_min != 0u32 { return 1; }
+    if wide_min != 0u64 { return 1; }
+    if signed == signed_difference { return 1; }
+    if narrow_product <= narrow { return 1; }
+    if wide_product <= wide { return 1; }
+    if list != list_copy { return 1; }
+    if map != map_copy { return 1; }
+    if cell != boxed_copy { return 1; }
+    if signed_value != self::fixture::checked_wide_integers::Number<i64>.Signed(signed) { return 1; }
+    if narrow_value != self::fixture::checked_wide_integers::Number<u32>.Other(narrow) { return 1; }
+    if wrapped.value != signed { return 1; }
+    if self::fixture::checked_wide_integers::Positive.positive(signed) == false { return 1; }
+    if self::fixture::checked_wide_integers::Positive.positive(narrow) == false { return 1; }
+    if self::fixture::checked_wide_integers::Positive.positive(wide) == false { return 1; }
+    return 0;
+}

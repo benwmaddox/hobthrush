@@ -69,6 +69,7 @@ internal static partial class IntegrationTests
             ("generic tagged unions substitute payloads, match exhaustively, compare structurally, and run in managed and NativeAOT builds", TestGenericUnions),
             ("nominal newtypes preserve boundaries, traits, resources, and current metadata", TestNominalNewtypes),
             ("immutable Bytes preserve octets, snapshots, equality, and bounds", TestImmutableBytes),
+            ("wide integers enforce literal, type, and checked arithmetic boundaries", TestWideIntegers),
             ("static traits bind closed targets, forward ordered witnesses, and detect recursive obligations", TestStaticTraits),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
@@ -11619,11 +11620,15 @@ internal static partial class IntegrationTests
         {
             ("text-validation-empty", """
                 module app::main;
+                fn describe_too_long(max: u32) -> Text effects {} {
+                    if max == 0u32 { return "too long with zero limit"; } else { return "too long"; }
+                }
                 pub fn main() -> Text effects {} {
                     return match self::text::validation::normalize("") {
                         self::text::validation::Validation.Valid(value) => "unexpected success",
                         self::text::validation::Validation.Invalid(error) => match error {
                             self::text::validation::NormalizeError.Empty => "empty",
+                            self::text::validation::NormalizeError.TooLong(max) => self::app::main::describe_too_long(max),
                         },
                     };
                 }
@@ -11734,6 +11739,9 @@ internal static partial class IntegrationTests
                 ["src/text/validation.lang"] = librarySource,
                 ["src/app/main.lang"] = """
                     module app::main;
+                    fn too_long_length(max: u32) -> i32 effects {} {
+                        if max == 0u32 { return -1; } else { return 0; }
+                    }
                     pub fn main() -> i32 effects {} {
                         let normalized: self::text::validation::Validation<self::text::validation::Normalized<Text>> = self::text::validation::normalize("hello 😀");
                         let normalized_value: self::text::validation::Normalized<Text> = match normalized {
@@ -11748,6 +11756,8 @@ internal static partial class IntegrationTests
                             Ok(value) => value.value.length,
                             Err(error) => match error {
                                 self::text::validation::NormalizeError.Empty => 0,
+                                self::text::validation::NormalizeError.TooLong(max) =>
+                                    self::app::main::too_long_length(max),
                             },
                         };
                         return match number_result {
@@ -12053,9 +12063,10 @@ internal static partial class IntegrationTests
             "PASS text::validation :: Text trim removes surrounding Unicode whitespace",
             "PASS text::validation :: require preserves a present Option<Text>",
             "PASS text::validation :: require maps a missing Option<Text> to its error",
+            "PASS text::validation :: require preserves a TooLong maximum as u32",
             "PASS text::validation :: require preserves a present Option<i32>",
             "PASS text::validation :: require maps a missing Option<i32> to its error",
-            "7 passed, 0 failed"
+            "8 passed, 0 failed"
         ]) + Environment.NewLine;
 
         AssertEqual(0, result.ExitCode, Describe(result));
@@ -12278,7 +12289,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(106, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(110, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -12287,7 +12298,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("106 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("110 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -12464,9 +12475,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b106\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b110\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 106 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 110 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)
