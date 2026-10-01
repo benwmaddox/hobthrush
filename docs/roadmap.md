@@ -2,6 +2,10 @@
 
 The Hobthrush source PRD lives in [PRD.md](PRD.md). The executable is `hob`, and source files use `.hob`. References to V1 below describe planned capability scope; the language is pre-1.0 and makes no backward-compatibility or migration promise.
 
+## AI-operated development and evolution
+
+The design direction gives AI systems control of detailed project work: evaluate and prioritize suggestions against human-set goals, design and implement accepted changes, test outcomes, independently review, and maintain the compiler and standard library. Compiler constraints, black-box tests, and CI gates govern acceptance; people provide high-level direction and inspect code only when needed. The repository does not yet automate this complete process. After 1.0, public syntax and semantics should change rarely; compiler, runtime, and tooling internals may improve more often behind observable contracts. AI systems should coordinate compatible standard-library growth when a feature fits there.
+
 ## M0 - repository and toolchain
 
 - [x] Pin .NET 10 and create a buildable C# repository.
@@ -130,9 +134,9 @@ This is a reproducibility and conformance gate, not a claim of identical binarie
 
 ## GOV1 - public AI-operated stewardship experiment (proposed, not started)
 
-The non-binding [public stewardship proposal](public-ai-stewardship.md) describes a possible future model in which public requests are analyzed, implemented, and independently reviewed by bounded agent workflows. Ordinary donations, sponsorships, grants, contracts, and milestone escrow may fund the work. Funding buys defined work and never guarantees acceptance or merge. The proposal explicitly excludes cryptocurrency, tokens, tradable governance rights, financial-return promises, and sponsorship-weighted technical control.
+The non-binding [public stewardship proposal](public-ai-stewardship.md) describes proposed funding mechanics for the AI-operated development model: AI systems assess fit, user need, compatibility, and maintenance cost; categorize and prioritize requests; and coordinate accepted technical work with independent AI review. Donations, sponsorships, grants, contracts, and milestone escrow may fund that work. Funding buys defined work, never technical acceptance. The proposal excludes cryptocurrency, tokens, tradable governance rights, financial-return promises, and sponsorship-weighted technical control.
 
-GOV1 is not a V1 language gate. No public fundraising or governance transfer is authorized by this roadmap entry.
+GOV1 is not a V1 language gate. This roadmap entry does not authorize public fundraising.
 
 - [ ] Demonstrate repeatable private planning, implementation, independent review, release, and maintenance records with measured model and infrastructure costs.
 - [ ] Publish a versioned technical charter, contribution and licensing terms, conflict policy, security process, and conventional public accounting format.

@@ -1,4 +1,4 @@
-# Product requirements: agent-first general-purpose language, V1
+# Product requirements: AI-first general-purpose language, V1
 
 **Status:** Implementation-ready product brief
 **Date:** September 24, 2026
@@ -10,18 +10,28 @@
 
 ## 1. Product thesis
 
-Build a general-purpose language in which an AI agent can produce ordinary application code and receive precise, machine-readable feedback about types, error cases, side effects, capabilities, API responses, and foreign-code boundaries. The language must also be pleasant enough for a human developer to inspect and maintain.
+Hobthrush assumes AI systems will do most detailed software work. They read and modify source, so the language, compiler, standard library, and development tools are designed primarily for AI to understand and change. Humans set high-level goals and priorities and may inspect code when needed; routine human source review or per-change approval is not part of the intended development loop.
 
-**V1 promise:** A developer can implement a reusable library, a useful CLI, and a small web application with one toolchain. The compiler checks types, exhaustive matches, public function effects, capability access, and declared HTTP response variants. The build emits a truthful machine-readable audit of those checks. The tools work end to end on Windows and Linux.
+Build systems that help AI build correctly: enforceable constraints, precise machine-readable feedback, black-box outcome tests, and independent review by other AI systems. Compiler rules reject invalid types, missing error cases, undeclared effects, excess capability use, and incomplete API responses; goals and acceptance criteria keep changes on task. Callers should be able to rely on clear interfaces and test outcomes without reading implementation internals.
+
+Published goals direct AI systems to identify, propose, and prioritize system improvements proactively. Resulting changes must pass project constraints, black-box tests, and independent AI review.
+
+The intended project process puts AI systems in control of detailed intake, technical design, implementation, testing, independent review, acceptance, and maintenance within published goals, permissions, and mandatory gates. People set high-level goals and priorities and may inspect code exceptionally.
+
+**V1 promise:** An AI system can use one toolchain to build a reusable library, a useful CLI, and a small web application. The compiler checks types, exhaustive matches, public function effects, capability access, and declared HTTP response variants. Builds emit machine-readable evidence of checks actually performed. The tools work end to end on Windows and Linux.
 
 This is a productivity-oriented language with managed memory. It permits ordinary dynamic allocation and does not attempt general proof, bounded execution, or machine-code optimization in V1.
+
+### Growth and stability
+
+Before 1.0, source syntax and contracts can change with matching updates to the compiler, tests, documentation, and examples. After 1.0, public language syntax and source semantics should change rarely and only when AI reviewers find a clear need, strong fit with project goals, and an acceptable compatibility path. Compiler, runtime, and tooling internals may continue to be refined more often while preserving observable contracts. The standard library is the primary place for general capability growth when a feature fits there; AI systems review suggestions and coordinate API-compatible changes.
 
 ### Why someone would try it
 
 - A library publishes typed APIs and an effect summary that a caller can inspect before using it.
 - A CLI gets typed argument parsing, generated help, predictable errors and exit codes, and a single build/run/test workflow.
 - A web service gets typed routes, request decoding, exhaustive response mappings, and generated OpenAPI for supported JSON types.
-- An agent can use structured diagnostics, stable symbol identifiers, and an effect/call graph instead of guessing from text alone.
+- An AI system can use structured diagnostics, stable symbol identifiers, and an effect/call graph instead of guessing from text alone.
 - Foreign dependencies remain usable through adapters, with their trust boundary shown in the audit output.
 
 ## 2. Success criteria and limits
@@ -34,7 +44,7 @@ V1 is complete only when **three maintained example projects** build and run fro
 
 All three must share the same language, module/package format, compiler, standard library conventions, build command, and diagnostic schema. A collection of unrelated demos is not a V1.
 
-**Operational target:** A developer who already has the pinned .NET SDK can clone the repository, run the documented bootstrap, execute `hob test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. V1 uses the .NET managed runtime with Workstation GC as its default, explicitly selected for the compiler and generated applications. Ordinary `hob build` and `hob run` remain managed; `hob build FILE_OR_PACKAGE --aot --rid RID` optionally publishes a GC-managed Native AOT executable for `win-x64` when built on Windows or `linux-x64` when built on Linux, with the required native toolchain. This applies to executable file programs and CLI packages, not library-only programs/packages or the compiler tool. V1 makes no numerical speed or binary-size guarantee, and performance is not a completion gate; PERF1 requires reproducible measurements before performance claims are made. No formal-security claim is a V1 acceptance criterion.
+**Operational target:** An AI coding system with access to the pinned .NET SDK can use a clean checkout, run the documented bootstrap and `hob test`, and run the CLI and web examples on both supported OSes. Builds should succeed offline once declared dependencies have been restored into the cache. V1 uses the .NET managed runtime with Workstation GC as its default, explicitly selected for the compiler and generated applications. Ordinary `hob build` and `hob run` remain managed; `hob build FILE_OR_PACKAGE --aot --rid RID` optionally publishes a GC-managed Native AOT executable for `win-x64` when built on Windows or `linux-x64` when built on Linux, with the required native toolchain. This applies to executable file programs and CLI packages, not library-only programs/packages or the compiler tool. V1 makes no numerical speed or binary-size guarantee, and performance is not a completion gate; PERF1 requires reproducible measurements before performance claims are made. No formal-security claim is a V1 acceptance criterion.
 
 ## 3. Decisions fixed for V1
 
@@ -295,7 +305,7 @@ A backend must consume only a successfully checked program snapshot. Keep the ty
 
 Current implementation: receipt schema v3 records build mode/framework/RID, the package graph, compiler and SDK versions, normalized input hashes, root grants, claim-only trusted components, foreign dependencies, a hash of the canonical audit snapshot, and relative-path hashes for copied artifacts. Its exact fields are specified in the [implementation contract](implementation-contract.md#audit-and-build-receipt-contract). The current receipt does not certify tests, adapter behavior, security, formal bounds, or binary reproducibility.
 
-## 7. Agent implementation plan and gates
+## 7. AI implementation plan and gates
 
 Keep the repository buildable after every milestone. Each milestone adds a working path from source to an observable result, negative fixtures for its new rules, and JSON diagnostics. Do not create broad stubs marked “implemented.”
 
@@ -312,7 +322,7 @@ Keep the repository buildable after every milestone. Each milestone adds a worki
 | ABI1 — C ABI interop proof (not started) | Specify the shared .NET/C ABI contract and demonstrate a by-value `i32` C import and pure language export through NativeAOT. | Reject unsupported/mismatched scalar signatures; demonstrate status/out error mapping and host calls on Windows/Linux. Record bounded deployment/overhead evidence; ABI1 adds no normal language syntax or second backend. See [the foreign interop plan](foreign-interop.md). |
 | SH1 — Self-hosted compiler (parallel follow-on after M3 and MS1) | Port the compiler in stages while preserving the C# bootstrap and C# output backend. | On Windows and Linux, stage 0 builds stage 1 and stage 1 rebuilds stage 2; stages 1 and 2 produce deterministic matching C# and equivalent behavior/diagnostics on a pinned conformance corpus. SH1 does not block M4/M5 or complete V1. |
 
-An agent implementing a gate must submit: working code, added positive and negative fixtures, updated generated schema/receipt examples, a short list of claims the compiler actually checks, and unresolved limitations. A gate cannot be called complete on an illustrative parser or mocked backend.
+An AI system implementing a gate must submit working code, positive and negative fixtures, updated generated schema/receipt examples, a short list of claims the compiler actually checks, and unresolved limitations. A gate cannot be called complete on an illustrative parser or mocked backend.
 
 ### MS1: memory-semantics design (complete)
 
