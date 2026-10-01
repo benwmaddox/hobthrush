@@ -1,0 +1,37 @@
+module fixture::valid_newtype_scalar;
+
+pub newtype UserId = i32;
+pub newtype AccountId = self::fixture::valid_newtype_scalar::UserId;
+newtype PrivateCount = i32;
+
+pub fn from_i32(value: i32) -> self::fixture::valid_newtype_scalar::UserId effects {} {
+    return self::fixture::valid_newtype_scalar::UserId.wrap(value);
+}
+
+pub fn to_i32(value: self::fixture::valid_newtype_scalar::UserId) -> i32 effects {} {
+    return value.value;
+}
+
+pub fn same(left: self::fixture::valid_newtype_scalar::UserId, right: self::fixture::valid_newtype_scalar::UserId) -> bool effects {} {
+    return left == right;
+}
+
+fn private_roundtrip(value: i32) -> i32 effects {} {
+    let hidden: self::fixture::valid_newtype_scalar::PrivateCount =
+        self::fixture::valid_newtype_scalar::PrivateCount.wrap(value);
+    return hidden.value;
+}
+
+pub fn main() -> i32 effects {} {
+    let id: self::fixture::valid_newtype_scalar::UserId =
+        self::fixture::valid_newtype_scalar::UserId.wrap(23);
+    let account: self::fixture::valid_newtype_scalar::AccountId =
+        self::fixture::valid_newtype_scalar::AccountId.wrap(id);
+    let roundtrip: self::fixture::valid_newtype_scalar::UserId = account.value;
+    if self::fixture::valid_newtype_scalar::same(id, roundtrip) {
+        return self::fixture::valid_newtype_scalar::private_roundtrip(
+            self::fixture::valid_newtype_scalar::to_i32(roundtrip));
+    } else {
+        return 0;
+    }
+}

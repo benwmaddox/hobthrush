@@ -67,7 +67,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 8;
+    private const int SchemaVersion = 9;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -86,6 +86,7 @@ internal static class AuditReport
             identities.Add(FindNodeId(graph, package.Identity.Path), package.Identity);
         var stablePackageIdentities = CheckedReportFacts.StablePackageIdentities(graph);
         var functions = CreateFunctionFacts(program, identities, stablePackageIdentities);
+        var newtypes = CreateNewtypeFacts(program, identities, stablePackageIdentities);
         var traits = CreateTraitFacts(program, identities, stablePackageIdentities);
         var traitImpls = CreateTraitImplFacts(program, identities, stablePackageIdentities);
         var claims = CreateTrustedClaims(graph, program, identities);
@@ -119,7 +120,7 @@ internal static class AuditReport
                     sha256 = input.Sha256
                 }).ToArray()
             }).ToArray(),
-            compiler = new { functions, traits, trait_impls = traitImpls },
+            compiler = new { functions, newtypes, traits, trait_impls = traitImpls },
             manifest_grants = grants,
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
@@ -163,6 +164,7 @@ internal static class AuditReport
             .Select(function => function.PackageId)
             .Concat(program.Structs.Select(structure => structure.PackageId))
             .Concat(program.Unions.Select(union => union.PackageId))
+            .Concat(program.Newtypes.Select(newtype => newtype.PackageId))
             .Concat(program.Traits.Select(trait => trait.PackageId))
             .Concat(program.TraitImpls.Select(implementation => implementation.PackageId))
             .Distinct(StringComparer.Ordinal)
@@ -179,6 +181,7 @@ internal static class AuditReport
             compiler = new
             {
                 functions = CreateFunctionFacts(program, identities, stablePackageIdentities),
+                newtypes = CreateNewtypeFacts(program, identities, stablePackageIdentities),
                 traits = CreateTraitFacts(program, identities, stablePackageIdentities),
                 trait_impls = CreateTraitImplFacts(program, identities, stablePackageIdentities)
             },
@@ -419,6 +422,39 @@ internal static class AuditReport
         return result;
     }
 
+    private static object[] CreateNewtypeFacts(
+        CheckedProgram program,
+        IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
+        IReadOnlyDictionary<string, string> stablePackageIdentities)
+    {
+        var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var unionsById = program.Unions.ToDictionary(union => union.Id);
+        var newtypesById = program.Newtypes.ToDictionary(newtype => newtype.Id);
+        return program.Newtypes
+            .Select(newtype => new
+            {
+                Newtype = newtype,
+                Id = CheckedReportFacts.StableNewtypeId(newtype, stablePackageIdentities)
+            })
+            .OrderBy(item => item.Id, StringComparer.Ordinal)
+            .Select(item =>
+            {
+                var newtype = item.Newtype;
+                if (!identities.TryGetValue(newtype.PackageId, out var package))
+                    throw new InvalidOperationException("A checked newtype has no resolved package identity");
+                return (object)new
+                {
+                    id = item.Id,
+                    package = package is null ? null : IdentityJson(package),
+                    module = newtype.Module,
+                    name = newtype.Name,
+                    visibility = newtype.Public ? "public" : "private",
+                    representation = AuditType(newtype.Representation, identities, structsById, unionsById, newtypesById)
+                };
+            })
+            .ToArray();
+    }
+
     private static object[] CreateTraitFacts(
         CheckedProgram program,
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
@@ -426,6 +462,7 @@ internal static class AuditReport
     {
         var structsById = program.Structs.ToDictionary(structure => structure.Id);
         var unionsById = program.Unions.ToDictionary(union => union.Id);
+        var newtypesById = program.Newtypes.ToDictionary(newtype => newtype.Id);
         return program.Traits
             .Select(trait => new
             {
@@ -453,10 +490,10 @@ internal static class AuditReport
                                 .Select(parameter => new
                                 {
                                     name = parameter.Name,
-                                    type = AuditType(parameter.Type, identities, structsById, unionsById)
+                                    type = AuditType(parameter.Type, identities, structsById, unionsById, newtypesById)
                                 })
                                 .ToArray(),
-                            return_type = AuditType(method.ReturnType, identities, structsById, unionsById)
+                            return_type = AuditType(method.ReturnType, identities, structsById, unionsById, newtypesById)
                         })
                         .ToArray()
                 };
@@ -473,6 +510,7 @@ internal static class AuditReport
         var functionsById = program.Functions.ToDictionary(function => function.Id);
         var structsById = program.Structs.ToDictionary(structure => structure.Id);
         var unionsById = program.Unions.ToDictionary(union => union.Id);
+        var newtypesById = program.Newtypes.ToDictionary(newtype => newtype.Id);
         return program.TraitImpls
             .OrderBy(implementation => implementation.StableId, StringComparer.Ordinal)
             .Select(implementation =>
@@ -490,7 +528,7 @@ internal static class AuditReport
                     package = package is null ? null : IdentityJson(package),
                     module = implementation.Module,
                     trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
-                    target = AuditType(implementation.Target, identities, structsById, unionsById),
+                    target = AuditType(implementation.Target, identities, structsById, unionsById, newtypesById),
                     visibility = implementation.Public ? "public" : "private",
                     methods = trait.Methods
                         .Select(method =>
@@ -520,6 +558,7 @@ internal static class AuditReport
         var traitImplsById = program.TraitImpls.ToDictionary(implementation => implementation.Id);
         var structsById = program.Structs.ToDictionary(structure => structure.Id);
         var unionsById = program.Unions.ToDictionary(union => union.Id);
+        var newtypesById = program.Newtypes.ToDictionary(newtype => newtype.Id);
         return program.Functions
             .Select(function =>
             {
@@ -598,7 +637,8 @@ internal static class AuditReport
                         identities,
                         stablePackageIdentities,
                         structsById,
-                        unionsById),
+                        unionsById,
+                        newtypesById),
                     required_capabilities = CheckedReportFacts.RequiredCapabilities(function.InferredEffects)
                 };
             })
@@ -613,7 +653,8 @@ internal static class AuditReport
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
         IReadOnlyDictionary<string, string> stablePackageIdentities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById)
     {
         var result = new List<object>();
         foreach (var expression in CheckedReportFacts.TypedExpressions(function))
@@ -638,7 +679,8 @@ internal static class AuditReport
                         identities,
                         stablePackageIdentities,
                         structsById,
-                        unionsById)
+                        unionsById,
+                        newtypesById)
                 });
                 continue;
             }
@@ -665,7 +707,8 @@ internal static class AuditReport
                     traitImplsById,
                     identities,
                     structsById,
-                    unionsById)
+                    unionsById,
+                    newtypesById)
             }).ToArray();
             result.Add(new
             {
@@ -688,7 +731,8 @@ internal static class AuditReport
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
         IReadOnlyDictionary<string, string> stablePackageIdentities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById)
     {
         if (witness is TypedForwardedTraitWitness forwarded)
         {
@@ -711,7 +755,7 @@ internal static class AuditReport
         {
             kind = "impl",
             id = implementation.StableId,
-            target = AuditType(implementation.Target, identities, structsById, unionsById),
+            target = AuditType(implementation.Target, identities, structsById, unionsById, newtypesById),
             binding_function = FunctionJson(FunctionIdentity(bindingFunction, identities))
         };
     }
@@ -722,14 +766,15 @@ internal static class AuditReport
         IReadOnlyDictionary<int, CheckedTraitImpl> traitImplsById,
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById) => witness switch
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById) => witness switch
         {
             TypedConcreteTraitWitness concrete when traitImplsById.TryGetValue(concrete.ImplId, out var implementation) &&
                 implementation.TraitId == expectedTraitId => new
                 {
                     kind = "impl",
                     id = implementation.StableId,
-                    target = AuditType(implementation.Target, identities, structsById, unionsById)
+                    target = AuditType(implementation.Target, identities, structsById, unionsById, newtypesById)
                 },
             TypedForwardedTraitWitness forwarded => new
             {
@@ -852,7 +897,8 @@ internal static class AuditReport
         LangType type,
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById) => type.Kind switch
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById) => type.Kind switch
         {
             LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
             LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
@@ -868,7 +914,7 @@ internal static class AuditReport
             LangTypeKind.SecretText => new
             {
                 kind = "secret",
-                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById, newtypesById)
             },
             LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
             LangTypeKind.ProcessOutput => new { kind = "primitive", name = "ProcessOutput" },
@@ -890,31 +936,33 @@ internal static class AuditReport
             LangTypeKind.List => new
             {
                 kind = "list",
-                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Map => new
             {
                 kind = "map",
-                key = AuditType(type.Arguments[0], identities, structsById, unionsById),
-                value = AuditType(type.Arguments[1], identities, structsById, unionsById)
+                key = AuditType(type.Arguments[0], identities, structsById, unionsById, newtypesById),
+                value = AuditType(type.Arguments[1], identities, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Option => new
             {
                 kind = "option",
-                item = AuditType(type.Arguments[0], identities, structsById, unionsById)
+                item = AuditType(type.Arguments[0], identities, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Result => new
             {
                 kind = "result",
-                ok = AuditType(type.Arguments[0], identities, structsById, unionsById),
-                error = AuditType(type.Arguments[1], identities, structsById, unionsById)
+                ok = AuditType(type.Arguments[0], identities, structsById, unionsById, newtypesById),
+                error = AuditType(type.Arguments[1], identities, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) => AuditNominalType(
-                "struct", structure.PackageId, structure.Module, structure.Name, type.Arguments, identities, structsById, unionsById),
+                "struct", structure.PackageId, structure.Module, structure.Name, type.Arguments, identities, structsById, unionsById, newtypesById),
             LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) => AuditNominalType(
-                "union", union.PackageId, union.Module, union.Name, type.Arguments, identities, structsById, unionsById),
+                "union", union.PackageId, union.Module, union.Name, type.Arguments, identities, structsById, unionsById, newtypesById),
+            LangTypeKind.Newtype when newtypesById.TryGetValue(type.NewtypeId, out var newtype) => AuditNominalType(
+                "newtype", newtype.PackageId, newtype.Module, newtype.Name, [], identities, structsById, unionsById, newtypesById),
             LangTypeKind.Error => throw new InvalidOperationException("An audit report cannot contain an error type"),
-            LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
+            LangTypeKind.Struct or LangTypeKind.Union or LangTypeKind.Newtype => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
             _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
         };
 
@@ -926,7 +974,8 @@ internal static class AuditReport
         IReadOnlyList<LangType> typeArguments,
         IReadOnlyDictionary<string, AuditPackageIdentity?> identities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById)
     {
         if (!identities.TryGetValue(packageId, out var package))
             throw new InvalidOperationException("A checked nominal type has no resolved package identity");
@@ -938,7 +987,7 @@ internal static class AuditReport
             module,
             name,
             type_arguments = typeArguments
-                .Select(argument => AuditType(argument, identities, structsById, unionsById))
+                .Select(argument => AuditType(argument, identities, structsById, unionsById, newtypesById))
                 .ToArray()
         };
     }

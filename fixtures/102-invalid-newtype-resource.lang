@@ -1,0 +1,21 @@
+module fixture::invalid_newtype_resource;
+
+pub struct Box<T> { value: T }
+pub struct Holder { nested: self::fixture::invalid_newtype_resource::Box<DbWrite> }
+
+pub newtype DirectFsRead = FsRead;
+pub newtype DirectFsWrite = FsWrite;
+pub newtype DirectHttpClient = HttpClient;
+pub newtype DirectDbRead = DbRead;
+pub newtype DirectDbWrite = DbWrite;
+pub newtype DirectTransaction = Transaction;
+pub newtype DirectConfig = Config;
+pub newtype DirectSecrets = Secrets;
+pub newtype DirectLogger = Logger;
+pub newtype DirectProcessRunner = ProcessRunner;
+
+pub newtype NestedHttpClient = Option<HttpClient>;
+pub newtype StoredBox = self::fixture::invalid_newtype_resource::Box<DbRead>;
+pub newtype StoredList = List<FsWrite>;
+pub newtype StoredMap = Map<Text, Transaction>;
+pub newtype TransitivelyStored = self::fixture::invalid_newtype_resource::Holder;

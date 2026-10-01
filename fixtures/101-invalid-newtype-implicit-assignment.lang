@@ -1,0 +1,37 @@
+module fixture::invalid_newtype_implicit_assignment;
+
+pub newtype UserId = i32;
+pub newtype OrderId = i32;
+
+fn accepts_i32(value: i32) -> i32 effects {} {
+    return value;
+}
+
+pub fn bad_assignment() -> i32 effects {} {
+    let user: self::fixture::invalid_newtype_implicit_assignment::UserId = 7;
+    return 0;
+}
+
+pub fn bad_return() -> self::fixture::invalid_newtype_implicit_assignment::UserId effects {} {
+    return 8;
+}
+
+pub fn bad_argument(user: self::fixture::invalid_newtype_implicit_assignment::UserId) -> i32 effects {} {
+    return self::fixture::invalid_newtype_implicit_assignment::accepts_i32(user);
+}
+
+pub fn compare_newtypes(user: self::fixture::invalid_newtype_implicit_assignment::UserId, order: self::fixture::invalid_newtype_implicit_assignment::OrderId) -> bool effects {} {
+    return user == order;
+}
+
+pub fn compare_representation(user: self::fixture::invalid_newtype_implicit_assignment::UserId) -> bool effects {} {
+    return user == user.value;
+}
+
+pub fn order_newtype(user: self::fixture::invalid_newtype_implicit_assignment::UserId) -> bool effects {} {
+    return user < self::fixture::invalid_newtype_implicit_assignment::UserId.wrap(9);
+}
+
+pub fn add_newtypes(user: self::fixture::invalid_newtype_implicit_assignment::UserId) -> self::fixture::invalid_newtype_implicit_assignment::UserId effects {} {
+    return user + self::fixture::invalid_newtype_implicit_assignment::UserId.wrap(1);
+}

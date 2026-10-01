@@ -41,6 +41,11 @@ internal sealed record StructDecl(
     bool Public,
     IReadOnlyList<StructFieldDecl> Fields,
     Token At);
+internal sealed record NewtypeDecl(
+    string Name,
+    bool Public,
+    TypeSyntax Representation,
+    Token At);
 internal sealed record TraitMethodDecl(
     string Name,
     IReadOnlyList<ParameterDecl> Parameters,
@@ -126,6 +131,7 @@ internal sealed record ParsedProgram(
     IReadOnlyList<UnionDecl> Unions,
     IReadOnlyList<FunctionDecl> Functions,
     IReadOnlyList<StructDecl> Structs,
+    IReadOnlyList<NewtypeDecl> Newtypes,
     IReadOnlyList<TraitDecl> Traits,
     IReadOnlyList<ImplDecl> Impls,
     IReadOnlyList<TestDecl> Tests,

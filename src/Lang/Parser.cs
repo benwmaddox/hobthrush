@@ -358,6 +358,7 @@ internal sealed class Parser
             var unions = new List<UnionDecl>();
             var functions = new List<FunctionDecl>();
             var structs = new List<StructDecl>();
+            var newtypes = new List<NewtypeDecl>();
             var traits = new List<TraitDecl>();
             var impls = new List<ImplDecl>();
             var tests = new List<TestDecl>();
@@ -406,6 +407,10 @@ internal sealed class Parser
                 {
                     structs.Add(ParseStruct(isPublic));
                 }
+                else if (Is("newtype"))
+                {
+                    newtypes.Add(ParseNewtype(isPublic));
+                }
                 else if (Is("trait"))
                 {
                     traits.Add(ParseTrait(isPublic));
@@ -439,7 +444,7 @@ internal sealed class Parser
                 }
             }
 
-            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, traits, impls, tests, commands, routes);
+            return new ParsedProgram(module, moduleAt, _file, unions, functions, structs, newtypes, traits, impls, tests, commands, routes);
         }
         catch (ParseFailure)
         {
@@ -1211,6 +1216,18 @@ internal sealed class Parser
 
         Expect("}");
         return new StructDecl(name.Text, typeParameters, isPublic, fields, name);
+    }
+
+    private NewtypeDecl ParseNewtype(bool isPublic)
+    {
+        Expect("newtype");
+        var name = ExpectBareIdentifier();
+        if (Is("<"))
+            Fail(Current, "E_UNSUPPORTED", "Generic newtype declarations are not implemented");
+        Expect("=");
+        var representation = ParseType();
+        Expect(";");
+        return new NewtypeDecl(name.Text, isPublic, representation, name);
     }
 
     private TraitDecl ParseTrait(bool isPublic)

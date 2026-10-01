@@ -1,0 +1,9 @@
+module fixture::invalid_newtype_direct_cycle;
+
+pub newtype Loop = self::fixture::invalid_newtype_direct_cycle::Loop;
+
+pub newtype First = self::fixture::invalid_newtype_direct_cycle::Second;
+pub newtype Second = self::fixture::invalid_newtype_direct_cycle::First;
+
+pub struct Stored { value: self::fixture::invalid_newtype_direct_cycle::Wrapped }
+pub newtype Wrapped = self::fixture::invalid_newtype_direct_cycle::Stored;

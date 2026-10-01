@@ -1,0 +1,3 @@
+module fixture::invalid_newtype_generic_declaration;
+
+pub newtype UserId<T> = T;

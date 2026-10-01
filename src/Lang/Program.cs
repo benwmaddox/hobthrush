@@ -637,6 +637,7 @@ internal static class Driver
         var functionsById = program.Functions.ToDictionary(function => function.Id);
         var unionsById = program.Unions.ToDictionary(union => union.Id);
         var structsById = program.Structs.ToDictionary(structure => structure.Id);
+        var newtypesById = program.Newtypes.ToDictionary(newtype => newtype.Id);
         var traitsById = program.Traits.ToDictionary(trait => trait.Id);
         var traitImplsById = program.TraitImpls.ToDictionary(implementation => implementation.Id);
 
@@ -665,10 +666,10 @@ internal static class Driver
                     .Select(parameter => new
                     {
                         name = parameter.Name,
-                        type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                        type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                     })
                     .ToArray(),
-                return_type = ApiType(function.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                return_type = ApiType(function.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                 declared_effects = function.DeclaredEffects,
                 inferred_effects = function.InferredEffects,
                 effect_paths = function.InferredEffectPaths
@@ -689,7 +690,8 @@ internal static class Driver
                     sourceAliasesByPackageId,
                     stablePackageIdentities,
                     structsById,
-                    unionsById),
+                    unionsById,
+                    newtypesById),
                 required_capabilities = RequiredCapabilities(function.InferredEffects)
             })
             .OrderBy(function => function.id, StringComparer.Ordinal)
@@ -713,7 +715,7 @@ internal static class Driver
                     .Select(field => new
                     {
                         name = field.Name,
-                        type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                        type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                     })
                     .ToArray()
             })
@@ -742,13 +744,25 @@ internal static class Driver
                             .Select(field => new
                             {
                                 name = field.Name,
-                                type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                                type = ApiType(field.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                             })
                             .ToArray()
                     })
                     .ToArray()
             })
             .OrderBy(union => union.id, StringComparer.Ordinal)
+            .ToArray();
+
+        var newtypes = program.Newtypes
+            .Where(newtype => newtype.Public && visiblePackageIds.Contains(newtype.PackageId))
+            .Select(newtype => new
+            {
+                id = ApiDeclarationId(newtype.PackageId, newtype.Module, newtype.Name, packageReferences),
+                source_ids = ApiDeclarationIds(newtype.PackageId, newtype.Module, newtype.Name, sourceAliasesByPackageId),
+                package = packageReferences[newtype.PackageId],
+                representation = ApiType(newtype.Representation, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
+            })
+            .OrderBy(newtype => newtype.id, StringComparer.Ordinal)
             .ToArray();
 
         var traits = program.Traits
@@ -766,10 +780,10 @@ internal static class Driver
                             .Select(parameter => new
                             {
                                 name = parameter.Name,
-                                type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                                type = ApiType(parameter.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                             })
                             .ToArray(),
-                        return_type = ApiType(method.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                        return_type = ApiType(method.ReturnType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                     })
                     .ToArray()
             })
@@ -788,7 +802,7 @@ internal static class Driver
                     package = packageReferences[implementation.PackageId],
                     module = implementation.Module,
                     trait = CheckedReportFacts.StableTraitId(trait, stablePackageIdentities),
-                    target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                    target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                     visibility = implementation.Public ? "public" : "private",
                     methods = trait.Methods.Select(method => method.Name).ToArray()
                 };
@@ -808,7 +822,7 @@ internal static class Driver
                     {
                         name = input.Name,
                         kind = input.Kind.ToString().ToLowerInvariant(),
-                        type = ApiType(input.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                        type = ApiType(input.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                         help = input.Help,
                         default_value = ApiCommandDefault(input.Default)
                 })
@@ -818,7 +832,7 @@ internal static class Driver
                 handler_source_ids = ApiFunctionSourceIds(command.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
                 error_formatter = ApiFunctionId(command.ErrorFunctionId, functionsById, packageReferences),
                 error_formatter_source_ids = ApiFunctionSourceIds(command.ErrorFunctionId, functionsById, sourceAliasesByPackageId),
-                error_type = ApiType(command.ErrorType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                error_type = ApiType(command.ErrorType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                 required_capabilities = command.Capabilities
                     .Select(capability => capability.Kind switch
                     {
@@ -845,7 +859,7 @@ internal static class Driver
                 path = route.Path,
                 body_type = route.BodyType is null
                     ? null
-                    : ApiType(route.BodyType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                    : ApiType(route.BodyType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                 handler = ApiFunctionId(route.HandlerFunctionId, functionsById, packageReferences),
                 handler_is_async = route.HandlerIsAsync,
                 response_type = ApiNominalType(
@@ -858,7 +872,8 @@ internal static class Driver
                     packageIdentities,
                     sourceAliasesByPackageId,
                     structsById,
-                    unionsById),
+                    unionsById,
+                    newtypesById),
                 handler_source_ids = ApiFunctionSourceIds(route.HandlerFunctionId, functionsById, sourceAliasesByPackageId),
                 parameters = route.Bindings
                     .OrderBy(binding => binding.HandlerParameterIndex)
@@ -872,7 +887,7 @@ internal static class Driver
                             _ => throw new InvalidOperationException("Unknown checked route binding kind")
                         },
                         required = binding.Kind == CheckedRouteBindingKind.Path || !binding.IsOptional,
-                        type = ApiType(binding.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
+                        type = ApiType(binding.Type, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
                         handler_parameter_index = binding.HandlerParameterIndex
                     })
                     .ToArray(),
@@ -884,7 +899,7 @@ internal static class Driver
                         content_type = response.ContentKind?.ToString().ToLowerInvariant(),
                         payload_type = response.PayloadType is null
                             ? null
-                            : ApiType(response.PayloadType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                            : ApiType(response.PayloadType, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                     })
                     .ToArray(),
                 required_capabilities = route.Capabilities
@@ -926,7 +941,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 10,
+            schema_version = 11,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -945,6 +960,7 @@ internal static class Driver
                 .ToArray(),
             functions,
             structs,
+            newtypes,
             unions,
             traits,
             trait_impls = traitImpls,
@@ -961,7 +977,8 @@ internal static class Driver
         IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById) => type.Kind switch
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById) => type.Kind switch
         {
             LangTypeKind.I32 => new { kind = "primitive", name = "i32" },
             LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
@@ -976,7 +993,7 @@ internal static class Driver
             LangTypeKind.SecretText => new
             {
                 kind = "secret",
-                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
             },
             LangTypeKind.FsError => new { kind = "primitive", name = "FsError" },
             LangTypeKind.HttpClient => new { kind = "primitive", name = "HttpClient" },
@@ -999,24 +1016,24 @@ internal static class Driver
             LangTypeKind.List => new
             {
                 kind = "list",
-                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Map => new
             {
                 kind = "map",
-                key = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
-                value = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                key = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
+                value = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Option => new
             {
                 kind = "option",
-                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                item = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Result => new
             {
                 kind = "result",
-                ok = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById),
-                error = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                ok = ApiType(type.Arguments[0], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById),
+                error = ApiType(type.Arguments[1], packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
             },
             LangTypeKind.Struct when structsById.TryGetValue(type.StructId, out var structure) =>
                         ApiNominalType(
@@ -1029,7 +1046,8 @@ internal static class Driver
                             packageIdentities,
                             sourceAliasesByPackageId,
                             structsById,
-                            unionsById),
+                            unionsById,
+                            newtypesById),
             LangTypeKind.Union when unionsById.TryGetValue(type.UnionId, out var union) =>
                         ApiNominalType(
                             "union",
@@ -1041,9 +1059,23 @@ internal static class Driver
                             packageIdentities,
                             sourceAliasesByPackageId,
                             structsById,
-                            unionsById),
+                            unionsById,
+                            newtypesById),
+            LangTypeKind.Newtype when newtypesById.TryGetValue(type.NewtypeId, out var newtype) =>
+                        ApiNominalType(
+                            "newtype",
+                            newtype.PackageId,
+                            newtype.Module,
+                            newtype.Name,
+                            [],
+                            packageReferences,
+                            packageIdentities,
+                            sourceAliasesByPackageId,
+                            structsById,
+                            unionsById,
+                            newtypesById),
             LangTypeKind.Error => throw new InvalidOperationException("A checked API cannot contain an error type"),
-            LangTypeKind.Struct or LangTypeKind.Union => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
+            LangTypeKind.Struct or LangTypeKind.Union or LangTypeKind.Newtype => throw new InvalidOperationException("A checked type refers to an unknown declaration"),
             _ => throw new InvalidOperationException($"Unsupported checked type kind '{type.Kind}'")
         };
 
@@ -1057,7 +1089,8 @@ internal static class Driver
         IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById)
     {
         if (!packageIdentities.TryGetValue(packageId, out var package))
             throw new InvalidOperationException("A checked nominal type has no resolved package identity");
@@ -1073,7 +1106,7 @@ internal static class Driver
             module,
             name,
             type_arguments = typeArguments
-                .Select(argument => ApiType(argument, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById))
+                .Select(argument => ApiType(argument, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById))
                 .ToArray()
         };
     }
@@ -1161,7 +1194,8 @@ internal static class Driver
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
         IReadOnlyDictionary<string, string> stablePackageIdentities,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById)
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById)
     {
         var result = new List<object>();
         foreach (var expression in CheckedReportFacts.TypedExpressions(function))
@@ -1186,7 +1220,8 @@ internal static class Driver
                         packageIdentities,
                         sourceAliasesByPackageId,
                         structsById,
-                        unionsById)
+                        unionsById,
+                        newtypesById)
                 });
                 continue;
             }
@@ -1222,7 +1257,8 @@ internal static class Driver
                             packageIdentities,
                             sourceAliasesByPackageId,
                             structsById,
-                            unionsById)
+                            unionsById,
+                            newtypesById)
                     };
                 })
                 .Where(witness => witness is not null)
@@ -1248,7 +1284,8 @@ internal static class Driver
         IReadOnlyDictionary<string, ApiPackageIdentity> packageIdentities,
         IReadOnlyDictionary<string, string[]> sourceAliasesByPackageId,
         IReadOnlyDictionary<int, CheckedStruct> structsById,
-        IReadOnlyDictionary<int, CheckedUnion> unionsById) => witness switch
+        IReadOnlyDictionary<int, CheckedUnion> unionsById,
+        IReadOnlyDictionary<int, CheckedNewtype> newtypesById) => witness switch
         {
             TypedConcreteTraitWitness concrete when traitImplsById.TryGetValue(concrete.ImplId, out var implementation) &&
                 implementation.TraitId == expectedTraitId => implementation.Public && packageReferences.ContainsKey(implementation.PackageId)
@@ -1256,7 +1293,7 @@ internal static class Driver
                     {
                         kind = "impl",
                         id = implementation.StableId,
-                        target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById)
+                        target = ApiType(implementation.Target, packageReferences, packageIdentities, sourceAliasesByPackageId, structsById, unionsById, newtypesById)
                     }
                     : null,
             TypedForwardedTraitWitness forwarded => new
