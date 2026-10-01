@@ -120,6 +120,7 @@ internal static class CheckedReportFacts
         yield return expression;
         IEnumerable<TypedExpr> children = expression switch
         {
+            TypedUnitExpr => [],
             TypedLambdaInvokeExpr lambda => [lambda.Argument, lambda.Body],
             TypedListExpr list => list.Items,
             TypedBinaryExpr binary => [binary.Left, binary.Right],
@@ -268,6 +269,8 @@ internal static class CheckedReportFacts
         {
             switch (expression)
             {
+                case TypedUnitExpr:
+                    break;
                 case TypedLambdaInvokeExpr lambda:
                     VisitExpression(lambda.Argument, witnesses);
                     VisitExpression(lambda.Body, witnesses);

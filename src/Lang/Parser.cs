@@ -1528,6 +1528,12 @@ internal sealed class Parser
     private Expr ParsePrimary(bool allowStructConstruction)
     {
         var token = Current;
+        if (Is("(") && LookAhead().Text == ")")
+        {
+            var at = Take();
+            Take();
+            return ParsePostfix(RegisterExpression(new UnitExpr(at)));
+        }
         if (Is("await"))
         {
             var at = Take();

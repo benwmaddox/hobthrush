@@ -1,0 +1,18 @@
+module fixture::invalid_unit_boundaries;
+
+fn wrong_type() -> i32 effects {} {
+    let value: i32 = ();
+    return value;
+}
+
+fn not_a_constructor() -> Unit effects {} {
+    return Unit();
+}
+
+fn reserved_type_parameter<Unit>(value: Unit) -> Unit effects {} {
+    return value;
+}
+
+pub fn main() -> Unit effects {} {
+    return ();
+}
