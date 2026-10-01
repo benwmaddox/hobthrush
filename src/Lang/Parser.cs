@@ -4,6 +4,8 @@ using System.Text;
 
 internal static class Lexer
 {
+    private const int MaximumF64LiteralLength = 128;
+
     public static List<Token> Scan(string source, string file, List<Diagnostic> diagnostics)
     {
         var tokens = new List<Token>();
@@ -62,25 +64,15 @@ internal static class Lexer
                 continue;
             }
 
+            if (c == '.' && i + 1 < source.Length && IsAsciiDigit(source[i + 1]))
+            {
+                ScanNumericLiteral(source, file, diagnostics, tokens, ref i, ref column, line, leadingDot: true);
+                continue;
+            }
+
             if (char.IsDigit(c))
             {
-                while (i < source.Length && char.IsDigit(source[i]))
-                {
-                    i++;
-                    column++;
-                }
-
-                if (i + 3 <= source.Length &&
-                    (source.AsSpan(i, 3).SequenceEqual("i64") ||
-                     source.AsSpan(i, 3).SequenceEqual("u32") ||
-                     source.AsSpan(i, 3).SequenceEqual("u64")) &&
-                    (i + 3 == source.Length ||
-                     !(char.IsLetterOrDigit(source[i + 3]) || source[i + 3] == '_')))
-                {
-                    i += 3;
-                    column += 3;
-                }
-                tokens.Add(new Token("number", source[start..i], startLine, startColumn, file));
+                ScanNumericLiteral(source, file, diagnostics, tokens, ref i, ref column, line);
                 continue;
             }
 
@@ -124,7 +116,7 @@ internal static class Lexer
                 continue;
             }
 
-            if (".;:,(){}[]=+*-<>".IndexOf(c) >= 0)
+            if (".;:,(){}[]=+*/-<>".IndexOf(c) >= 0)
             {
                 tokens.Add(new Token(c.ToString(), c.ToString(), line, column, file));
                 i++;
@@ -143,6 +135,152 @@ internal static class Lexer
 
         tokens.Add(new Token("eof", "", line, column, file));
         return tokens;
+    }
+
+    private static void ScanNumericLiteral(
+        string source,
+        string file,
+        List<Diagnostic> diagnostics,
+        List<Token> tokens,
+        ref int i,
+        ref int column,
+        int line,
+        bool leadingDot = false)
+    {
+        var start = i;
+        var startColumn = column;
+        var malformed = leadingDot;
+        var hasDecimalPoint = leadingDot;
+        var hasExponent = false;
+        var hasF64Suffix = false;
+        var wrongF64Suffix = false;
+
+        if (leadingDot)
+        {
+            i++;
+            column++;
+        }
+
+        var integerDigitsStart = i;
+        while (i < source.Length && char.IsDigit(source[i]))
+        {
+            i++;
+            column++;
+        }
+        var integerDigitsEnd = i;
+
+        if (!leadingDot && i < source.Length && source[i] == '.')
+        {
+            hasDecimalPoint = true;
+            i++;
+            column++;
+        }
+
+        if (hasDecimalPoint)
+        {
+            var fractionStart = i;
+            while (i < source.Length && IsAsciiDigit(source[i]))
+            {
+                i++;
+                column++;
+            }
+            if (i == fractionStart) malformed = true;
+        }
+
+        if (i < source.Length && source[i] is 'e' or 'E')
+        {
+            hasExponent = true;
+            i++;
+            column++;
+            if (i < source.Length && source[i] is '+' or '-')
+            {
+                i++;
+                column++;
+            }
+
+            var exponentStart = i;
+            while (i < source.Length && IsAsciiDigit(source[i]))
+            {
+                i++;
+                column++;
+            }
+            if (i == exponentStart) malformed = true;
+        }
+
+        if (HasNumericSuffix(source, i, "f64") && HasIdentifierBoundary(source, i + 3))
+        {
+            hasF64Suffix = true;
+            i += 3;
+            column += 3;
+        }
+        else if (!leadingDot && !hasDecimalPoint && !hasExponent &&
+                 (HasNumericSuffix(source, i, "i64") || HasNumericSuffix(source, i, "u32") || HasNumericSuffix(source, i, "u64")) &&
+                 HasIdentifierBoundary(source, i + 3))
+        {
+            i += 3;
+            column += 3;
+        }
+        else if (i < source.Length && (source[i] is 'f' or 'F' ||
+                                       (hasDecimalPoint || hasExponent) && char.IsLetterOrDigit(source[i])))
+        {
+            wrongF64Suffix = source[i] is 'f' or 'F' || hasDecimalPoint || hasExponent;
+            malformed = true;
+            while (i < source.Length && (char.IsLetterOrDigit(source[i]) || source[i] == '_'))
+            {
+                i++;
+                column++;
+            }
+        }
+
+        var f64Candidate = leadingDot || hasDecimalPoint || hasExponent || hasF64Suffix || wrongF64Suffix;
+        var tokenLength = i - start;
+        if (f64Candidate && tokenLength > MaximumF64LiteralLength)
+        {
+            diagnostics.Add(new Diagnostic(
+                "E_NUMERIC_LITERAL_TOO_LONG",
+                "f64 literal exceeds the 128-character limit",
+                file,
+                new Range(line, startColumn, line, startColumn + tokenLength)));
+            return;
+        }
+
+        if (f64Candidate)
+        {
+            if (integerDigitsStart != integerDigitsEnd && !IsAsciiDigitSpan(source.AsSpan(integerDigitsStart, integerDigitsEnd - integerDigitsStart)))
+                malformed = true;
+
+            var message = malformed
+                ? "Malformed f64 literal"
+                : !hasF64Suffix
+                    ? "Floating-point literals require the f64 suffix"
+                    : null;
+            if (message is not null)
+            {
+                diagnostics.Add(new Diagnostic(
+                    "E_SYNTAX",
+                    message,
+                    file,
+                    new Range(line, startColumn, line, startColumn + tokenLength)));
+                return;
+            }
+        }
+
+        tokens.Add(new Token("number", source[start..i], line, startColumn, file));
+    }
+
+    private static bool HasNumericSuffix(string source, int start, string suffix) =>
+        start + suffix.Length <= source.Length && source.AsSpan(start, suffix.Length).SequenceEqual(suffix);
+
+    private static bool HasIdentifierBoundary(string source, int index) =>
+        index >= source.Length || !(char.IsLetterOrDigit(source[index]) || source[index] == '_');
+
+    private static bool IsAsciiDigit(char value) => value is >= '0' and <= '9';
+
+    private static bool IsAsciiDigitSpan(ReadOnlySpan<char> value)
+    {
+        foreach (var character in value)
+            if (!IsAsciiDigit(character)) return false;
+        return true;
     }
 
     private static void ScanTextLiteral(
@@ -1363,7 +1501,7 @@ internal sealed class Parser
             {
                 var precedence = Current.Text switch
                 {
-                    "*" => 5,
+                    "*" or "/" => 5,
                     "+" or "-" => 4,
                     "<" or "<=" or ">" or ">=" => 3,
                     "==" or "!=" => 2,
@@ -1424,7 +1562,7 @@ internal sealed class Parser
         if (token.Kind == "number")
         {
             Take();
-            return ParsePostfix(RegisterExpression(ParseIntegerLiteral(token, token)));
+            return ParsePostfix(RegisterExpression(ParseNumericLiteral(token, token)));
         }
         if (Is("-"))
         {
@@ -1432,14 +1570,14 @@ internal sealed class Parser
             if (Current.Kind == "number")
             {
                 var magnitudeToken = Take();
-                var literalKind = IntegerLiteralKindFromToken(magnitudeToken);
-                if (literalKind is IntegerLiteralKind.I32 or IntegerLiteralKind.I64)
+                var literalKind = NumericLiteralKindFromToken(magnitudeToken);
+                if (literalKind is NumericLiteralKind.I32 or NumericLiteralKind.I64)
                 {
                     var negativeLiteral = ParseIntegerLiteral(magnitudeToken, minus, negative: true);
                     return ParsePostfix(RegisterExpression(negativeLiteral));
                 }
 
-                var positiveLiteral = RegisterExpression(ParseIntegerLiteral(magnitudeToken, magnitudeToken));
+                var positiveLiteral = RegisterExpression(ParseNumericLiteral(magnitudeToken, magnitudeToken));
                 var unaryDepth = ExpressionDepth(positiveLiteral) + 1;
                 if (unaryDepth > MaximumNestingDepth)
                     Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
@@ -1534,19 +1672,38 @@ internal sealed class Parser
         throw new ParseFailure();
     }
 
-    private static IntegerLiteralKind IntegerLiteralKindFromToken(Token token) =>
-        token.Text.EndsWith("i64", StringComparison.Ordinal)
-            ? IntegerLiteralKind.I64
-            : token.Text.EndsWith("u32", StringComparison.Ordinal)
-                ? IntegerLiteralKind.U32
-                : token.Text.EndsWith("u64", StringComparison.Ordinal)
-                    ? IntegerLiteralKind.U64
-                    : IntegerLiteralKind.I32;
+    private static NumericLiteralKind NumericLiteralKindFromToken(Token token) =>
+        token.Text.EndsWith("f64", StringComparison.Ordinal)
+            ? NumericLiteralKind.F64
+            : token.Text.EndsWith("i64", StringComparison.Ordinal)
+                ? NumericLiteralKind.I64
+                : token.Text.EndsWith("u32", StringComparison.Ordinal)
+                    ? NumericLiteralKind.U32
+                    : token.Text.EndsWith("u64", StringComparison.Ordinal)
+                        ? NumericLiteralKind.U64
+                        : NumericLiteralKind.I32;
+
+    private NumberExpr ParseNumericLiteral(Token literalAt, Token expressionAt) =>
+        NumericLiteralKindFromToken(literalAt) == NumericLiteralKind.F64
+            ? ParseF64Literal(literalAt, expressionAt)
+            : ParseIntegerLiteral(literalAt, expressionAt);
+
+    private NumberExpr ParseF64Literal(Token literalAt, Token expressionAt)
+    {
+        var spelling = literalAt.Text[..^3];
+        if (!double.TryParse(spelling, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || !double.IsFinite(value))
+            Fail(literalAt, "E_NUMERIC_LITERAL_RANGE", "f64 literal is outside the finite range");
+
+        var bits = unchecked((ulong)BitConverter.DoubleToInt64Bits(value));
+        return new NumberExpr(expressionAt, bits.ToString("X16", CultureInfo.InvariantCulture), NumericLiteralKind.F64);
+    }
 
     private NumberExpr ParseIntegerLiteral(Token literalAt, Token expressionAt, bool negative = false)
     {
-        var kind = IntegerLiteralKindFromToken(literalAt);
-        var suffixLength = kind == IntegerLiteralKind.I32 ? 0 : 3;
+        var kind = NumericLiteralKindFromToken(literalAt);
+        if (kind == NumericLiteralKind.F64)
+            throw new InvalidOperationException("An f64 literal reached integer parsing");
+        var suffixLength = kind == NumericLiteralKind.I32 ? 0 : 3;
         var digitsLength = literalAt.Text.Length - suffixLength;
         var significantStart = 0;
         while (significantStart < digitsLength && literalAt.Text[significantStart] == '0')
@@ -1554,10 +1711,10 @@ internal sealed class Parser
         var significantDigits = digitsLength - significantStart;
         var maximumDigits = kind switch
         {
-            IntegerLiteralKind.I32 => 10,
-            IntegerLiteralKind.I64 => 19,
-            IntegerLiteralKind.U32 => 10,
-            IntegerLiteralKind.U64 => 20,
+            NumericLiteralKind.I32 => 10,
+            NumericLiteralKind.I64 => 19,
+            NumericLiteralKind.U32 => 10,
+            NumericLiteralKind.U64 => 20,
             _ => throw new InvalidOperationException("Unknown integer literal kind")
         };
         if (significantDigits > maximumDigits)
@@ -1570,10 +1727,10 @@ internal sealed class Parser
         var value = negative ? -magnitude : magnitude;
         var (minimum, maximum) = kind switch
         {
-            IntegerLiteralKind.I32 => (new BigInteger(int.MinValue), new BigInteger(int.MaxValue)),
-            IntegerLiteralKind.I64 => (new BigInteger(long.MinValue), new BigInteger(long.MaxValue)),
-            IntegerLiteralKind.U32 => (BigInteger.Zero, new BigInteger(uint.MaxValue)),
-            IntegerLiteralKind.U64 => (BigInteger.Zero, new BigInteger(ulong.MaxValue)),
+            NumericLiteralKind.I32 => (new BigInteger(int.MinValue), new BigInteger(int.MaxValue)),
+            NumericLiteralKind.I64 => (new BigInteger(long.MinValue), new BigInteger(long.MaxValue)),
+            NumericLiteralKind.U32 => (BigInteger.Zero, new BigInteger(uint.MaxValue)),
+            NumericLiteralKind.U64 => (BigInteger.Zero, new BigInteger(ulong.MaxValue)),
             _ => throw new InvalidOperationException("Unknown integer literal kind")
         };
         if (value < minimum || value > maximum)
@@ -1582,12 +1739,12 @@ internal sealed class Parser
         return new NumberExpr(expressionAt, value.ToString(CultureInfo.InvariantCulture), kind);
     }
 
-    private static string IntegerLiteralName(IntegerLiteralKind kind) => kind switch
+    private static string IntegerLiteralName(NumericLiteralKind kind) => kind switch
     {
-        IntegerLiteralKind.I32 => "i32",
-        IntegerLiteralKind.I64 => "i64",
-        IntegerLiteralKind.U32 => "u32",
-        IntegerLiteralKind.U64 => "u64",
+        NumericLiteralKind.I32 => "i32",
+        NumericLiteralKind.I64 => "i64",
+        NumericLiteralKind.U32 => "u32",
+        NumericLiteralKind.U64 => "u64",
         _ => throw new InvalidOperationException("Unknown integer literal kind")
     };
 
