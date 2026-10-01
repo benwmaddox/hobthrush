@@ -25,6 +25,10 @@ Sponsorship gives funders a direct way to advance an eligible fix or feature int
 
 For a new feature, most feature-specific payment should support ongoing maintenance. This does not apply to existing bug fixes. The exact funding share and maintenance period remain open.
 
+Keep feature sponsorship funding and general maintenance funding as distinct pools. Accept contributions directly to general maintenance. After the feature's one-year follow-up review period, unused feature funds may roll into general maintenance if the feature cost less than funded.
+
+Hold back 30% of sponsored feature funds for deep independent AI reviews at one week, one month, and one year after the feature's release. Reviews should verify that the feature continues to work correctly through subsequent changes. Use this reserve to fix issues found and to investigate and propose alternative approaches when genuinely needed. New features arising from those proposals still require explicit funding.
+
 ## Proactive work and reserve
 
 AI systems may initiate correctness fixes and internal compiler refinements using ongoing maintenance funding. Monthly spending on this proactive work is capped at 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. If an active subscription includes tokens that can be used at no extra cost and no other work is pending, use them for eligible maintenance work.
@@ -55,5 +59,5 @@ These questions remain open and do not override the settled decisions above:
 
 - What criteria should make an AI system stop, defer, or reject a proposed change?
 - How should eligible work be ranked within each priority class?
-- What exact funding share and maintenance period should apply to feature-specific sponsorship?
+- Beyond the confirmed 30% reserve, how should feature sponsorship be split between implementation and ongoing care? How should the review reserve be split across the three reviews and fixes?
 - Should maintenance funds have a minimum reserve balance? How should revenue be counted for the monthly cap, and may unused spending capacity carry forward?

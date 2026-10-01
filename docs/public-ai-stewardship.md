@@ -107,11 +107,13 @@ Implementation funding should be held against defined milestones. For a new feat
 - independent AI review;
 - release verification.
 
-Funds are released for completed deliverables, not for merge. Unspent restricted funds follow terms published before sponsorship, such as refund, sponsor-approved redirection, or transfer to the general maintenance fund.
+Funds are released for completed deliverables, not for merge. Keep feature sponsorship and general maintenance funds as distinct pools. Sponsorship terms should state that after the one-year follow-up review period, unused feature funds may roll into general maintenance if the feature cost less than funded.
 
 ### 5. Release and follow-up
 
 The normal technical gates and independent AI acceptance remain mandatory. After release, the public record includes the final cost, model and tool versions, accepted limitations, deferred work, and maintenance owner. A feature that cannot be maintained may be declined even after a successful prototype.
+
+Hold back 30% of sponsored feature funds for deep independent AI reviews at one week, one month, and one year after release. Verify that the feature still works correctly, including after intervening changes, and publish the findings. Use the reserve for fixes when needed and for investigation and proposals of alternative approaches when justified. New-feature implementation still requires explicit feature-specific funding. The split of the reserve across reviews and fixes, and the remaining feature-budget allocation, remain open. After the one-year review period, unused feature funds may roll into general maintenance.
 
 ## Technical acceptance criteria
 
@@ -131,6 +133,8 @@ A language proposal should be accepted only when it:
 Independent AI reviewers assess these criteria and record the decision. The AI process weighs fit with goals, user need, compatibility, and maintenance cost, then coordinates approved implementation and release. Funding may support or prioritize eligible work, but it does not waive criteria or buy technical acceptance.
 
 ## Shared maintenance sponsorship
+
+Accept funding directly into the general maintenance pool as well as unused feature funds rolled over after their follow-up period.
 
 Recurring sponsorship should primarily support work shared by all users:
 
