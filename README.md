@@ -4,6 +4,8 @@
 
 Named for a folklore helper that quietly finishes people's work while they sleep.
 
+![Watercolor of hobthrushes quietly crafting and checking wooden work by lamplight](docs/assets/hobthrush-helpers.png)
+
 Hobthrush is an experimental general-purpose language that makes types, errors, and side effects visible to both developers and tools. Its compiler checks exhaustive matches and declared effects, then provides structured diagnostics and machine-readable API and audit reports. You can use the same toolchain to build libraries, typed command-line tools, and small web apps.
 
 The command is `hob`, source files use `.hob`, and packages use `hob.toml` and `hob.lock`. The language is pre-1.0; syntax and tooling may change without migration support.
