@@ -2,6 +2,8 @@
 
 **Status:** Milestone #748 adds a narrow catalog-gated managed adapter contract for one SHA-256 text operation. Broader adapter package support remains planned. The independent C ABI proof is planned, not started. Normal Hobthrush source has no arbitrary CLR, C#, reflection, or assembly-import feature.
 
+**AI review principle:** Accepting or changing a trusted adapter requires separate AI systems to inspect its implementation and test outcomes; declarations and hashes alone are not enough. The current compiler does not automate that review process or sandbox adapter code.
+
 ## Managed .NET adapter package contract (planned)
 
 A managed adapter is a reviewed package that exposes a small, closed set of Hobthrush declarations over a pinned .NET implementation. It does not make .NET types available to ordinary source. Packages and source providers remain separate from the language: only explicit dependency-management operations may materialize external sources; checks, builds, runs, tests, and audits consume a locked local snapshot without contacting a provider.
@@ -44,7 +46,7 @@ Future bridge entries may add operations only with an explicit reviewed catalog 
 - **Implementation identity:** every selected managed/native/runtime asset has an identity and SHA-256. A deterministic closure hash covers the complete selected dependency closure, not only the top-level DLL. Normal builds and runs do not probe unlisted assemblies, download code, or restore ambient NuGet packages.
 - **Wrapper tests:** each operation has tests for representative success, declared failures, effect/capability behavior, and supported lifetime/cancellation paths. Results are review evidence, not proof.
 
-Capabilities constrain checked Hobthrush code and organize trusted host integrations. They do not contain malicious managed code in the same process. Reviewers must inspect the adapter implementation as well as its claims.
+Capabilities constrain checked Hobthrush code and organize trusted host integrations. They do not contain malicious managed code in the same process. Independent AI reviewers must inspect the adapter implementation as well as its claims.
 
 ## C ABI proof target (not started)
 

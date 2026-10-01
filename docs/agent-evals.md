@@ -63,9 +63,9 @@ A scenario record contains `id`, `version`, `candidate_root_label` (`reference` 
 
 The Windows and Linux CI jobs upload this directory on `always()` as separate `outcome-evals-Windows` and `outcome-evals-Linux` artifacts, including when a grader step fails. CI uses the fixture identity sentinels above; those labels identify the reference check run and are not a model evaluation.
 
-## Who can inspect what
+## Black-box outcomes and internal inspection
 
-A requester or developer can judge the task primarily from the package's public behavior: CLI output, HTTP status/body, persisted greeting behavior, and the task's documented use. The agent working on a card can and should inspect source, compiler diagnostics, effect inspection, package audit, generated schemas, build receipts, and raw command evidence to find and verify a repair. Expert reviewers may inspect the same internals. Internal inspection is part of completing and reviewing these tasks; a human source-review opinion is separate from the machine outcome score unless it is represented by a declared grader check.
+The declared outcome checks judge public behavior such as CLI output, HTTP status and body, persistence, and documented use, alongside explicit compiler and metadata contracts. AI systems doing the work may inspect and change source, diagnostics, audits, schemas, receipts, and command evidence; independent AI reviewers may inspect source to find defects or constraint bypasses. Internal inspection helps produce and review a result, while black-box checks determine the declared outcome score. Routine human source review is not part of the grading process.
 
 ## Limits
 

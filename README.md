@@ -1,6 +1,6 @@
 # Hobthrush
 
-**An AI-built language for reliable software under clear constraints.**
+**A language for AI-built software under explicit constraints.**
 
 Named for the hobthrush of northern English folklore: a household spirit said to quietly complete useful work unseen. [Read about the tradition](https://www.ryedalefolkmuseum.co.uk/the-helpful-hobs-of-the-north-york-moors/).
 
@@ -10,11 +10,11 @@ The command is `hob`, source files use `.hob`, and packages use `hob.toml` and `
 
 ## Goals and contributions
 
-Hobthrush is an experimental general-purpose language for reliable libraries, CLI tools, and small web apps. Goals and current scope are described in the [product brief](docs/PRD.md) and [roadmap](docs/roadmap.md).
+Hobthrush is an experimental language designed for AI systems to read, write, and maintain reliable software. Enforceable compiler rules, machine-readable contracts, and black-box outcome tests keep work on task. People set high-level goals and priorities; code inspection or intervention in an individual change should be rare. See the [project goals](docs/project-goals.md), [product brief](docs/PRD.md), and [roadmap](docs/roadmap.md).
 
-Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports categorizing and reviewing bugs and feature requests. Approved items are prioritized and open for sponsorship. Dedicated funds can then support specific features once their designs are approved and align with project goals. Up to 10% of funds may support human management of the project. Funding supports the work; acceptance still depends on independent AI review and technical checks.
+Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports AI review of requests. Once AI review accepts a fix or feature, sponsors can directly promote it to funded work and supply implementation capacity. Sponsorship signals importance, but correctness fixes remain first and payment cannot buy acceptance. Most feature-specific funding should support ongoing maintenance; bug-fix funding is exempt. Up to 10% of funds may support human project management.
 
-Focused issues, examples, documentation, and pull requests are welcome. Contributions and feedback may be used directly as input to future AI-assisted updates to this project. Please share only material you are comfortable having incorporated into those updates.
+Issues, examples, documentation, and code contributions are inputs to the AI-operated development process. AI systems decide how to use them against project goals and constraints, and may incorporate them directly into updates. Please share only material you are comfortable having incorporated.
 
 ## Core decisions
 
@@ -23,7 +23,8 @@ Focused issues, examples, documentation, and pull requests are welcome. Contribu
 - **Keep values simple and effects controlled.** Ordinary values are immutable; `var` only rebinds a local. I/O requires explicit capabilities; supported scoped resources use lexical lifetimes. The runtime uses .NET garbage collection; see the [memory and performance contract](docs/memory-and-performance.md).
 - **Start with the .NET platform.** The current bootstrap compiler is written in C# and emits C# for .NET. Native AOT is an optional, garbage-collected publish mode; a Hobthrush-written compiler is a later roadmap goal.
 - **Pin dependencies and expose trust boundaries.** Git dependencies are locked to exact commits and content hashes. Catalogued .NET adapters have declared signatures and provenance, but run as trusted code with full process authority; audit reports are not a sandbox. See the [foreign interop contract](docs/foreign-interop.md).
-- **Use one toolchain and an AI review loop.** The intended scope is libraries, CLI tools, and small web apps. The development model is for AI systems to build and test the core compiler and standard libraries, with independent review by other AI systems. People set goals and priorities at a high level.
+- **Put AI in charge of detailed engineering.** AI systems write and maintain the compiler and standard library; other AI systems independently review changes. Compiler checks, black-box tests, and CI gates constrain acceptance. People set high-level goals and priorities; code is written primarily for AI to read and modify, and routine human review of changes is not assumed.
+- **Keep the language surface stable as it matures.** After 1.0, changes to public syntax and semantics should be rare. Compiler, runtime, and tool internals may improve more often while preserving observable contracts. AI systems review and coordinate compatible standard-library growth, the preferred place for new general capabilities when they fit.
 
 ## Try it
 
