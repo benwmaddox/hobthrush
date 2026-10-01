@@ -92,8 +92,10 @@ equality        = comparison, { ("==" | "!="), comparison } ;
 comparison      = additive, { ("<" | "<=" | ">" | ">="), additive } ;
 additive        = multiplicative, { ("+" | "-"), multiplicative } ;
 multiplicative  = unary, { ("*" | "/"), unary } ;
-unary           = [ "-" ], postfix | "await", postfix ;
-postfix         = primary, { field_access | member_call } ;
+unary           = [ "-" ], postfix | "await", await_postfix ;
+postfix         = primary, { field_access | member_call | "?" } ;
+await_postfix   = await_operand, { field_access | member_call | "?" } ;
+await_operand   = primary, { field_access | member_call } ;
 field_access    = ".", member_identifier ;
 member_call     = ".", member_identifier, "(", [ arguments ], ")" ;
 primary         = numeric_literal | boolean | text | bare_identifier | qualified_ref | call | qualified_type_member_call | struct_construction
@@ -139,6 +141,10 @@ lexical_identifier = letter | "_", { letter | digit | "_" } ;
 member_identifier = lexical_identifier ;
 bare_identifier = lexical_identifier except "true", "false", "null", "match", "if", "await", "lambda" ;
 ```
+
+`?` is a postfix operator on a `Result<T, E>` value inside an ordinary function that returns `Result<U, E>` with the same checked error type. It yields the `Ok` payload or returns the unchanged `Err` from the current function. It cannot propagate `Option<T>`, convert error types, or appear in lambda or module-level test bodies. The operator binds after a complete primary/member/call chain: `value.field?` propagates the field result, while `value?.field` parses as `(value?).field`.
+
+For async calls, `await operation()?` is equivalent to `(await operation())?`: the awaited operation must finish before its `Result` is propagated. Parenthesized operand expressions keep their own postfix operators, so `await (operation()?)` keeps `?` inside the await target and does not gain the outer-result interpretation.
 
 Within a route body, `path` and `query` are contextual item keywords; binding names use lexical identifiers. The binding-type productions above are the checked supported types: path values are `Text` or `i32`, and query values may additionally be `Option<Text>` or `Option<i32>`. A POST body type is a fully qualified, non-generic declared struct. Generic structs remain supported in ordinary library and application code, while generic route codecs are rejected. Body, binding, and handler items precede response mappings; GET has no body and POST has exactly one.
 

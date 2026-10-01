@@ -558,6 +558,11 @@ internal sealed record TypedIntrinsicCallExpr(
     IReadOnlyList<TypedExpr> Arguments,
     Token At) : TypedExpr(Type, At);
 internal sealed record TypedAwaitExpr(LangType Type, TypedExpr Value, Token At) : TypedExpr(Type, At);
+internal sealed record TypedResultPropagateExpr(
+    LangType OkType,
+    LangType ErrorType,
+    TypedExpr Operand,
+    Token At) : TypedExpr(OkType, At);
 
 internal enum CheckedDatabaseOperationKind { QueryOne, Execute, TransactionExecute }
 internal sealed record CheckedDatabaseOperation(
@@ -3873,6 +3878,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             case TypedAwaitExpr awaited:
                 ValidateResourceListExpression(awaited.Value);
                 break;
+            case TypedResultPropagateExpr propagated:
+                ValidateResourceListExpression(propagated.Operand);
+                break;
             case TypedDatabaseCallExpr databaseCall:
                 ValidateResourceListExpression(databaseCall.Receiver);
                 ValidateResourceListExpression(databaseCall.Parameters);
@@ -4098,6 +4106,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             CallExpr call => CheckCall(call, expected, locals, depth + 1, isAwaitOperand),
             MemberCallExpr call => CheckMemberCall(call, expected, locals, depth + 1, isAwaitOperand),
             AwaitExpr awaited => CheckAwait(awaited, locals, depth + 1),
+            ResultPropagateExpr propagated => CheckResultPropagate(propagated, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             UnionConstructExpr union => CheckUnionConstruction(union, locals, depth + 1),
             QualifiedTypeMemberCallExpr member => CheckQualifiedTypeMemberCall(member, expected, locals, depth + 1),
@@ -4262,6 +4271,62 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             Add("E_AWAIT_TARGET", "The 'await' expression requires an async function call or async intrinsic", expression.At);
         }
         return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckResultPropagate(
+        ResultPropagateExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var operand = CheckExpr(expression.Operand, null, locals, depth);
+        if (_currentFunction is null)
+        {
+            Add(
+                "E_RESULT_PROPAGATION_CONTEXT",
+                "The '?' operator is only allowed in an ordinary function body",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (_activeLambdaCaptureLocalIds is not null || _currentFunction.TestName is not null)
+        {
+            Add(
+                "E_RESULT_PROPAGATION_CONTEXT",
+                "The '?' operator is not allowed in lambda or test bodies",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (operand.Type.IsError)
+            return new TypedErrorExpr(expression.At);
+        if (operand.Type.Kind != LangTypeKind.Result)
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                $"The '?' operator requires a Result<T, E> operand, found '{operand.Type.DisplayName}'",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var functionReturnType = _currentFunction.ReturnType;
+        if (functionReturnType.Kind != LangTypeKind.Result)
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                "The '?' operator requires the current function to return Result<T, E>",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var errorType = operand.Type.Arguments[1];
+        var functionErrorType = functionReturnType.Arguments[1];
+        if (errorType != functionErrorType)
+        {
+            AddMismatch(functionErrorType, errorType, expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        return new TypedResultPropagateExpr(operand.Type.Arguments[0], errorType, operand, expression.At);
     }
 
     private TypedExpr CheckListLiteral(
@@ -4912,6 +4977,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TypedCallExpr call => call.Arguments,
             TypedTraitCallExpr call => call.Arguments,
             TypedAwaitExpr awaited => [awaited.Value],
+            TypedResultPropagateExpr propagated => [propagated.Operand],
             TypedDatabaseCallExpr database => [database.Receiver, database.Parameters],
             TypedTextLengthExpr length => [length.Target],
             TypedTextTrimExpr trim => [trim.Target],

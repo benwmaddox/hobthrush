@@ -72,6 +72,7 @@ internal static partial class IntegrationTests
             ("wide integers enforce literal, type, and checked arithmetic boundaries", TestWideIntegers),
             ("f64 literals and IEEE arithmetic preserve nested value semantics in managed and NativeAOT builds", TestF64Acceptance),
             ("Unit is one immutable value across calls and generic storage", TestUnitAcceptance),
+            ("Result postfix propagation evaluates once and preserves error cleanup and effects", TestResultPropagationAcceptance),
             ("static traits bind closed targets, forward ordered witnesses, and detect recursive obligations", TestStaticTraits),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
@@ -172,7 +173,7 @@ internal static partial class IntegrationTests
             ("LANG_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(122, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(123, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set LANG_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("LANG_INTEGRATION_TEST_FILTER");
@@ -11137,7 +11138,7 @@ internal static partial class IntegrationTests
                         _requestSignals.GetOrAdd(request.Target, static _ => NewCompletion<RawHttpRequest>())
                             .TrySetResult(request);
 
-                        if (request.Target == "/hold-cancel")
+                        if (request.Target is "/hold-cancel" or "/hold-cancel-managed" or "/hold-cancel-native")
                         {
                             await ObserveClientDisconnectAsync(request.Target, stream, _stopping.Token);
                             return;
@@ -12292,7 +12293,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(114, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(116, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -12301,7 +12302,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("114 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("116 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -12478,9 +12479,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b114\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b116\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 114 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 116 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

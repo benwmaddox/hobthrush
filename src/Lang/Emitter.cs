@@ -467,6 +467,7 @@ internal static class Emitter
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
+            if (UsesResultPropagation) EmitResultPropagationRuntime();
             if (NeedsBytesType) EmitBytesType();
             if (NeedsBytesErrorType) EmitBytesErrorType();
             if (NeedsConfigSnapshot) EmitConfigSnapshotRuntime();
@@ -531,6 +532,29 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        public sealed record Ok(T Value) : Result<T, E>;");
             _source.AppendLine("        public sealed record Err(E Error) : Result<T, E>;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitResultPropagationRuntime()
+        {
+            _source.AppendLine("    private sealed class ResultPropagationSignal<E> : Exception");
+            _source.AppendLine("    {");
+            _source.AppendLine("        public ResultPropagationSignal(object activation, E error)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            Activation = activation;");
+            _source.AppendLine("            Error = error;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        public object Activation { get; }");
+            _source.AppendLine("        public E Error { get; }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+            _source.AppendLine("    private static TValue PropagateResult<TValue, TError>(Result<TValue, TError> result, object activation)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (result is Result<TValue, TError>.Ok ok) return ok.Value;");
+            _source.AppendLine("        if (result is Result<TValue, TError>.Err error)");
+            _source.AppendLine("            throw new ResultPropagationSignal<TError>(activation, error.Error);");
+            _source.AppendLine("        throw new InvalidOperationException(\"Result value has an unknown variant\");");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1348,6 +1372,9 @@ internal static class Emitter
                 return;
 
             _emittingFunction = function;
+            var propagatesResult = FunctionUsesResultPropagation(function);
+            if (propagatesResult && function.ReturnType.Kind != LangTypeKind.Result)
+                throw new InvalidOperationException("A checked propagation function must return Result<T, E>");
             _source.Append("    ").Append(function.Public ? "public" : "private").Append(" static ")
                 .Append(function.IsAsync ? "async Task<" + EmitType(function.ReturnType) + ">" : EmitType(function.ReturnType))
                 .Append(" Function_").Append(function.Id);
@@ -1382,9 +1409,28 @@ internal static class Emitter
                         .Append('<').Append(TypeParameterName(parameter)).AppendLine(">");
                 }
             _source.AppendLine("    {");
-            if (function.IsAsync)
-                _source.AppendLine("        await Task.CompletedTask;");
-            EmitStatements(function.Body, 2);
+            if (propagatesResult)
+            {
+                _source.AppendLine("        var resultPropagationActivation = new object();");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                if (function.IsAsync)
+                    _source.AppendLine("            await Task.CompletedTask;");
+                EmitStatements(function.Body, 3);
+                _source.AppendLine("        }");
+                _source.Append("        catch (ResultPropagationSignal<")
+                    .Append(EmitType(function.ReturnType.Arguments[1]))
+                    .AppendLine("> signal) when (global::System.Object.ReferenceEquals(signal.Activation, resultPropagationActivation))");
+                _source.AppendLine("        {");
+                _source.Append("            return new ").Append(EmitType(function.ReturnType)).AppendLine(".Err(signal.Error);");
+                _source.AppendLine("        }");
+            }
+            else
+            {
+                if (function.IsAsync)
+                    _source.AppendLine("        await Task.CompletedTask;");
+                EmitStatements(function.Body, 2);
+            }
             _source.AppendLine("    }");
             _source.AppendLine();
             _emittingFunction = null;
@@ -1494,6 +1540,7 @@ internal static class Emitter
                 BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
             TypedAwaitExpr awaited => EmitAwait(awaited),
+            TypedResultPropagateExpr propagated => EmitResultPropagate(propagated),
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
             TypedStructConstructExpr structure => EmitStructConstruct(structure),
@@ -1657,6 +1704,14 @@ internal static class Emitter
                 "await " + EmitIntrinsicCall(intrinsic),
             _ => throw new InvalidOperationException("Await expression has no checked async target")
         };
+
+        private string EmitResultPropagate(TypedResultPropagateExpr expression)
+        {
+            if (_emittingFunction is null)
+                throw new InvalidOperationException("Result propagation must be emitted inside a source function");
+            return "PropagateResult<" + EmitType(expression.OkType) + ", " + EmitType(expression.ErrorType) + ">(" +
+                EmitExpr(expression.Operand) + ", resultPropagationActivation)";
+        }
 
         private string EmitIntrinsicCall(TypedIntrinsicCallExpr expression) => expression.Intrinsic switch
         {
@@ -4424,6 +4479,14 @@ internal static class Emitter
 
         private bool UsesAsyncFunctions => EmittedFunctions.Any(function => function.IsAsync);
 
+        private bool UsesResultPropagation => EmittedFunctions.Any(FunctionUsesResultPropagation);
+
+        private bool FunctionUsesResultPropagation(CheckedFunction function) =>
+            EnumerateStatements(function.Body)
+                .SelectMany(StatementExpressions)
+                .SelectMany(EnumerateExpressions)
+                .Any(expression => expression is TypedResultPropagateExpr);
+
         private bool UsesFsReadText => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))
             .SelectMany(StatementExpressions)
@@ -4659,6 +4722,9 @@ internal static class Emitter
                     break;
                 case TypedAwaitExpr awaited:
                     foreach (var nested in EnumerateExpressions(awaited.Value)) yield return nested;
+                    break;
+                case TypedResultPropagateExpr propagated:
+                    foreach (var nested in EnumerateExpressions(propagated.Operand)) yield return nested;
                     break;
                 case TypedDatabaseCallExpr databaseCall:
                     foreach (var nested in EnumerateExpressions(databaseCall.Receiver)) yield return nested;

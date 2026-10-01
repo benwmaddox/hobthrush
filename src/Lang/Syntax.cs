@@ -187,6 +187,7 @@ internal sealed record QualifiedTypeMemberCallExpr(
 internal sealed record FieldAccessExpr(Token At, Expr Target, string Field) : Expr(At);
 internal sealed record MatchExpr(Token At, Expr Value, IReadOnlyList<MatchArm> Arms) : Expr(At);
 internal sealed record AwaitExpr(Token At, Expr Value) : Expr(At);
+internal sealed record ResultPropagateExpr(Token At, Expr Operand) : Expr(At);
 internal sealed record MatchArm(Pattern Pattern, Expr Body, Token At);
 
 internal abstract record Pattern(Token At);

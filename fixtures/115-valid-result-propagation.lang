@@ -1,0 +1,38 @@
+module fixture::valid_result_propagation;
+
+pub struct ReadFailure { capability: FsRead }
+
+fn forward<T, E>(value: Result<T, E>) -> Result<T, E> effects {} {
+    let item: T = value?;
+    return Ok(item);
+}
+
+fn keep_read_error(value: Result<i32, FsRead>) -> Result<i32, FsRead> effects {} {
+    let item: i32 = value?;
+    return Ok(item);
+}
+
+fn keep_nominal_read_error(value: Result<i32, self::fixture::valid_result_propagation::ReadFailure>)
+    -> Result<i32, self::fixture::valid_result_propagation::ReadFailure> effects {} {
+    let item: i32 = value?;
+    return Ok(item);
+}
+
+fn keep_resource_ok(value: Result<FsRead, Text>) -> Result<FsRead, Text> effects {} {
+    let capability: FsRead = value?;
+    return Ok(capability);
+}
+
+pub fn forward_read_error(value: Result<i32, FsRead>) -> Result<i32, FsRead> effects {} {
+    return self::fixture::valid_result_propagation::forward(value);
+}
+
+pub fn forward_nominal_read_error(
+    value: Result<i32, self::fixture::valid_result_propagation::ReadFailure>)
+    -> Result<i32, self::fixture::valid_result_propagation::ReadFailure> effects {} {
+    return self::fixture::valid_result_propagation::forward(value);
+}
+
+pub fn forward_resource_ok(value: Result<FsRead, Text>) -> Result<FsRead, Text> effects {} {
+    return self::fixture::valid_result_propagation::forward(value);
+}
