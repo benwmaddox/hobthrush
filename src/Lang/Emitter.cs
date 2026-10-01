@@ -1461,6 +1461,7 @@ internal static class Emitter
         private string EmitExpr(TypedExpr expression) => expression switch
         {
             TypedNumberExpr number => EmitNumericLiteral(number),
+            TypedUnitExpr => "default(global::System.ValueTuple)",
             TypedBoolExpr boolean => boolean.Value ? "true" : "false",
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
             TypedListExpr list => EmitList(list),
@@ -1825,6 +1826,8 @@ internal static class Emitter
 
         private void EmitStructuralEqualityHelpers()
         {
+            _source.AppendLine("    private static bool UnitEquals(global::System.ValueTuple left, global::System.ValueTuple right) => true;");
+            _source.AppendLine();
             _source.AppendLine("    private static bool SequenceStructuralEquals<T>(global::System.Collections.Immutable.ImmutableArray<T> left, global::System.Collections.Immutable.ImmutableArray<T> right, global::System.Func<T, T, bool> equals)");
             _source.AppendLine("    {");
             _source.AppendLine("        if (left.Length != right.Length) return false;");
@@ -1982,6 +1985,8 @@ internal static class Emitter
                 case LangTypeKind.F64:
                 case LangTypeKind.Bool:
                     return "(" + left + " == " + right + ")";
+                case LangTypeKind.Unit:
+                    return "UnitEquals(" + left + ", " + right + ")";
                 case LangTypeKind.Text:
                     return "global::System.String.Equals(" + left + ", " + right + ", global::System.StringComparison.Ordinal)";
                 case LangTypeKind.Bytes:
@@ -2107,6 +2112,7 @@ internal static class Emitter
                     case LangTypeKind.U32:
                     case LangTypeKind.U64:
                     case LangTypeKind.F64:
+                    case LangTypeKind.Unit:
                     case LangTypeKind.Bool:
                     case LangTypeKind.Text:
                     case LangTypeKind.Bytes:
@@ -4227,6 +4233,7 @@ internal static class Emitter
             LangTypeKind.U32 => "uint",
             LangTypeKind.U64 => "ulong",
             LangTypeKind.F64 => "double",
+            LangTypeKind.Unit => "global::System.ValueTuple",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.Bytes => "Bytes",
@@ -4714,6 +4721,8 @@ internal static class Emitter
                     foreach (var nested in EnumerateExpressions(match.Value)) yield return nested;
                     foreach (var arm in match.Arms)
                     foreach (var nested in EnumerateExpressions(arm.Body)) yield return nested;
+                    break;
+                case TypedUnitExpr:
                     break;
             }
         }

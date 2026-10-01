@@ -8,6 +8,7 @@ internal enum LangTypeKind
     U32,
     U64,
     F64,
+    Unit,
     Bool,
     Text,
     Bytes,
@@ -86,6 +87,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsU32 => Kind == LangTypeKind.U32;
     public bool IsU64 => Kind == LangTypeKind.U64;
     public bool IsF64 => Kind == LangTypeKind.F64;
+    public bool IsUnit => Kind == LangTypeKind.Unit;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
     public bool IsBytes => Kind == LangTypeKind.Bytes;
@@ -124,6 +126,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType U32 { get; } = new(LangTypeKind.U32, "u32");
     internal static LangType U64 { get; } = new(LangTypeKind.U64, "u64");
     internal static LangType F64 { get; } = new(LangTypeKind.F64, "f64");
+    internal static LangType Unit { get; } = new(LangTypeKind.Unit, "Unit");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
     internal static LangType Bytes { get; } = new(LangTypeKind.Bytes, "Bytes");
@@ -475,6 +478,7 @@ internal sealed class CheckedRoute
 
 internal abstract record TypedExpr(LangType Type, Token At);
 internal sealed record TypedNumberExpr(LangType Type, Token At, string Value) : TypedExpr(Type, At);
+internal sealed record TypedUnitExpr(Token At) : TypedExpr(LangType.Unit, At);
 internal sealed record TypedBoolExpr(Token At, bool Value) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextExpr(Token At, string Value) : TypedExpr(LangType.Text, At);
 internal sealed record TypedListExpr(LangType Type, IReadOnlyList<TypedExpr> Items, Token At) : TypedExpr(Type, At);
@@ -3150,7 +3154,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
     private static bool IsReservedTypeParameterName(string name) =>
-        IsReservedTypeName(name) || name is "Bytes" or "BytesError";
+        IsReservedTypeName(name) || name is "Bytes" or "BytesError" or "Unit";
 
     private void ValidatePublicSignatures()
     {
@@ -3891,6 +3895,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 ValidateResourceListExpression(append.Value);
                 break;
             case TypedBytesEmptyExpr:
+            case TypedUnitExpr:
                 break;
             case TypedBytesLengthExpr length:
                 ValidateResourceListExpression(length.Target);
@@ -4080,6 +4085,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         TypedExpr result = expression switch
         {
             NumberExpr number => CheckNumber(number),
+            UnitExpr unit => new TypedUnitExpr(unit.At),
             UnaryExpr unary => CheckUnary(unary, locals, depth + 1),
             BoolExpr boolean => new TypedBoolExpr(boolean.At, boolean.Value),
             TextExpr text => new TypedTextExpr(text.At, text.Value),
@@ -4913,6 +4919,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TypedListGetExpr get => [get.Target, get.Index],
             TypedListAppendExpr append => [append.Target, append.Value],
             TypedBytesEmptyExpr => [],
+            TypedUnitExpr => [],
             TypedBytesLengthExpr length => [length.Target],
             TypedBytesGetExpr get => [get.Target, get.Index],
             TypedBytesAppendExpr append => [append.Target, append.Octet],
@@ -5271,6 +5278,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 case LangTypeKind.U32:
                 case LangTypeKind.U64:
                 case LangTypeKind.F64:
+                case LangTypeKind.Unit:
                 case LangTypeKind.Bool:
                 case LangTypeKind.Text:
                 case LangTypeKind.Bytes:
@@ -7141,7 +7149,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         var reference = syntax.Reference;
         var name = reference.Declaration;
-        if (!reference.IsQualified && typeParameters is not null && typeParameters.TryGetValue(name, out var typeParameter))
+        if (!reference.IsQualified && name != "Unit" && typeParameters is not null &&
+            typeParameters.TryGetValue(name, out var typeParameter))
             return NoTypeArguments(syntax, typeParameter);
 
         if (!reference.IsQualified && _resolvingNewtypeRepresentation)
@@ -7199,6 +7208,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.U64);
             case "f64":
                 return NoTypeArguments(syntax, LangType.F64);
+            case "Unit":
+                return NoTypeArguments(syntax, LangType.Unit);
             case "bool":
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":

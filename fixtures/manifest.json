@@ -637,5 +637,20 @@
       "E_UNSUPPORTED",
       "E_UNSUPPORTED"
     ]
+  },
+  {
+    "file": "113-valid-unit-values.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "114-invalid-unit-boundaries.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_NAME_DUPLICATE",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_NAME_UNRESOLVED"
+    ]
   }
 ]
