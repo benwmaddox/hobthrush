@@ -1460,7 +1460,7 @@ internal static class Emitter
 
         private string EmitExpr(TypedExpr expression) => expression switch
         {
-            TypedNumberExpr number => EmitIntegerLiteral(number),
+            TypedNumberExpr number => EmitNumericLiteral(number),
             TypedBoolExpr boolean => boolean.Value ? "true" : "false",
             TypedTextExpr text => JsonSerializer.Serialize(text.Value),
             TypedListExpr list => EmitList(list),
@@ -1472,6 +1472,7 @@ internal static class Emitter
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedLambdaInvokeExpr lambda => EmitLambdaInvoke(lambda),
             TypedBinaryExpr binary => EmitBinary(binary),
+            TypedUnaryExpr unary => EmitUnary(unary),
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr { IsAsync: true } => throw new InvalidOperationException("Async calls must be emitted beneath a checked await expression"),
             TypedCallExpr call => EmitCall(call),
@@ -1504,8 +1505,10 @@ internal static class Emitter
             _ => throw new InvalidOperationException("Unchecked expression reached emitter")
         };
 
-        private static string EmitIntegerLiteral(TypedNumberExpr number)
+        private static string EmitNumericLiteral(TypedNumberExpr number)
         {
+            if (number.Type.IsF64)
+                return "global::System.BitConverter.Int64BitsToDouble(unchecked((long)0x" + number.Value + "UL))";
             if (number.Type.IsI32)
                 return number.Value == int.MinValue.ToString(CultureInfo.InvariantCulture)
                     ? "int.MinValue"
@@ -1518,8 +1521,14 @@ internal static class Emitter
                 return number.Value + "U";
             if (number.Type.IsU64)
                 return number.Value + "UL";
-            throw new InvalidOperationException("Unknown checked integer literal type");
+            throw new InvalidOperationException("Unknown checked numeric literal type");
         }
+
+        private string EmitUnary(TypedUnaryExpr expression) => expression.Op switch
+        {
+            "-" when expression.Type.IsF64 => "(-" + EmitExpr(expression.Operand) + ")",
+            _ => throw new InvalidOperationException("Unknown checked unary operator")
+        };
 
         private string EmitLambdaInvoke(TypedLambdaInvokeExpr expression)
         {
@@ -1778,6 +1787,9 @@ internal static class Emitter
 
         private string EmitBinary(TypedBinaryExpr expression)
         {
+            if (expression.Type.IsF64)
+                return "(" + EmitExpr(expression.Left) + " " + expression.Op + " " + EmitExpr(expression.Right) + ")";
+
             var helper = expression.Op switch
             {
                 "+" => "CheckedAdd",
@@ -1967,6 +1979,7 @@ internal static class Emitter
                 case LangTypeKind.I64:
                 case LangTypeKind.U32:
                 case LangTypeKind.U64:
+                case LangTypeKind.F64:
                 case LangTypeKind.Bool:
                     return "(" + left + " == " + right + ")";
                 case LangTypeKind.Text:
@@ -2093,6 +2106,7 @@ internal static class Emitter
                     case LangTypeKind.I64:
                     case LangTypeKind.U32:
                     case LangTypeKind.U64:
+                    case LangTypeKind.F64:
                     case LangTypeKind.Bool:
                     case LangTypeKind.Text:
                     case LangTypeKind.Bytes:
@@ -4212,6 +4226,7 @@ internal static class Emitter
             LangTypeKind.I64 => "long",
             LangTypeKind.U32 => "uint",
             LangTypeKind.U64 => "ulong",
+            LangTypeKind.F64 => "double",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
             LangTypeKind.Bytes => "Bytes",
@@ -4619,6 +4634,9 @@ internal static class Emitter
                 case TypedBinaryExpr binary:
                     foreach (var nested in EnumerateExpressions(binary.Left)) yield return nested;
                     foreach (var nested in EnumerateExpressions(binary.Right)) yield return nested;
+                    break;
+                case TypedUnaryExpr unary:
+                    foreach (var nested in EnumerateExpressions(unary.Operand)) yield return nested;
                     break;
                 case TypedCompareExpr comparison:
                     foreach (var nested in EnumerateExpressions(comparison.Left)) yield return nested;

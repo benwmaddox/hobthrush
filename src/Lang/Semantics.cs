@@ -7,6 +7,7 @@ internal enum LangTypeKind
     I64,
     U32,
     U64,
+    F64,
     Bool,
     Text,
     Bytes,
@@ -84,6 +85,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsI64 => Kind == LangTypeKind.I64;
     public bool IsU32 => Kind == LangTypeKind.U32;
     public bool IsU64 => Kind == LangTypeKind.U64;
+    public bool IsF64 => Kind == LangTypeKind.F64;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
     public bool IsBytes => Kind == LangTypeKind.Bytes;
@@ -121,6 +123,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType I64 { get; } = new(LangTypeKind.I64, "i64");
     internal static LangType U32 { get; } = new(LangTypeKind.U32, "u32");
     internal static LangType U64 { get; } = new(LangTypeKind.U64, "u64");
+    internal static LangType F64 { get; } = new(LangTypeKind.F64, "f64");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
     internal static LangType Bytes { get; } = new(LangTypeKind.Bytes, "Bytes");
@@ -484,6 +487,7 @@ internal sealed record TypedLambdaInvokeExpr(
     TypedExpr Body,
     Token At) : TypedExpr(Type, At);
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
+internal sealed record TypedUnaryExpr(LangType Type, string Op, TypedExpr Operand, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr(LangType.Text, At);
@@ -3141,7 +3145,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private static bool IsReservedTypeName(string name) =>
-        name is "i32" or "i64" or "u32" or "u64" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
+        name is "i32" or "i64" or "u32" or "u64" or "f64" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
             "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "ProcessRunner" or "Secret" or
             "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
 
@@ -3845,6 +3849,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 ValidateResourceListExpression(binary.Left);
                 ValidateResourceListExpression(binary.Right);
                 break;
+            case TypedUnaryExpr unary:
+                ValidateResourceListExpression(unary.Operand);
+                break;
             case TypedCompareExpr comparison:
                 ValidateResourceListExpression(comparison.Left);
                 ValidateResourceListExpression(comparison.Right);
@@ -4102,11 +4109,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         var type = expression.LiteralKind switch
         {
-            IntegerLiteralKind.I32 => LangType.I32,
-            IntegerLiteralKind.I64 => LangType.I64,
-            IntegerLiteralKind.U32 => LangType.U32,
-            IntegerLiteralKind.U64 => LangType.U64,
-            _ => throw new InvalidOperationException("Unknown integer literal kind")
+            NumericLiteralKind.I32 => LangType.I32,
+            NumericLiteralKind.I64 => LangType.I64,
+            NumericLiteralKind.U32 => LangType.U32,
+            NumericLiteralKind.U64 => LangType.U64,
+            NumericLiteralKind.F64 => LangType.F64,
+            _ => throw new InvalidOperationException("Unknown numeric literal kind")
         };
         return new TypedNumberExpr(type, expression.At, expression.Value);
     }
@@ -4128,6 +4136,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             Add("E_TYPE_MISMATCH", $"Unary '-' is not supported for '{operand.Type.DisplayName}'", expression.At);
             return new TypedErrorExpr(expression.At);
         }
+
+        if (operand.Type.IsF64)
+            return new TypedUnaryExpr(operand.Type, "-", operand, expression.At);
 
         if (!operand.Type.IsI32 && !operand.Type.IsI64)
         {
@@ -4890,6 +4901,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TypedMapKeysExpr map => [map.Target],
             TypedMapLengthExpr map => [map.Target],
             TypedBinaryExpr binary => [binary.Left, binary.Right],
+            TypedUnaryExpr unary => [unary.Operand],
             TypedCompareExpr comparison => [comparison.Left, comparison.Right],
             TypedCallExpr call => call.Arguments,
             TypedTraitCallExpr call => call.Arguments,
@@ -5159,8 +5171,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var comparedRight = CheckExpr(expression.Right, null, locals, depth);
             if (comparedLeft.Type.IsError || comparedRight.Type.IsError) return new TypedErrorExpr(expression.At);
 
-            if (IsIntegerType(comparedLeft.Type) && comparedLeft.Type == comparedRight.Type)
+            if ((IsIntegerType(comparedLeft.Type) && comparedLeft.Type == comparedRight.Type) ||
+                (comparedLeft.Type.IsF64 && comparedRight.Type.IsF64))
                 return new TypedCompareExpr(expression.Op, comparedLeft, comparedRight, expression.At);
+
+            if ((comparedLeft.Type.IsF64 || comparedRight.Type.IsF64) &&
+                IsNumericType(comparedLeft.Type) && IsNumericType(comparedRight.Type))
+            {
+                Add(
+                    "E_TYPE_MISMATCH",
+                    $"Comparison '{expression.Op}' requires operands with the same numeric type; found '{comparedLeft.Type.DisplayName}' and '{comparedRight.Type.DisplayName}'",
+                    expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
 
             if (IsIntegerType(comparedLeft.Type) && IsIntegerType(comparedRight.Type))
             {
@@ -5176,7 +5199,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
-        if (expression.Op is not ("+" or "-" or "*"))
+        if (expression.Op is not ("+" or "-" or "*" or "/"))
         {
             Add("E_UNSUPPORTED", $"Arithmetic operator '{expression.Op}' is not implemented", expression.At);
             return new TypedErrorExpr(expression.At);
@@ -5186,6 +5209,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var right = CheckExpr(expression.Right, null, locals, depth);
         if (left.Type.IsError || right.Type.IsError)
             return new TypedErrorExpr(expression.At);
+
+        if (expression.Op == "/")
+        {
+            if (left.Type.IsF64 && right.Type.IsF64)
+                return new TypedBinaryExpr(LangType.F64, expression.Op, left, right, expression.At);
+
+            Add("E_UNSUPPORTED", "Division is only supported for f64 operands", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (left.Type.IsF64 && right.Type.IsF64)
+            return new TypedBinaryExpr(LangType.F64, expression.Op, left, right, expression.At);
+
         if (IsIntegerType(left.Type) && left.Type == right.Type)
             return new TypedBinaryExpr(left.Type, expression.Op, left, right, expression.At);
 
@@ -5198,12 +5234,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if ((left.Type.IsF64 || right.Type.IsF64) && IsNumericType(left.Type) && IsNumericType(right.Type))
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Arithmetic '{expression.Op}' requires operands with the same numeric type; found '{left.Type.DisplayName}' and '{right.Type.DisplayName}'",
+                expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         Add("E_TYPE_MISMATCH", $"Arithmetic '{expression.Op}' requires i32 operands", expression.At);
         return new TypedErrorExpr(expression.At);
     }
 
     private static bool IsIntegerType(LangType type) =>
         type.Kind is LangTypeKind.I32 or LangTypeKind.I64 or LangTypeKind.U32 or LangTypeKind.U64;
+
+    private static bool IsNumericType(LangType type) => IsIntegerType(type) || type.IsF64;
 
     private bool SupportsStructuralEquality(LangType type)
     {
@@ -5223,6 +5270,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 case LangTypeKind.I64:
                 case LangTypeKind.U32:
                 case LangTypeKind.U64:
+                case LangTypeKind.F64:
                 case LangTypeKind.Bool:
                 case LangTypeKind.Text:
                 case LangTypeKind.Bytes:
@@ -7149,6 +7197,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.U32);
             case "u64":
                 return NoTypeArguments(syntax, LangType.U64);
+            case "f64":
+                return NoTypeArguments(syntax, LangType.F64);
             case "bool":
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":

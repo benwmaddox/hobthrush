@@ -1,0 +1,42 @@
+module fixture::f64_values;
+
+pub struct Holder { value: f64 }
+pub newtype Reading = f64;
+pub union Value { Number(f64), Empty }
+
+fn identity<T>(value: T) -> T effects {} { return value; }
+
+pub fn divide(left: f64, right: f64) -> f64 effects {} {
+    return left / right;
+}
+
+pub fn main() -> i32 effects {} {
+    let finite: f64 = 1.25f64;
+    let sum: f64 = finite + 2f64;
+    let positive_zero: f64 = 0f64;
+    let negative_zero: f64 = -0f64;
+    let nan: f64 = self::fixture::f64_values::divide(positive_zero, positive_zero);
+    let holder: self::fixture::f64_values::Holder =
+        self::fixture::f64_values::Holder { value: sum };
+    let reading: self::fixture::f64_values::Reading =
+        self::fixture::f64_values::Reading.wrap(sum);
+    let number: self::fixture::f64_values::Value =
+        self::fixture::f64_values::Value.Number(sum);
+    let list: List<f64> = [finite, sum, nan];
+    let list_copy: List<f64> = list;
+    let empty: Map<Text, f64> = Map.empty();
+    let map: Map<Text, f64> = empty.set("value", sum);
+    let map_copy: Map<Text, f64> = map;
+    let copied: f64 = self::fixture::f64_values::identity(sum);
+
+    if positive_zero != negative_zero { return 1; }
+    if nan == nan { return 1; }
+    if holder.value != sum { return 1; }
+    if reading.value != sum { return 1; }
+    if number != self::fixture::f64_values::Value.Number(sum) { return 1; }
+    if list == list_copy { return 1; }
+    if map != map_copy { return 1; }
+    if copied != sum { return 1; }
+    if (sum / 0f64) <= sum { return 1; }
+    return 0;
+}

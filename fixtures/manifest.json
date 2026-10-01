@@ -618,5 +618,24 @@
       "E_DB_CODEC_UNSUPPORTED",
       "E_DB_CODEC_UNSUPPORTED"
     ]
+  },
+  {
+    "file": "111-valid-f64-values.lang",
+    "status": "active",
+    "expectedCode": null
+  },
+  {
+    "file": "112-invalid-f64-types.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_UNSUPPORTED",
+      "E_UNSUPPORTED",
+      "E_UNSUPPORTED",
+      "E_UNSUPPORTED"
+    ]
   }
 ]

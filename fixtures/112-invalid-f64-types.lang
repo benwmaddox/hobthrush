@@ -1,0 +1,34 @@
+module fixture::invalid_f64_types;
+
+fn mixed_arithmetic(left: f64, right: i64) -> f64 effects {} {
+    return left + right;
+}
+
+fn mixed_order(left: f64, right: u64) -> bool effects {} {
+    return left < right;
+}
+
+fn wrong_initialization() -> f64 effects {} {
+    let value: f64 = 1i64;
+    return value;
+}
+
+fn wrong_return() -> f64 effects {} {
+    return 1u64;
+}
+
+fn divide_i32(left: i32, right: i32) -> i32 effects {} {
+    return left / right;
+}
+
+fn divide_i64(left: i64, right: i64) -> i64 effects {} {
+    return left / right;
+}
+
+fn divide_u32(left: u32, right: u32) -> u32 effects {} {
+    return left / right;
+}
+
+fn divide_u64(left: u64, right: u64) -> u64 effects {} {
+    return left / right;
+}

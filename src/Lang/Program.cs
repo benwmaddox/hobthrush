@@ -984,6 +984,7 @@ internal static class Driver
             LangTypeKind.I64 => new { kind = "primitive", name = "i64" },
             LangTypeKind.U32 => new { kind = "primitive", name = "u32" },
             LangTypeKind.U64 => new { kind = "primitive", name = "u64" },
+            LangTypeKind.F64 => new { kind = "primitive", name = "f64" },
             LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
             LangTypeKind.Text => new { kind = "primitive", name = "Text" },
             LangTypeKind.Bytes => new { kind = "primitive", name = "Bytes" },

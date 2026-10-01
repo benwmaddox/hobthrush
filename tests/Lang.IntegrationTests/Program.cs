@@ -70,6 +70,7 @@ internal static partial class IntegrationTests
             ("nominal newtypes preserve boundaries, traits, resources, and current metadata", TestNominalNewtypes),
             ("immutable Bytes preserve octets, snapshots, equality, and bounds", TestImmutableBytes),
             ("wide integers enforce literal, type, and checked arithmetic boundaries", TestWideIntegers),
+            ("f64 literals and IEEE arithmetic preserve nested value semantics in managed and NativeAOT builds", TestF64Acceptance),
             ("static traits bind closed targets, forward ordered witnesses, and detect recursive obligations", TestStaticTraits),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
@@ -12289,7 +12290,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(110, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(112, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -12298,7 +12299,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("110 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("112 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -12475,9 +12476,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b110\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b112\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 110 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 112 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

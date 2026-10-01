@@ -51,7 +51,7 @@ parameter       = bare_identifier, ":", type ;
 
 type            = type_name, [ "<", type, { ",", type }, ">" ] ;
 type_name       = builtin_type | "Self" | type_parameter | qualified_ref ;
-builtin_type    = "i32" | "i64" | "u32" | "u64" | "bool" | "Text" | "Html" | "Option" | "Result"
+builtin_type    = "i32" | "i64" | "u32" | "u64" | "f64" | "bool" | "Text" | "Html" | "Option" | "Result"
                 | "List" | "FsError" | "FsRead" | "FsWrite" | "FilePath" | "DbError" | "DbRead" | "DbWrite"
                 | "HttpClient" | "HttpResponse" | "HttpError" | "Config" | "Secrets" | "Logger" | "Secret"
                 | "ProcessRunner" | "ProcessOutput" | "ProcessError" ;
@@ -91,12 +91,12 @@ expression      = match_expression | equality ;
 equality        = comparison, { ("==" | "!="), comparison } ;
 comparison      = additive, { ("<" | "<=" | ">" | ">="), additive } ;
 additive        = multiplicative, { ("+" | "-"), multiplicative } ;
-multiplicative  = unary, { "*", unary } ;
+multiplicative  = unary, { ("*" | "/"), unary } ;
 unary           = [ "-" ], postfix | "await", postfix ;
 postfix         = primary, { field_access | member_call } ;
 field_access    = ".", member_identifier ;
 member_call     = ".", member_identifier, "(", [ arguments ], ")" ;
-primary         = integer | boolean | text | bare_identifier | qualified_ref | call | qualified_type_member_call | struct_construction
+primary         = numeric_literal | boolean | text | bare_identifier | qualified_ref | call | qualified_type_member_call | struct_construction
                 | union_construction | list_literal | lambda_invocation | "(", expression, ")" ;
 lambda_invocation = "(", "lambda", "(", bare_identifier, ":", type, ")", "=>", expression, ")",
                     "(", expression, ")" ;
@@ -122,8 +122,14 @@ pattern         = "_"
                 | bare_identifier, ".", member_identifier, [ "(", [ bindings ], ")" ] ;
 bindings        = bare_identifier, { ",", bare_identifier }, [ "," ] ;
 
+numeric_literal = integer | f64_literal ;
 integer         = digit, { digit }, [ integer_suffix ] ;
 integer_suffix  = "i64" | "u32" | "u64" ;
+f64_literal     = f64_decimal, "f64" ;
+f64_decimal     = digit, { digit }
+                | digit, { digit }, ".", digit, { digit }, [ exponent ]
+                | digit, { digit }, exponent ;
+exponent        = ("e" | "E"), [ "+" | "-" ], digit, { digit } ;
 digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 boolean         = "true" | "false" ;
 text            = '"', { character | escape }, '"' ;
@@ -137,7 +143,7 @@ Within a route body, `path` and `query` are contextual item keywords; binding na
 
 The `qualified_ref` primary is a syntactic declaration-reference form, including the base of a zero-payload union variant such as `self::app::main::Choice.Empty`. Semantic checking accepts it as a value only when it resolves to a supported value-producing case; arbitrary function or type declarations are not first-class values. Calls and struct constructions use their separate productions.
 
-Integer expression literals are eager: unsuffixed decimal literals have type `i32`, while adjacent `i64`, `u32`, or `u64` suffixes select that exact type. There are no contextual literal conversions or mixed-width promotions, and every spelling is range-checked. The direct spelling `-9223372036854775808i64` is accepted for the signed minimum; its positive magnitude is out of range. Unary `-` is supported for `i32` and `i64`, including checked runtime negation, and rejected for unsigned values. Same-width integers support equality, ordering, and checked `+`, `-`, and `*`; overflow and underflow use the generic runtime-fault boundary (exit 70). The new `i64`, `u32`, and `u64` widths are unavailable in route, SQLite, and typed-command codec positions, which fail during checking.
+Numeric literals are eager: unsuffixed decimal integer literals have type `i32`, while adjacent `i64`, `u32`, or `u64` suffixes select that exact integer type. Floating-point literals require an explicit lowercase `f64` suffix and use ASCII decimal notation: `12f64`, `1.25f64`, `1.25E-3f64`, or `1e3f64`. A decimal point requires digits on both sides, and an exponent requires at least one digit after its optional sign. In an `f64` literal, a leading/trailing decimal point, missing or unsupported suffix, malformed exponent, or non-ASCII numeric digit is rejected. NaN and Infinity have no literal spelling. The complete numeric token through `f64` may contain at most 128 ASCII characters; an overlong token reports `E_NUMERIC_LITERAL_TOO_LONG` over the full token before conversion. A finite decimal that overflows binary64 reports `E_NUMERIC_LITERAL_RANGE` over the full token. Subnormal values and underflow to signed zero are accepted. Unsuffixed decimal integers remain `i32`; there are no contextual literal conversions or mixed-width promotions, and every integer spelling is range-checked. The direct spelling `-9223372036854775808i64` is accepted for the signed minimum; its positive magnitude is out of range. Unary `-` is supported for `i32`, `i64`, and `f64`, including checked integer negation and IEEE signed-zero negation, and rejected for unsigned values. Same-width integers support equality, ordering, and checked `+`, `-`, and `*`; overflow and underflow use the generic runtime-fault boundary (exit 70), and integer `/` is rejected with `E_UNSUPPORTED: Division is only supported for f64 operands` at the slash. Same-type `f64` values support `+`, `-`, `*`, `/`, all ordered comparisons, and IEEE equality; division by zero can produce infinities or NaN. NaN compares unequal to every value, including itself, while positive and negative zero compare equal. These scalar rules also govern structural equality in lists, maps, structs, unions, newtypes, and generic values. No cross-platform bitwise arithmetic guarantee is made. `f64` is ordinary storable data but is unavailable in typed-command, route, JSON, and SQLite codec positions, which fail during checking.
 
 ## Nominal newtypes
 
