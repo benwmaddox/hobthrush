@@ -6,6 +6,8 @@ internal enum LangTypeKind
     I32,
     Bool,
     Text,
+    Bytes,
+    BytesError,
     Html,
     FilePath,
     TypeParameter,
@@ -78,6 +80,8 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsI32 => Kind == LangTypeKind.I32;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
+    public bool IsBytes => Kind == LangTypeKind.Bytes;
+    public bool IsBytesError => Kind == LangTypeKind.BytesError;
     public bool IsHtml => Kind == LangTypeKind.Html;
     public bool IsFilePath => Kind == LangTypeKind.FilePath;
     public bool IsFsRead => Kind == LangTypeKind.FsRead;
@@ -110,6 +114,8 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType I32 { get; } = new(LangTypeKind.I32, "i32");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
+    internal static LangType Bytes { get; } = new(LangTypeKind.Bytes, "Bytes");
+    internal static LangType BytesError { get; } = new(LangTypeKind.BytesError, "BytesError");
     internal static LangType Html { get; } = new(LangTypeKind.Html, "Html");
     internal static LangType FilePath { get; } = new(LangTypeKind.FilePath, "FilePath");
     internal static LangType FsRead { get; } = new(LangTypeKind.FsRead, "FsRead");
@@ -475,6 +481,11 @@ internal sealed record TypedTextTrimExpr(TypedExpr Target, Token At) : TypedExpr
 internal sealed record TypedListLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
 internal sealed record TypedListGetExpr(LangType Type, TypedExpr Target, TypedExpr Index, Token At) : TypedExpr(Type, At);
 internal sealed record TypedListAppendExpr(LangType Type, TypedExpr Target, TypedExpr Value, Token At) : TypedExpr(Type, At);
+internal sealed record TypedBytesEmptyExpr(Token At) : TypedExpr(LangType.Bytes, At);
+internal sealed record TypedBytesLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
+internal sealed record TypedBytesGetExpr(TypedExpr Target, TypedExpr Index, Token At) : TypedExpr(LangType.Option(LangType.I32), At);
+internal sealed record TypedBytesAppendExpr(TypedExpr Target, TypedExpr Octet, Token At)
+    : TypedExpr(LangType.Result(LangType.Bytes, LangType.BytesError), At);
 internal sealed record TypedMapEmptyExpr(LangType Type, Token At) : TypedExpr(Type, At);
 internal sealed record TypedMapSetExpr(
     LangType Type,
@@ -558,6 +569,7 @@ internal enum BuiltinVariant
     FsErrorInvalidPath,
     FsErrorInvalidText,
     FsErrorIo,
+    BytesInvalidOctet,
     HttpInvalidTarget,
     HttpTransport,
     HttpTimeout,
@@ -1214,7 +1226,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     continue;
                 }
 
-                if (IsReservedTypeName(typeParameter.Name))
+                if (IsReservedTypeParameterName(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
                 else if (module.TypeNames.Contains(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
@@ -1262,7 +1274,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     continue;
                 }
 
-                if (IsReservedTypeName(typeParameter.Name))
+                if (IsReservedTypeParameterName(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
                 else if (module.TypeNames.Contains(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
@@ -2725,7 +2737,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     continue;
                 }
 
-                if (IsReservedTypeName(typeParameter.Name))
+                if (IsReservedTypeParameterName(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' is reserved", typeParameter.At);
                 else if (module.TypeNames.Contains(typeParameter.Name))
                     Add("E_NAME_DUPLICATE", $"Type parameter '{typeParameter.Name}' collides with an existing type name", typeParameter.At);
@@ -3123,6 +3135,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         name is "i32" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
             "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "ProcessRunner" or "Secret" or
             "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
+
+    private static bool IsReservedTypeParameterName(string name) =>
+        IsReservedTypeName(name) || name is "Bytes" or "BytesError";
 
     private void ValidatePublicSignatures()
     {
@@ -3858,6 +3873,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             case TypedListAppendExpr append:
                 ValidateResourceListExpression(append.Target);
                 ValidateResourceListExpression(append.Value);
+                break;
+            case TypedBytesEmptyExpr:
+                break;
+            case TypedBytesLengthExpr length:
+                ValidateResourceListExpression(length.Target);
+                break;
+            case TypedBytesGetExpr get:
+                ValidateResourceListExpression(get.Target);
+                ValidateResourceListExpression(get.Index);
+                break;
+            case TypedBytesAppendExpr append:
+                ValidateResourceListExpression(append.Target);
+                ValidateResourceListExpression(append.Octet);
                 break;
             case TypedMapEmptyExpr:
                 break;
@@ -4821,6 +4849,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TypedListLengthExpr length => [length.Target],
             TypedListGetExpr get => [get.Target, get.Index],
             TypedListAppendExpr append => [append.Target, append.Value],
+            TypedBytesEmptyExpr => [],
+            TypedBytesLengthExpr length => [length.Target],
+            TypedBytesGetExpr get => [get.Target, get.Index],
+            TypedBytesAppendExpr append => [append.Target, append.Octet],
             TypedIntrinsicCallExpr intrinsic => intrinsic.Arguments,
             TypedBuiltinConstructExpr builtin => builtin.Arguments,
             TypedUnionConstructExpr union => union.Arguments,
@@ -4923,6 +4955,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return new TypedErrorExpr(expression.At);
         }
 
+        if (expression.Target is NameExpr bytesErrorName &&
+            !locals.ContainsKey(bytesErrorName.Name) &&
+            !CurrentModule.DeclaredFunctions.ContainsKey(bytesErrorName.Name) &&
+            bytesErrorName.Name == "BytesError")
+        {
+            if (expression.Field == "InvalidOctet")
+                Add("E_TYPE_MISMATCH", "BytesError variants can only be produced by Bytes operations", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on BytesError", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (expression.Target is NameExpr dbErrorName &&
             !locals.ContainsKey(dbErrorName.Name) &&
             dbErrorName.Name == "DbError")
@@ -4971,6 +5015,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (target.Type.IsError) return new TypedErrorExpr(expression.At);
         if (target.Type.IsText && expression.Field == "length")
             return new TypedTextLengthExpr(target, expression.At);
+        if (target.Type.IsBytes && expression.Field == "length")
+            return new TypedBytesLengthExpr(target, expression.At);
+        if (target.Type.IsBytes)
+        {
+            Add("E_FIELD_UNKNOWN", $"Bytes has no field '{expression.Field}'", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
         if (target.Type.IsList && expression.Field == "length")
             return new TypedListLengthExpr(target, expression.At);
         if (target.Type.IsMap && expression.Field == "length")
@@ -5099,6 +5150,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 case LangTypeKind.I32:
                 case LangTypeKind.Bool:
                 case LangTypeKind.Text:
+                case LangTypeKind.Bytes:
+                case LangTypeKind.BytesError:
                 case LangTypeKind.Html:
                 case LangTypeKind.FilePath:
                 case LangTypeKind.HttpResponse:
@@ -5300,6 +5353,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
         {
+            if (targetName.Name == "Bytes" && !CurrentModule.DeclaredFunctions.ContainsKey(targetName.Name))
+                return CheckBytesStaticMemberCall(expression, locals, depth);
+
             if (targetName.Name == "Map" && !CurrentModule.DeclaredFunctions.ContainsKey(targetName.Name))
                 return CheckMapStaticMemberCall(expression, expected, locals, depth);
 
@@ -5314,6 +5370,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     Add("E_TYPE_MISMATCH", "FsError variants can only be produced by filesystem operations", expression.MemberAt);
                 else
                     Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on FsError", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "BytesError" && !CurrentModule.DeclaredFunctions.ContainsKey(targetName.Name))
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                if (expression.Member == "InvalidOctet")
+                    Add("E_TYPE_MISMATCH", "BytesError variants can only be produced by Bytes operations", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on BytesError", expression.MemberAt);
                 return new TypedErrorExpr(expression.At);
             }
 
@@ -5566,6 +5633,30 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (receiver.Type.IsMap)
             return CheckMapMemberCall(expression, receiver, locals, depth);
+
+        if (receiver.Type.IsBytes)
+        {
+            if (expression.Member is not ("append" or "get"))
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                Add("E_FIELD_UNKNOWN", $"Bytes has no member '{expression.Member}'", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (expression.Arguments.Count != 1)
+            {
+                Add("E_TYPE_MISMATCH", $"Bytes.{expression.Member} expects 1 argument, got {expression.Arguments.Count}", expression.MemberAt);
+                for (var index = 0; index < expression.Arguments.Count; index++)
+                    _ = CheckExpr(expression.Arguments[index], LangType.I32, locals, depth);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            var bytesArgument = CheckExpr(expression.Arguments[0], LangType.I32, locals, depth);
+            return expression.Member == "append"
+                ? new TypedBytesAppendExpr(receiver, bytesArgument, expression.At)
+                : new TypedBytesGetExpr(receiver, bytesArgument, expression.At);
+        }
 
         if (receiver.Type.IsList && expression.Member is ("get" or "append"))
         {
@@ -5873,6 +5964,30 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         return new TypedMapEmptyExpr(expected, expression.At);
+    }
+
+    private TypedExpr CheckBytesStaticMemberCall(
+        MemberCallExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        if (expression.Member != "empty")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add("E_FIELD_UNKNOWN", $"Bytes has no member '{expression.Member}'", expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Arguments.Count != 0)
+        {
+            Add("E_TYPE_MISMATCH", $"Bytes.empty expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        return new TypedBytesEmptyExpr(expression.At);
     }
 
     private TypedExpr CheckMapMemberCall(
@@ -6585,6 +6700,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("FsError.Io", "fserror:Io", null, 4, BuiltinVariant.FsErrorIo, [])
             ]);
         }
+        if (type.IsBytesError)
+        {
+            return ReadOnly<VariantShape>([
+                new("BytesError.InvalidOctet", "byteserror:InvalidOctet", null, 0, BuiltinVariant.BytesInvalidOctet, [])
+            ]);
+        }
         if (type.IsDbError)
         {
             return ReadOnly<VariantShape>([
@@ -6639,10 +6760,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
-        else if (scrutineeType.IsFsError || scrutineeType.IsDbError || scrutineeType.IsHttpError || scrutineeType.IsProcessError)
+        else if (scrutineeType.IsFsError || scrutineeType.IsBytesError || scrutineeType.IsDbError || scrutineeType.IsHttpError || scrutineeType.IsProcessError)
         {
             var builtinErrorName = scrutineeType.IsFsError
                 ? "FsError"
+                : scrutineeType.IsBytesError ? "BytesError"
                 : scrutineeType.IsDbError ? "DbError" : scrutineeType.IsHttpError ? "HttpError" : "ProcessError";
             if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != builtinErrorName)
             {
@@ -6656,7 +6778,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return null;
         }
 
-        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsDbError ||
+        var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsBytesError || scrutineeType.IsDbError ||
                         scrutineeType.IsHttpError || scrutineeType.IsProcessError
             ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
@@ -6903,6 +7025,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             switch (name)
             {
+                case "Bytes":
+                    return NoTypeArguments(syntax, LangType.Bytes);
+                case "BytesError":
+                    return NoTypeArguments(syntax, LangType.BytesError);
                 case "Config":
                     return NoTypeArguments(syntax, LangType.Config);
                 case "Secrets":
@@ -6946,6 +7072,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.Bool);
             case "Text":
                 return NoTypeArguments(syntax, LangType.Text);
+            case "Bytes":
+                return NoTypeArguments(syntax, LangType.Bytes);
+            case "BytesError":
+                return NoTypeArguments(syntax, LangType.BytesError);
             case "Html":
                 return NoTypeArguments(syntax, LangType.Html);
             case "FilePath":

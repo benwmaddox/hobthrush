@@ -467,6 +467,8 @@ internal static class Emitter
             _source.AppendLine("{");
 
             EmitBuiltinTypes();
+            if (NeedsBytesType) EmitBytesType();
+            if (NeedsBytesErrorType) EmitBytesErrorType();
             if (NeedsConfigSnapshot) EmitConfigSnapshotRuntime();
             if (NeedsSecretTextType) EmitSecretTextType();
             if (NeedsConfigType) EmitConfigType();
@@ -529,6 +531,48 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        public sealed record Ok(T Value) : Result<T, E>;");
             _source.AppendLine("        public sealed record Err(E Error) : Result<T, E>;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitBytesType()
+        {
+            _source.AppendLine("    public sealed class Bytes");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private static readonly Bytes EmptyValue = new(global::System.Collections.Immutable.ImmutableArray<byte>.Empty);");
+            _source.AppendLine("        private readonly global::System.Collections.Immutable.ImmutableArray<byte> _octets;");
+            _source.AppendLine("        private Bytes(global::System.Collections.Immutable.ImmutableArray<byte> octets) => _octets = octets;");
+            _source.AppendLine("        internal static Bytes Empty() => EmptyValue;");
+            _source.AppendLine("        internal static Result<Bytes, BytesError> Append(Bytes receiver, int octet)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (octet < 0 || octet > byte.MaxValue)");
+            _source.AppendLine("                return new Result<Bytes, BytesError>.Err(new BytesError.InvalidOctet());");
+            _source.AppendLine("            return new Result<Bytes, BytesError>.Ok(new Bytes(receiver._octets.Add((byte)octet)));");
+            _source.AppendLine("        }");
+            _source.AppendLine("        internal int Length => _octets.Length;");
+            _source.AppendLine("        internal Option<int> Get(int index)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (index < 0 || index >= _octets.Length)");
+            _source.AppendLine("                return new Option<int>.None();");
+            _source.AppendLine("            return new Option<int>.Some(_octets[index]);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        internal bool SequenceEquals(Bytes other)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (_octets.Length != other._octets.Length) return false;");
+            _source.AppendLine("            for (var index = 0; index < _octets.Length; index++)");
+            _source.AppendLine("                if (_octets[index] != other._octets[index]) return false;");
+            _source.AppendLine("            return true;");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitBytesErrorType()
+        {
+            _source.AppendLine("    public abstract record BytesError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private protected BytesError() { }");
+            _source.AppendLine("        public sealed record InvalidOctet() : BytesError;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1440,6 +1484,10 @@ internal static class Emitter
             TypedListLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
             TypedListGetExpr get => "ListGet(" + EmitExpr(get.Target) + ", " + EmitExpr(get.Index) + ")",
             TypedListAppendExpr append => "(" + EmitExpr(append.Target) + ").Add(" + EmitExpr(append.Value) + ")",
+            TypedBytesEmptyExpr => "Bytes.Empty()",
+            TypedBytesLengthExpr length => "(" + EmitExpr(length.Target) + ").Length",
+            TypedBytesGetExpr get => "(" + EmitExpr(get.Target) + ").Get(" + EmitExpr(get.Index) + ")",
+            TypedBytesAppendExpr append => "Bytes.Append(" + EmitExpr(append.Target) + ", " + EmitExpr(append.Octet) + ")",
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.FsWriteTextAsync or
                 BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } => throw new InvalidOperationException("Async intrinsics must be emitted beneath a checked await expression"),
             TypedIntrinsicCallExpr intrinsic => EmitIntrinsicCall(intrinsic),
@@ -1832,6 +1880,7 @@ internal static class Emitter
 
             EmitEmptyUnionStructuralEquality(LangTypeKind.FsError, "FsError",
                 ["NotFound", "PermissionDenied", "InvalidPath", "InvalidText", "Io"]);
+            EmitEmptyUnionStructuralEquality(LangTypeKind.BytesError, "BytesError", ["InvalidOctet"]);
             EmitEmptyUnionStructuralEquality(LangTypeKind.ProcessError, "ProcessError",
                 ["InvalidArgument", "InputTooLarge", "OutputTooLarge", "InvalidText", "StartFailed", "TimedOut"]);
             EmitEmptyUnionStructuralEquality(LangTypeKind.HttpError, "HttpError",
@@ -1902,6 +1951,8 @@ internal static class Emitter
                     return "(" + left + " == " + right + ")";
                 case LangTypeKind.Text:
                     return "global::System.String.Equals(" + left + ", " + right + ", global::System.StringComparison.Ordinal)";
+                case LangTypeKind.Bytes:
+                    return "(" + left + ").SequenceEquals(" + right + ")";
                 case LangTypeKind.Struct:
                     {
                         var comparerArguments = new List<string>();
@@ -1997,6 +2048,7 @@ internal static class Emitter
                 case LangTypeKind.ProcessOutput:
                     return "StructuralEqualsProcessOutput(" + left + ", " + right + ")";
                 case LangTypeKind.FsError:
+                case LangTypeKind.BytesError:
                 case LangTypeKind.ProcessError:
                 case LangTypeKind.HttpError:
                 case LangTypeKind.DbError:
@@ -2020,6 +2072,8 @@ internal static class Emitter
                     case LangTypeKind.I32:
                     case LangTypeKind.Bool:
                     case LangTypeKind.Text:
+                    case LangTypeKind.Bytes:
+                    case LangTypeKind.BytesError:
                     case LangTypeKind.Html:
                     case LangTypeKind.FilePath:
                     case LangTypeKind.HttpResponse:
@@ -2204,6 +2258,7 @@ internal static class Emitter
             BuiltinVariant.FsErrorInvalidPath or
             BuiltinVariant.FsErrorInvalidText or
             BuiltinVariant.FsErrorIo or
+            BuiltinVariant.BytesInvalidOctet or
             BuiltinVariant.DbErrorStatement or
             BuiltinVariant.DbErrorRowShape or
             BuiltinVariant.HttpInvalidTarget or
@@ -2259,6 +2314,7 @@ internal static class Emitter
                     BuiltinVariant.FsErrorInvalidPath => "InvalidPath",
                     BuiltinVariant.FsErrorInvalidText => "InvalidText",
                     BuiltinVariant.FsErrorIo => "Io",
+                    BuiltinVariant.BytesInvalidOctet => "InvalidOctet",
                     BuiltinVariant.DbErrorStatement => "Statement",
                     BuiltinVariant.DbErrorRowShape => "RowShape",
                     BuiltinVariant.HttpInvalidTarget => "InvalidTarget",
@@ -4123,6 +4179,8 @@ internal static class Emitter
             LangTypeKind.I32 => "int",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
+            LangTypeKind.Bytes => "Bytes",
+            LangTypeKind.BytesError => "BytesError",
             LangTypeKind.List => "global::System.Collections.Immutable.ImmutableArray<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Map => EmitMapType(type),
             LangTypeKind.FilePath => "FilePath",
@@ -4225,6 +4283,10 @@ internal static class Emitter
         }
 
         private bool NeedsFilePathType => UsesTypeKind(LangTypeKind.FilePath);
+
+        private bool NeedsBytesType => UsesTypeKind(LangTypeKind.Bytes);
+
+        private bool NeedsBytesErrorType => UsesTypeKind(LangTypeKind.BytesError) || NeedsBytesType;
 
         private bool NeedsHtmlType => UsesTypeKind(LangTypeKind.Html);
 
@@ -4558,6 +4620,17 @@ internal static class Emitter
                 case TypedListAppendExpr append:
                     foreach (var nested in EnumerateExpressions(append.Target)) yield return nested;
                     foreach (var nested in EnumerateExpressions(append.Value)) yield return nested;
+                    break;
+                case TypedBytesLengthExpr length:
+                    foreach (var nested in EnumerateExpressions(length.Target)) yield return nested;
+                    break;
+                case TypedBytesGetExpr get:
+                    foreach (var nested in EnumerateExpressions(get.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(get.Index)) yield return nested;
+                    break;
+                case TypedBytesAppendExpr append:
+                    foreach (var nested in EnumerateExpressions(append.Target)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(append.Octet)) yield return nested;
                     break;
                 case TypedIntrinsicCallExpr intrinsic:
                     foreach (var argument in intrinsic.Arguments)

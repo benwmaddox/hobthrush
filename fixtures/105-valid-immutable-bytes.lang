@@ -1,0 +1,147 @@
+module fixture::immutable_bytes;
+
+pub struct Box<T> { value: T }
+pub struct Bytes { value: i32 }
+pub union BytesError { Custom(i32) }
+pub union Maybe<T> { Some(T), None }
+pub newtype ByteBuffer = Bytes;
+
+pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+
+fn measure_bytes(value: Bytes) -> i32 effects {} {
+    return match value.get(1) {
+        Some(octet) => octet,
+        None => -1,
+    };
+}
+
+fn measure_buffer(value: self::fixture::immutable_bytes::ByteBuffer) -> i32 effects {} {
+    return value.value.length;
+}
+
+pub impl self::fixture::immutable_bytes::Measure for Bytes {
+    measure = self::fixture::immutable_bytes::measure_bytes;
+}
+
+pub impl self::fixture::immutable_bytes::Measure for self::fixture::immutable_bytes::ByteBuffer {
+    measure = self::fixture::immutable_bytes::measure_buffer;
+}
+
+fn append_or_empty(value: Bytes, octet: i32) -> Bytes effects {} {
+    return match value.append(octet) {
+        Ok(next) => next,
+        Err(error) => Bytes.empty(),
+    };
+}
+
+fn identity<T>(value: T) -> T effects {} { return value; }
+
+pub fn main() -> Text effects {} {
+    let b0: Bytes = Bytes.empty();
+    let b1: Bytes = self::fixture::immutable_bytes::append_or_empty(b0, 0);
+    let b2: Bytes = self::fixture::immutable_bytes::append_or_empty(b1, 128);
+    let b3: Bytes = self::fixture::immutable_bytes::append_or_empty(b1, 255);
+    let b4: Bytes = self::fixture::immutable_bytes::append_or_empty(b2, 255);
+    let no_octet: Option<i32> = None;
+    let zero_octet: Option<i32> = Some(0);
+    let high_octet: Option<i32> = Some(128);
+    let final_octet: Option<i32> = Some(255);
+
+    if b0.length != 0 { return "bytes-failed"; }
+    if b1.length != 1 { return "bytes-failed"; }
+    if b2.length != 2 { return "bytes-failed"; }
+    if b3.length != 2 { return "bytes-failed"; }
+    if b4.length != 3 { return "bytes-failed"; }
+    if b0.get(0) != no_octet { return "bytes-failed"; }
+    if b4.get(-1) != no_octet { return "bytes-failed"; }
+    if b4.get(3) != no_octet { return "bytes-failed"; }
+    if b4.get(0) != zero_octet { return "bytes-failed"; }
+    if b4.get(1) != high_octet { return "bytes-failed"; }
+    if b4.get(2) != final_octet { return "bytes-failed"; }
+    if b1.get(0) != zero_octet { return "bytes-failed"; }
+    if b2.get(1) != high_octet { return "bytes-failed"; }
+    if b3.get(1) != final_octet { return "bytes-failed"; }
+
+    let low_failure: Result<Bytes, BytesError> = b0.append(-1);
+    let high_failure: Result<Bytes, BytesError> = b0.append(256);
+    let low_is_invalid: bool = match low_failure {
+        Ok(value) => false,
+        Err(error) => match error {
+            BytesError.InvalidOctet => true,
+        },
+    };
+    let high_is_invalid: bool = match high_failure {
+        Ok(value) => false,
+        Err(error) => match error {
+            BytesError.InvalidOctet => true,
+        },
+    };
+    if low_is_invalid == false { return "bytes-failed"; }
+    if high_is_invalid == false { return "bytes-failed"; }
+    if low_failure != high_failure { return "bytes-failed"; }
+    if b0 != Bytes.empty() { return "bytes-failed"; }
+
+    let repeat: Bytes = self::fixture::immutable_bytes::append_or_empty(
+        self::fixture::immutable_bytes::append_or_empty(
+            self::fixture::immutable_bytes::append_or_empty(Bytes.empty(), 0), 128), 255);
+    if b4 != repeat { return "bytes-failed"; }
+    let reordered: Bytes = self::fixture::immutable_bytes::append_or_empty(
+        self::fixture::immutable_bytes::append_or_empty(
+            self::fixture::immutable_bytes::append_or_empty(Bytes.empty(), 128), 0), 255);
+    if b4 == reordered { return "bytes-failed"; }
+    if b2 == b3 { return "bytes-failed"; }
+    if b1.length != 1 { return "bytes-failed"; }
+
+    let byte_list: List<Bytes> = [b4, b2];
+    let equal_list: List<Bytes> = [repeat, b2];
+    if byte_list != equal_list { return "bytes-failed"; }
+    let empty_map: Map<Text, Bytes> = Map.empty();
+    let byte_map: Map<Text, Bytes> = empty_map.set("payload", b4);
+    let equal_map: Map<Text, Bytes> = empty_map.set("payload", repeat);
+    if byte_map != equal_map { return "bytes-failed"; }
+    let mapped: Bytes = match byte_map.get("payload") {
+        Some(value) => value,
+        None => b0,
+    };
+    if mapped != b4 { return "bytes-failed"; }
+
+    let byte_option: Option<Bytes> = Some(b4);
+    let equal_option: Option<Bytes> = Some(repeat);
+    if byte_option != equal_option { return "bytes-failed"; }
+    let byte_result: Result<Bytes, BytesError> = Ok(b4);
+    let equal_result: Result<Bytes, BytesError> = Ok(repeat);
+    if byte_result != equal_result { return "bytes-failed"; }
+
+    let boxed: self::fixture::immutable_bytes::Box<Bytes> =
+        self::fixture::immutable_bytes::Box<Bytes> { value: b4 };
+    let equal_box: self::fixture::immutable_bytes::Box<Bytes> =
+        self::fixture::immutable_bytes::Box<Bytes> { value: repeat };
+    if boxed != equal_box { return "bytes-failed"; }
+    let maybe: self::fixture::immutable_bytes::Maybe<Bytes> =
+        self::fixture::immutable_bytes::Maybe<Bytes>.Some(b4);
+    let equal_maybe: self::fixture::immutable_bytes::Maybe<Bytes> =
+        self::fixture::immutable_bytes::Maybe<Bytes>.Some(repeat);
+    if maybe != equal_maybe { return "bytes-failed"; }
+    let identified: Bytes = self::fixture::immutable_bytes::identity(b4);
+    if identified != repeat { return "bytes-failed"; }
+
+    let wrapped: self::fixture::immutable_bytes::ByteBuffer =
+        self::fixture::immutable_bytes::ByteBuffer.wrap(b4);
+    let equal_wrapped: self::fixture::immutable_bytes::ByteBuffer =
+        self::fixture::immutable_bytes::ByteBuffer.wrap(repeat);
+    if wrapped != equal_wrapped { return "bytes-failed"; }
+    if wrapped.value != b4 { return "bytes-failed"; }
+    if self::fixture::immutable_bytes::Measure.measure(b4) != 128 { return "bytes-failed"; }
+    if self::fixture::immutable_bytes::Measure.measure(wrapped) != 3 { return "bytes-failed"; }
+    let nominal_bytes: self::fixture::immutable_bytes::Bytes =
+        self::fixture::immutable_bytes::Bytes { value: 17 };
+    let nominal_bytes_error: self::fixture::immutable_bytes::BytesError =
+        self::fixture::immutable_bytes::BytesError.Custom(23);
+    if nominal_bytes.value != 17 { return "bytes-failed"; }
+    let nominal_error_code: i32 = match nominal_bytes_error {
+        self::fixture::immutable_bytes::BytesError.Custom(code) => code,
+    };
+    if nominal_error_code != 23 { return "bytes-failed"; }
+
+    return "bytes-ok";
+}
