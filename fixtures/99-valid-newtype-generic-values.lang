@@ -1,0 +1,173 @@
+module fixture::valid_newtype_generic_values;
+
+pub struct Box<T> { value: T }
+pub struct Empty<T> {}
+pub union Maybe<T> { Some(T), None }
+
+pub newtype BoxedInt = self::fixture::valid_newtype_generic_values::Box<i32>;
+pub newtype MaybeInt = self::fixture::valid_newtype_generic_values::Maybe<i32>;
+pub newtype PhantomRead = self::fixture::valid_newtype_generic_values::Empty<FsRead>;
+
+pub fn identity<T>(value: T) -> T effects {} {
+    return value;
+}
+
+pub fn box_value(value: i32) -> self::fixture::valid_newtype_generic_values::BoxedInt effects {} {
+    return self::fixture::valid_newtype_generic_values::BoxedInt.wrap(
+        self::fixture::valid_newtype_generic_values::Box<i32> { value: value });
+}
+
+pub fn project_box(value: self::fixture::valid_newtype_generic_values::BoxedInt) -> i32 effects {} {
+    return value.value.value;
+}
+
+pub fn preserve_box(value: self::fixture::valid_newtype_generic_values::BoxedInt) -> self::fixture::valid_newtype_generic_values::BoxedInt effects {} {
+    return self::fixture::valid_newtype_generic_values::identity(value);
+}
+
+pub fn same_box(left: self::fixture::valid_newtype_generic_values::BoxedInt, right: self::fixture::valid_newtype_generic_values::BoxedInt) -> bool effects {} {
+    return left == right;
+}
+
+pub fn same_list(left: List<self::fixture::valid_newtype_generic_values::BoxedInt>, right: List<self::fixture::valid_newtype_generic_values::BoxedInt>) -> bool effects {} {
+    return left == right;
+}
+
+pub fn same_map(left: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt>, right: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt>) -> bool effects {} {
+    return left == right;
+}
+
+pub fn same_option(left: Option<self::fixture::valid_newtype_generic_values::BoxedInt>, right: Option<self::fixture::valid_newtype_generic_values::BoxedInt>) -> bool effects {} {
+    return left == right;
+}
+
+pub fn same_result(left: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text>, right: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text>) -> bool effects {} {
+    return left == right;
+}
+
+pub fn maybe_value(value: i32) -> self::fixture::valid_newtype_generic_values::MaybeInt effects {} {
+    return self::fixture::valid_newtype_generic_values::MaybeInt.wrap(
+        self::fixture::valid_newtype_generic_values::Maybe<i32>.Some(value));
+}
+
+pub fn same_maybe(left: self::fixture::valid_newtype_generic_values::MaybeInt, right: self::fixture::valid_newtype_generic_values::MaybeInt) -> bool effects {} {
+    return left == right;
+}
+
+fn equal_box_case() -> i32 effects {} {
+    if self::fixture::valid_newtype_generic_values::same_box(
+        self::fixture::valid_newtype_generic_values::box_value(4),
+        self::fixture::valid_newtype_generic_values::box_value(4)) { return 1; } else { return 0; }
+}
+
+fn unequal_box_case() -> i32 effects {} {
+    if self::fixture::valid_newtype_generic_values::same_box(
+        self::fixture::valid_newtype_generic_values::box_value(4),
+        self::fixture::valid_newtype_generic_values::box_value(5)) { return 0; } else { return 1; }
+}
+
+fn equal_list_case() -> i32 effects {} {
+    let left: List<self::fixture::valid_newtype_generic_values::BoxedInt> = [
+        self::fixture::valid_newtype_generic_values::box_value(4),
+        self::fixture::valid_newtype_generic_values::box_value(6)];
+    let right: List<self::fixture::valid_newtype_generic_values::BoxedInt> = [
+        self::fixture::valid_newtype_generic_values::box_value(4),
+        self::fixture::valid_newtype_generic_values::box_value(6)];
+    if self::fixture::valid_newtype_generic_values::same_list(left, right) { return 1; } else { return 0; }
+}
+
+fn unequal_list_case() -> i32 effects {} {
+    let left: List<self::fixture::valid_newtype_generic_values::BoxedInt> = [
+        self::fixture::valid_newtype_generic_values::box_value(4)];
+    let right: List<self::fixture::valid_newtype_generic_values::BoxedInt> = [
+        self::fixture::valid_newtype_generic_values::box_value(5)];
+    if self::fixture::valid_newtype_generic_values::same_list(left, right) { return 0; } else { return 1; }
+}
+
+fn equal_map_case() -> i32 effects {} {
+    let empty: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> = Map.empty();
+    let left: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> =
+        empty.set("id", self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> =
+        empty.set("id", self::fixture::valid_newtype_generic_values::box_value(4));
+    if self::fixture::valid_newtype_generic_values::same_map(left, right) { return 1; } else { return 0; }
+}
+
+fn unequal_map_case() -> i32 effects {} {
+    let empty: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> = Map.empty();
+    let left: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> =
+        empty.set("id", self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Map<Text, self::fixture::valid_newtype_generic_values::BoxedInt> =
+        empty.set("id", self::fixture::valid_newtype_generic_values::box_value(5));
+    if self::fixture::valid_newtype_generic_values::same_map(left, right) { return 0; } else { return 1; }
+}
+
+fn equal_option_case() -> i32 effects {} {
+    let left: Option<self::fixture::valid_newtype_generic_values::BoxedInt> =
+        Some(self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Option<self::fixture::valid_newtype_generic_values::BoxedInt> =
+        Some(self::fixture::valid_newtype_generic_values::box_value(4));
+    if self::fixture::valid_newtype_generic_values::same_option(left, right) { return 1; } else { return 0; }
+}
+
+fn unequal_option_case() -> i32 effects {} {
+    let left: Option<self::fixture::valid_newtype_generic_values::BoxedInt> =
+        Some(self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Option<self::fixture::valid_newtype_generic_values::BoxedInt> =
+        Some(self::fixture::valid_newtype_generic_values::box_value(5));
+    if self::fixture::valid_newtype_generic_values::same_option(left, right) { return 0; } else { return 1; }
+}
+
+fn equal_result_case() -> i32 effects {} {
+    let left: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text> =
+        Ok(self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text> =
+        Ok(self::fixture::valid_newtype_generic_values::box_value(4));
+    if self::fixture::valid_newtype_generic_values::same_result(left, right) { return 1; } else { return 0; }
+}
+
+fn unequal_result_case() -> i32 effects {} {
+    let left: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text> =
+        Ok(self::fixture::valid_newtype_generic_values::box_value(4));
+    let right: Result<self::fixture::valid_newtype_generic_values::BoxedInt, Text> =
+        Ok(self::fixture::valid_newtype_generic_values::box_value(5));
+    if self::fixture::valid_newtype_generic_values::same_result(left, right) { return 0; } else { return 1; }
+}
+
+fn equal_maybe_case() -> i32 effects {} {
+    if self::fixture::valid_newtype_generic_values::same_maybe(
+        self::fixture::valid_newtype_generic_values::maybe_value(4),
+        self::fixture::valid_newtype_generic_values::maybe_value(4)) { return 1; } else { return 0; }
+}
+
+fn unequal_maybe_case() -> i32 effects {} {
+    if self::fixture::valid_newtype_generic_values::same_maybe(
+        self::fixture::valid_newtype_generic_values::maybe_value(4),
+        self::fixture::valid_newtype_generic_values::maybe_value(5)) { return 0; } else { return 1; }
+}
+
+pub fn main() -> i32 effects {} {
+    let equality_outcomes: i32 = self::fixture::valid_newtype_generic_values::equal_box_case()
+        + self::fixture::valid_newtype_generic_values::unequal_box_case()
+        + self::fixture::valid_newtype_generic_values::equal_list_case()
+        + self::fixture::valid_newtype_generic_values::unequal_list_case()
+        + self::fixture::valid_newtype_generic_values::equal_map_case()
+        + self::fixture::valid_newtype_generic_values::unequal_map_case()
+        + self::fixture::valid_newtype_generic_values::equal_option_case()
+        + self::fixture::valid_newtype_generic_values::unequal_option_case()
+        + self::fixture::valid_newtype_generic_values::equal_result_case()
+        + self::fixture::valid_newtype_generic_values::unequal_result_case()
+        + self::fixture::valid_newtype_generic_values::equal_maybe_case()
+        + self::fixture::valid_newtype_generic_values::unequal_maybe_case();
+    if equality_outcomes == 12 {
+        let preserved: i32 = self::fixture::valid_newtype_generic_values::project_box(
+            self::fixture::valid_newtype_generic_values::preserve_box(
+                self::fixture::valid_newtype_generic_values::box_value(4)));
+        let projected: i32 = self::fixture::valid_newtype_generic_values::project_box(
+            self::fixture::valid_newtype_generic_values::box_value(4));
+        if preserved == 4 {
+            if projected == 4 { return 20; }
+        }
+    }
+    return 0;
+}

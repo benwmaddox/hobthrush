@@ -36,6 +36,7 @@ internal static class CheckedReportFacts
         var packageIds = program.Functions.Select(function => function.PackageId)
             .Concat(program.Structs.Select(structure => structure.PackageId))
             .Concat(program.Unions.Select(union => union.PackageId))
+            .Concat(program.Newtypes.Select(newtype => newtype.PackageId))
             .Concat(program.Traits.Select(trait => trait.PackageId))
             .Concat(program.TraitImpls.Select(implementation => implementation.PackageId))
             .Distinct(StringComparer.Ordinal)
@@ -53,6 +54,15 @@ internal static class CheckedReportFacts
         if (!packageIdentities.TryGetValue(trait.PackageId, out var packageIdentity))
             throw new InvalidOperationException("A checked trait has no stable package identity");
         return $"lang.trait.v1.{packageIdentity}::{trait.Module}::{trait.Name}";
+    }
+
+    public static string StableNewtypeId(
+        CheckedNewtype newtype,
+        IReadOnlyDictionary<string, string> packageIdentities)
+    {
+        if (!packageIdentities.TryGetValue(newtype.PackageId, out var packageIdentity))
+            throw new InvalidOperationException("A checked newtype has no stable package identity");
+        return $"lang.newtype.v1.{packageIdentity}::{newtype.Module}::{newtype.Name}";
     }
 
     public static string StableFunctionId(
@@ -131,6 +141,8 @@ internal static class CheckedReportFacts
             TypedBuiltinConstructExpr builtin => builtin.Arguments,
             TypedUnionConstructExpr union => union.Arguments,
             TypedStructConstructExpr structure => structure.Fields.Select(field => field.Value),
+            TypedNewtypeConstructExpr constructedNewtype => [constructedNewtype.Value],
+            TypedNewtypeProjectExpr projectedNewtype => [projectedNewtype.Target],
             TypedFieldAccessExpr field => [field.Target],
             TypedMatchExpr match => new[] { match.Value }.Concat(match.Arms.Select(arm => arm.Body)),
             _ => []
@@ -375,6 +387,12 @@ internal static class CheckedReportFacts
                 case TypedStructConstructExpr structure:
                     foreach (var field in structure.Fields)
                         VisitExpression(field.Value, witnesses);
+                    break;
+                case TypedNewtypeConstructExpr constructedNewtype:
+                    VisitExpression(constructedNewtype.Value, witnesses);
+                    break;
+                case TypedNewtypeProjectExpr projectedNewtype:
+                    VisitExpression(projectedNewtype.Target, witnesses);
                     break;
                 case TypedFieldAccessExpr field:
                     VisitExpression(field.Target, witnesses);

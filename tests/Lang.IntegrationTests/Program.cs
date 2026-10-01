@@ -67,6 +67,7 @@ internal static partial class IntegrationTests
             ("struct values compose with Option, Result, and unions", TestStructWrappers),
             ("generic immutable structs substitute fields, compare structurally, and run in managed and NativeAOT builds", TestGenericStructs),
             ("generic tagged unions substitute payloads, match exhaustively, compare structurally, and run in managed and NativeAOT builds", TestGenericUnions),
+            ("nominal newtypes preserve boundaries, traits, resources, and current metadata", TestNominalNewtypes),
             ("static traits bind closed targets, forward ordered witnesses, and detect recursive obligations", TestStaticTraits),
             ("forward and guarded structs work, including empty library builds", TestForwardAndGuardedRecursion),
             ("direct and mutual struct field cycles are rejected", TestStructCycles),
@@ -1385,7 +1386,7 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 10.");
+            AssertEqual(11, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 11.");
             var union = api.GetProperty("unions").EnumerateArray().Single();
             AssertJsonPropertyOrder(union, "id,source_ids,package,type_parameters,variants");
             AssertEqual("T", union.GetProperty("type_parameters")[0].GetProperty("name").GetString(),
@@ -1409,7 +1410,7 @@ internal static partial class IntegrationTests
         var auditRun = await harness.InvokeCompilerCommandAsync("audit", dependencyRoot, "--json");
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
-        AssertEqual(8, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+        AssertEqual(9, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
             "The current audit contract with trait facts must use version 8.");
     }
 
@@ -1489,8 +1490,8 @@ internal static partial class IntegrationTests
         using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
         var api = apiDocument.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
-            "Trait metadata should use current inspect API schema version 10.");
+        AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
+            "Trait metadata should use current inspect API schema version 11.");
         var measureTraitId = "lang.trait.v1.root::app::main::Measure";
         var apiTraits = api.GetProperty("traits").EnumerateArray().ToArray();
         AssertEqual(1, apiTraits.Length, "The API should expose the one public source trait.");
@@ -1549,8 +1550,8 @@ internal static partial class IntegrationTests
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
         var audit = auditDocument.RootElement;
         AssertAuditPropertyOrder(audit);
-        AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
-            "Trait compiler facts should use current audit schema version 8.");
+        AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
+            "Trait compiler facts should use current audit schema version 9.");
         var compilerFacts = audit.GetProperty("compiler");
         AssertEqual(2, compilerFacts.GetProperty("traits").GetArrayLength(),
             "Audit should retain public and private trait declarations.");
@@ -3170,7 +3171,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
+        AssertEqual(11, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 11.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -3387,7 +3388,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(10, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
+        AssertEqual(11, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 11.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -3544,7 +3545,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(8, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8.");
+        AssertEqual(9, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 9.");
         AssertEqual(0, report.GetProperty("managed_adapters").GetArrayLength(),
             "Ordinary packages must report an empty managed adapter provenance array.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
@@ -3702,7 +3703,13 @@ internal static partial class IntegrationTests
             foreach (var input in package.GetProperty("inputs").EnumerateArray())
                 Order(input, "kind,path,sha256");
         }
-        Order(root.GetProperty("compiler"), "functions,traits,trait_impls");
+        Order(root.GetProperty("compiler"), "functions,newtypes,traits,trait_impls");
+        foreach (var newtype in root.GetProperty("compiler").GetProperty("newtypes").EnumerateArray())
+        {
+            Order(newtype, "id,package,module,name,visibility,representation");
+            AssertPackageIdentitySource(newtype.GetProperty("package"));
+            AssertAuditTypePropertyOrder(newtype.GetProperty("representation"));
+        }
         foreach (var function in root.GetProperty("compiler").GetProperty("functions").EnumerateArray())
         {
             Order(function, "package,module,name,visibility,is_async,type_parameters,declared_effects,inferred_effects,effect_paths,direct_calls,trait_calls,required_capabilities");
@@ -3759,6 +3766,8 @@ internal static partial class IntegrationTests
         foreach (var implementation in root.GetProperty("compiler").GetProperty("trait_impls").EnumerateArray())
         {
             Order(implementation, "id,package,module,trait,target,visibility,methods");
+            AssertPackageIdentitySource(implementation.GetProperty("package"));
+            AssertAuditTypePropertyOrder(implementation.GetProperty("target"));
             foreach (var method in implementation.GetProperty("methods").EnumerateArray())
                 Order(method, "name,binding_function");
         }
@@ -3774,6 +3783,49 @@ internal static partial class IntegrationTests
         foreach (var dependency in root.GetProperty("foreign_dependencies").EnumerateArray())
             Order(dependency, "name,version,ecosystem,reason");
         AssertManagedAdapterProvenanceOrder(root.GetProperty("managed_adapters"));
+    }
+
+    private static void AssertAuditTypePropertyOrder(JsonElement type)
+    {
+        var kind = type.GetProperty("kind").GetString();
+        switch (kind)
+        {
+            case "primitive":
+                AssertJsonPropertyOrder(type, "kind,name");
+                break;
+            case "nominal":
+                AssertJsonPropertyOrder(type, "kind,declaration_kind,package,module,name,type_arguments");
+                if (type.GetProperty("package").ValueKind == JsonValueKind.Object)
+                    AssertPackageIdentitySource(type.GetProperty("package"));
+                foreach (var argument in type.GetProperty("type_arguments").EnumerateArray())
+                    AssertAuditTypePropertyOrder(argument);
+                break;
+            case "list":
+            case "option":
+            case "secret":
+                AssertJsonPropertyOrder(type, "kind,item");
+                AssertAuditTypePropertyOrder(type.GetProperty("item"));
+                break;
+            case "map":
+                AssertJsonPropertyOrder(type, "kind,key,value");
+                AssertAuditTypePropertyOrder(type.GetProperty("key"));
+                AssertAuditTypePropertyOrder(type.GetProperty("value"));
+                break;
+            case "result":
+                AssertJsonPropertyOrder(type, "kind,ok,error");
+                AssertAuditTypePropertyOrder(type.GetProperty("ok"));
+                AssertAuditTypePropertyOrder(type.GetProperty("error"));
+                break;
+            case "type_parameter":
+                AssertJsonPropertyOrder(type, "kind,name,ordinal");
+                break;
+            case "self":
+                AssertJsonPropertyOrder(type, "kind");
+                break;
+            default:
+                AssertTrue(false, $"Unexpected audit type kind <{kind}>.");
+                break;
+        }
     }
 
     private static void AssertPackageIdentitySource(JsonElement identity)
@@ -3845,6 +3897,7 @@ internal static partial class IntegrationTests
                     {
                         var id = property.Value.GetString() ?? string.Empty;
                         AssertTrue(id.StartsWith("lang.trait.v1.", StringComparison.Ordinal)
+                                   || id.StartsWith("lang.newtype.v1.", StringComparison.Ordinal)
                                    || id.StartsWith("lang.impl.v1.", StringComparison.Ordinal),
                             $"Audit declaration IDs should be portable trait or impl identities, got <{id}> at {path}.id.");
                     }
@@ -3883,7 +3936,7 @@ internal static partial class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,unions,traits,trait_impls,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,newtypes,unions,traits,trait_impls,commands,routes",
             "os,path,sha256",
             "name,source_type,required,has_default",
             "alias,name,version",
@@ -3899,6 +3952,7 @@ internal static partial class IntegrationTests
             "effect,steps",
             "source_id,source_ids,package,module,name",
             "id,source_ids,package,type_parameters,fields",
+            "id,source_ids,package,representation",
             "id,source_ids,package,type_parameters,variants",
             "id,source_ids,package,methods",
             "name,parameters,return_type",
@@ -4501,8 +4555,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 10.");
+            AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 11.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -4567,8 +4621,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 10.");
+            AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 11.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -4619,8 +4673,8 @@ internal static partial class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 8.");
+            AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 9.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -6404,7 +6458,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10.");
+            AssertEqual(11, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 11.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6417,7 +6471,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8.");
+            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 9.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -7168,7 +7222,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 10 with pinned process metadata.");
+            AssertEqual(11, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 11 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -7206,7 +7260,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(8, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 8 with pinned process metadata.");
+            AssertEqual(9, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 9 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "Audit process pins must use deterministic OS ordering.");
@@ -8860,8 +8914,8 @@ internal static partial class IntegrationTests
             AssertEqual(0, audit.ExitCode, Describe(audit));
             using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
             {
-                AssertEqual(8, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                    "Audit reports with source identities must use schema version 8.");
+                AssertEqual(9, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                    "Audit reports with source identities must use schema version 9.");
                 var identity = auditDocument.RootElement.GetProperty("packages").EnumerateArray()
                     .Single(package => package.GetProperty("role").GetString() == "direct")
                     .GetProperty("identity");
@@ -11766,10 +11820,10 @@ internal static partial class IntegrationTests
         var audit = auditDocument.RootElement;
         AssertInspectApiPropertyOrder(api);
         AssertAuditPropertyOrder(audit);
-        AssertEqual(10, api.GetProperty("schema_version").GetInt32(),
-            "The maintained generic library uses inspect API schema 10.");
-        AssertEqual(8, audit.GetProperty("schema_version").GetInt32(),
-            "The maintained generic library uses audit schema 8.");
+        AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses inspect API schema 11.");
+        AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses audit schema 9.");
 
         bool HasSourceId(JsonElement declaration, string sourceId) =>
             declaration.TryGetProperty("source_ids", out var sourceIds)
@@ -12223,7 +12277,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(97, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(104, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -12232,7 +12286,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.lang ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("97 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("104 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -12409,9 +12463,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b97\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b104\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 97 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 104 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

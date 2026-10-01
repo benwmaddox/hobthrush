@@ -487,6 +487,7 @@ internal static class Emitter
             if (NeedsProcessRunnerRuntime) EmitProcessRunnerRuntime();
             foreach (var union in program.Unions) EmitUnion(union);
             foreach (var structure in program.Structs) EmitStruct(structure);
+            foreach (var newtype in program.Newtypes) EmitNewtype(newtype);
             foreach (var trait in program.Traits) EmitTrait(trait);
             foreach (var implementation in program.TraitImpls) EmitTraitImpl(implementation);
             if (UsesStructuralEquality) EmitStructuralEqualityHelpers();
@@ -1233,6 +1234,14 @@ internal static class Emitter
             _emittingStruct = null;
         }
 
+        private void EmitNewtype(CheckedNewtype newtype)
+        {
+            _source.Append("    ").Append(newtype.Public ? "public" : "private")
+                .Append(" sealed record Newtype_").Append(newtype.Id.ToString(CultureInfo.InvariantCulture))
+                .Append('(').Append(EmitType(newtype.Representation)).AppendLine(" Value);");
+            _source.AppendLine();
+        }
+
         private void EmitTrait(CheckedTrait trait)
         {
             _emittingTrait = trait;
@@ -1438,6 +1447,9 @@ internal static class Emitter
             TypedBuiltinConstructExpr builtin => EmitBuiltinConstruct(builtin),
             TypedUnionConstructExpr variant => EmitUnionConstruct(variant),
             TypedStructConstructExpr structure => EmitStructConstruct(structure),
+            TypedNewtypeConstructExpr newtype =>
+                "new Newtype_" + newtype.NewtypeId.ToString(CultureInfo.InvariantCulture) + "(" + EmitExpr(newtype.Value) + ")",
+            TypedNewtypeProjectExpr newtype => "(" + EmitExpr(newtype.Target) + ").Value",
             TypedFieldAccessExpr field => "(" + EmitExpr(field.Target) + ").Field_" +
                 field.FieldIndex.ToString(CultureInfo.InvariantCulture),
             TypedMatchExpr match => EmitMatch(match),
@@ -1775,6 +1787,17 @@ internal static class Emitter
                 _emittingStruct = null;
             }
 
+            foreach (var newtype in program.Newtypes.Where(newtype => CanEmitStructuralEquality(newtype.Type)))
+            {
+                _source.Append("    private static bool StructuralEqualsNewtype_")
+                    .Append(newtype.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append("(Newtype_").Append(newtype.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" left, Newtype_").Append(newtype.Id.ToString(CultureInfo.InvariantCulture))
+                    .Append(" right) => ")
+                    .Append(EmitStructuralEquality(newtype.Representation, "left.Value", "right.Value"))
+                    .AppendLine(";");
+            }
+
             foreach (var union in program.Unions.Where(union => CanEmitStructuralEquality(union.Type)))
             {
                 _emittingUnion = union;
@@ -1897,6 +1920,8 @@ internal static class Emitter
                             arguments += ", " + string.Join(", ", comparerArguments);
                         return "StructuralEqualsStruct_" + type.StructId.ToString(CultureInfo.InvariantCulture) + "(" + arguments + ")";
                     }
+                case LangTypeKind.Newtype:
+                    return "StructuralEqualsNewtype_" + type.NewtypeId.ToString(CultureInfo.InvariantCulture) + "(" + left + ", " + right + ")";
                 case LangTypeKind.Union:
                     {
                         var comparerArguments = new List<string>();
@@ -2024,6 +2049,11 @@ internal static class Emitter
                         var structure = program.Structs[current.StructId];
                         foreach (var field in structure.Fields)
                             pending.Push(SubstituteNominalTypeParameters(field.Type, LangTypeKind.Struct, structure.Id, current));
+                        break;
+                    case LangTypeKind.Newtype:
+                        if (current.NewtypeId < 0 || current.NewtypeId >= program.Newtypes.Count) return false;
+                        if (!visited.Add(current)) break;
+                        pending.Push(program.Newtypes[current.NewtypeId].Representation);
                         break;
                     case LangTypeKind.Union:
                         if (current.UnionId < 0 || current.UnionId >= program.Unions.Count) return false;
@@ -4099,6 +4129,7 @@ internal static class Emitter
             LangTypeKind.Html => "Html",
             LangTypeKind.Union => EmitUnionType(type),
             LangTypeKind.Struct => EmitStructType(type),
+            LangTypeKind.Newtype => "Newtype_" + type.NewtypeId.ToString(CultureInfo.InvariantCulture),
             LangTypeKind.Option => "Option<" + EmitType(type.Arguments[0]) + ">",
             LangTypeKind.Result => "Result<" + EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">",
             LangTypeKind.TypeParameter => EmitTypeParameter(type),
@@ -4371,6 +4402,9 @@ internal static class Emitter
             foreach (var field in structure.Fields)
                 yield return field.Type;
 
+            foreach (var newtype in program.Newtypes)
+                yield return newtype.Representation;
+
             foreach (var trait in program.Traits)
                 foreach (var method in trait.Methods)
                 {
@@ -4540,6 +4574,12 @@ internal static class Emitter
                 case TypedStructConstructExpr structure:
                     foreach (var field in structure.Fields)
                     foreach (var nested in EnumerateExpressions(field.Value)) yield return nested;
+                    break;
+                case TypedNewtypeConstructExpr newtype:
+                    foreach (var nested in EnumerateExpressions(newtype.Value)) yield return nested;
+                    break;
+                case TypedNewtypeProjectExpr newtype:
+                    foreach (var nested in EnumerateExpressions(newtype.Target)) yield return nested;
                     break;
                 case TypedFieldAccessExpr field:
                     foreach (var nested in EnumerateExpressions(field.Target)) yield return nested;

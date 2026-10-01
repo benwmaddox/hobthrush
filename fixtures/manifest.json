@@ -488,5 +488,68 @@
     "file": "97-trait-impl-missing.lang",
     "status": "active",
     "expectedCodes": ["E_TRAIT_IMPL_MISSING"]
+  },
+  {
+    "file": "98-valid-newtype-scalar.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "99-valid-newtype-generic-values.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "100-valid-newtype-guarded-recursion.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "101-invalid-newtype-implicit-assignment.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
+  },
+  {
+    "file": "102-invalid-newtype-resource.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE"
+    ]
+  },
+  {
+    "file": "103-invalid-newtype-direct-cycle.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
+  },
+  {
+    "file": "104-invalid-newtype-generic-declaration.lang",
+    "status": "active",
+    "expectedCodes": ["E_UNSUPPORTED"]
   }
 ]

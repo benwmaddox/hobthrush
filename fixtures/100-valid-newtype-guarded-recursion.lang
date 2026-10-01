@@ -1,0 +1,90 @@
+module fixture::valid_newtype_guarded_recursion;
+
+pub newtype Chain = Option<self::fixture::valid_newtype_guarded_recursion::Chain>;
+
+pub union Tree {
+    Leaf(i32),
+    Branch(List<self::fixture::valid_newtype_guarded_recursion::Tree>),
+}
+
+pub newtype TreeRoot = self::fixture::valid_newtype_guarded_recursion::Tree;
+
+pub fn empty_chain() -> self::fixture::valid_newtype_guarded_recursion::Chain effects {} {
+    return self::fixture::valid_newtype_guarded_recursion::Chain.wrap(None);
+}
+
+pub fn nested_chain() -> self::fixture::valid_newtype_guarded_recursion::Chain effects {} {
+    return self::fixture::valid_newtype_guarded_recursion::Chain.wrap(
+        Some(self::fixture::valid_newtype_guarded_recursion::empty_chain()));
+}
+
+pub fn same_chain(left: self::fixture::valid_newtype_guarded_recursion::Chain, right: self::fixture::valid_newtype_guarded_recursion::Chain) -> bool effects {} {
+    return left == right;
+}
+
+pub fn leaf(value: i32) -> self::fixture::valid_newtype_guarded_recursion::TreeRoot effects {} {
+    return self::fixture::valid_newtype_guarded_recursion::TreeRoot.wrap(
+        self::fixture::valid_newtype_guarded_recursion::Tree.Leaf(value));
+}
+
+pub fn branch(value: i32) -> self::fixture::valid_newtype_guarded_recursion::TreeRoot effects {} {
+    return self::fixture::valid_newtype_guarded_recursion::TreeRoot.wrap(
+        self::fixture::valid_newtype_guarded_recursion::Tree.Branch([
+            self::fixture::valid_newtype_guarded_recursion::Tree.Leaf(value)]));
+}
+
+pub fn same_tree(left: self::fixture::valid_newtype_guarded_recursion::TreeRoot, right: self::fixture::valid_newtype_guarded_recursion::TreeRoot) -> bool effects {} {
+    return left == right;
+}
+
+pub fn main() -> i32 effects {} {
+    let empty_left: self::fixture::valid_newtype_guarded_recursion::Chain =
+        self::fixture::valid_newtype_guarded_recursion::empty_chain();
+    let empty_right: self::fixture::valid_newtype_guarded_recursion::Chain =
+        self::fixture::valid_newtype_guarded_recursion::empty_chain();
+    let nested_left: self::fixture::valid_newtype_guarded_recursion::Chain =
+        self::fixture::valid_newtype_guarded_recursion::nested_chain();
+    let nested_right: self::fixture::valid_newtype_guarded_recursion::Chain =
+        self::fixture::valid_newtype_guarded_recursion::nested_chain();
+    let tree_left: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::leaf(9);
+    let tree_right: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::leaf(9);
+    let tree_different: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::leaf(10);
+    let branch_left: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::branch(9);
+    let branch_right: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::branch(9);
+    let branch_different: self::fixture::valid_newtype_guarded_recursion::TreeRoot =
+        self::fixture::valid_newtype_guarded_recursion::branch(10);
+    if self::fixture::valid_newtype_guarded_recursion::same_chain(empty_left, empty_right) {
+        if self::fixture::valid_newtype_guarded_recursion::same_chain(nested_left, nested_right) {
+            if self::fixture::valid_newtype_guarded_recursion::same_tree(tree_left, tree_right) {
+                if self::fixture::valid_newtype_guarded_recursion::same_tree(branch_left, branch_right) {
+                    if self::fixture::valid_newtype_guarded_recursion::same_chain(empty_left, nested_left) {
+                        return 0;
+                    } else {
+                        if self::fixture::valid_newtype_guarded_recursion::same_tree(tree_left, tree_different) {
+                            return 0;
+                        } else {
+                            if self::fixture::valid_newtype_guarded_recursion::same_tree(branch_left, branch_different) {
+                                return 0;
+                            } else {
+                                return 100;
+                            }
+                        }
+                    }
+                } else {
+                    return 0;
+                }
+            } else {
+                return 0;
+            }
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+}

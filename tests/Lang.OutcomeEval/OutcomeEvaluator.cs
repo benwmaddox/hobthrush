@@ -202,9 +202,9 @@ internal static class OutcomeEvaluator
             && builtArtifact is not null
             && File.Exists(builtArtifact)
             && IsSuccessful(apiRun.Capture)
-            && GetInt(api?.RootElement, "schema_version") == 10
+            && GetInt(api?.RootElement, "schema_version") == 11
             && IsSuccessful(auditRun.Capture)
-            && GetInt(audit?.RootElement, "schema_version") == 8
+            && GetInt(audit?.RootElement, "schema_version") == 9
             && effectsCapture is not null
             && IsSuccessful(effectsCapture)
             && (scenario.Id != "web-greeting" || effects is not null
@@ -221,7 +221,7 @@ internal static class OutcomeEvaluator
         {
             case "cli-policy":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/API v10/audit v8/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/API v11/audit v9/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "command-schema", commandSchemaValid && HasCommand(buildDirectory, "decide", "fs.read"),
                     "v4 command schema declares decide with fs.read", Evidence(build));
                 AddCheck(checks, scenarioPrefix + "priority-order", cliBehavior?.PriorityOrderPassed == true,
@@ -229,7 +229,7 @@ internal static class OutcomeEvaluator
                 break;
             case "audit-repair":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/API v10/audit v8/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/API v11/audit v9/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 AddCheck(checks, scenarioPrefix + "expected-diagnostics", IsSuccessful(check.Capture) && DiagnosticsAreEmpty(check.Capture),
                     "clean reference candidate has no compiler diagnostics before the constraint seed is applied", Evidence(check));
                 var effectPassed = effects is not null
@@ -240,7 +240,7 @@ internal static class OutcomeEvaluator
                     && JsonTextContains(effects.RootElement, "fs.read_text_async");
                 AddCheck(checks, scenarioPrefix + "inspect-effects", effectPassed,
                     "selected function reports declared and inferred fs.read through async read", EvidenceFor(commands, "inspect-effects"));
-                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 8
+                var auditPassed = GetInt(audit?.RootElement, "schema_version") == 9
                     && JsonArrayContains(audit!.RootElement.GetProperty("manifest_grants"), "fs.read")
                     && JsonTextContains(audit.RootElement, "fs.read_text_async")
                     && JsonTextContains(audit.RootElement, "claim_only")
@@ -248,13 +248,13 @@ internal static class OutcomeEvaluator
                     && auditAdapters.ValueKind == JsonValueKind.Array
                     && auditAdapters.GetArrayLength() == 0;
                 AddCheck(checks, scenarioPrefix + "audit-report", auditPassed,
-                    "audit v8 records the fs.read grant, claim-only operation, portable root identity, and adapter array", Evidence(auditRun));
+                    "audit v9 records the fs.read grant, claim-only operation, portable root identity, and adapter array", Evidence(auditRun));
                 AddCheck(checks, scenarioPrefix + "receipt-v3", receiptValid && commandSchemaValid && receiptDetail,
                     "build receipt v3 hashes its generated files and carries portable package identities and adapter array", Evidence(build));
                 break;
             case "web-greeting":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/API v10/audit v8/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/API v11/audit v9/effects and generated v4 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
                 break;
         }
 
@@ -286,9 +286,9 @@ internal static class OutcomeEvaluator
                 "generated OpenAPI declares the health, greeting, home, and bound greeting routes with parameter schemas", ArtifactEvidence(artifacts, scenario.Id, "openapi.json"));
             var routesPass = VerifyApiRoutes(api?.RootElement);
             AddCheck(checks, scenarioPrefix + "api-routes", routesPass,
-                "inspect API v10 lists the GET/POST greeting and health routes", Evidence(apiRun));
+                "inspect API v11 lists the GET/POST greeting and health routes", Evidence(apiRun));
             AddCheck(checks, scenarioPrefix + "route-bindings", VerifyApiRouteBindings(api?.RootElement) && web.RouteBindings,
-                "inspect API v10 and OpenAPI describe path, required query, and optional query bindings that work over HTTP", Evidence(apiRun).Concat(web.EvidencePaths).ToArray());
+                "inspect API v11 and OpenAPI describe path, required query, and optional query bindings that work over HTTP", Evidence(apiRun).Concat(web.EvidencePaths).ToArray());
             AddCheck(checks, scenarioPrefix + "trim-and-persistence", web.TrimmedAndPersisted,
                 "POST trims both fields, blank input preserves the row, and saved data survives restart", web.EvidencePaths);
             AddCheck(checks, scenarioPrefix + "safe-html", web.SafeHtml,
@@ -913,7 +913,7 @@ internal static class OutcomeEvaluator
 
     private static bool VerifyApiRoutes(JsonElement? api)
     {
-        if (api is null || GetInt(api.Value, "schema_version") != 10
+        if (api is null || GetInt(api.Value, "schema_version") != 11
             || !api.Value.TryGetProperty("routes", out var routes)
             || routes.ValueKind != JsonValueKind.Array)
             return false;
@@ -929,7 +929,7 @@ internal static class OutcomeEvaluator
 
     private static bool VerifyApiRouteBindings(JsonElement? api)
     {
-        if (api is null || GetInt(api.Value, "schema_version") != 10
+        if (api is null || GetInt(api.Value, "schema_version") != 11
             || !api.Value.TryGetProperty("routes", out var routes)
             || routes.ValueKind != JsonValueKind.Array)
             return false;
