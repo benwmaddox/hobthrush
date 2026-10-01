@@ -24,6 +24,8 @@ dotnet run --project src/Lang --configuration Release -- test examples/text-vali
 
 The first program prints a value; the last command runs the validation library's language tests.
 
+The CLI provides `lang new`, `lang add`, `lang check`, `lang build`, `lang run`, `lang test`, `lang lock`, `lang audit`, `lang inspect effects`, and `lang inspect api`. See the [grammar](docs/grammar.md) for command forms and options.
+
 ## Explore
 
 - [Text validation library](examples/text-validation): generic types, typed errors, and tests.
