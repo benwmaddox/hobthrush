@@ -2,25 +2,28 @@
 
 **An AI-built language for reliable software under clear constraints.**
 
-Named for a folklore helper that quietly finishes people's work while they sleep.
+Named for the hobthrush of northern English folklore: a household spirit said to quietly complete useful work unseen. [Read about the tradition](https://www.ryedalefolkmuseum.co.uk/the-helpful-hobs-of-the-north-york-moors/).
 
-![Watercolor of hobthrushes quietly crafting and checking wooden work by lamplight](docs/assets/hobthrush-helpers.png)
-
-Hobthrush is an experimental general-purpose language that makes types, errors, and side effects visible to both developers and tools. Its compiler checks exhaustive matches and declared effects, then provides structured diagnostics and machine-readable API and audit reports. You can use the same toolchain to build libraries, typed command-line tools, and small web apps.
+![Watercolor of two hobthrushes building and independently checking a footbridge by moonlight](docs/assets/hobthrush-helpers.png)
 
 The command is `hob`, source files use `.hob`, and packages use `hob.toml` and `hob.lock`. The language is pre-1.0; syntax and tooling may change without migration support.
 
 ## Goals and contributions
 
-The goal is one practical toolchain for reliable libraries, CLI tools, and small web apps. Code should be easy for agents to write and for people to inspect, with compiler feedback that exposes errors, effects, and API boundaries.
-
-We want AI systems to design and implement components within strong, explicit constraints. A component should approach a black box for its callers: a clear interface and checked contract let them use it without following every internal implementation detail.
-
-The intended development process is heavily AI-driven, including the core compiler and standard libraries. AI systems design, build, and test changes, with independent review by other AI systems. Human guidance stays at a high level: people collaborate on project goals, guide priorities, and oversee consequential decisions. AI systems carry out day-to-day development and review.
+Hobthrush is an experimental general-purpose language for reliable libraries, CLI tools, and small web apps. Goals and current scope are described in the [product brief](docs/PRD.md) and [roadmap](docs/roadmap.md).
 
 Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports categorizing and reviewing bugs and feature requests. Approved items are prioritized and open for sponsorship. Dedicated funds can then support specific features once their designs are approved and align with project goals. Up to 10% of funds may support human management of the project. Funding supports the work; acceptance still depends on independent AI review and technical checks.
 
 Focused issues, examples, documentation, and pull requests are welcome. Contributions and feedback may be used directly as input to future AI-assisted updates to this project. Please share only material you are comfortable having incorporated into those updates.
+
+## Core decisions
+
+- **Constrain interfaces for AI work.** The compiler checks types, exhaustive matches, declared effects, and capability use. Public APIs and machine-readable reports expose contracts so agents can use components as black boxes.
+- **Make failure explicit.** `Option<T>` represents absence and `Result<T, E>` expected errors; exhaustive `match` expressions require handling every union case.
+- **Keep values simple and effects controlled.** Ordinary values are immutable; `var` only rebinds a local. I/O requires explicit capabilities; supported scoped resources use lexical lifetimes. The runtime uses .NET garbage collection; see the [memory and performance contract](docs/memory-and-performance.md).
+- **Start with the .NET platform.** The current bootstrap compiler is written in C# and emits C# for .NET. Native AOT is an optional, garbage-collected publish mode; a Hobthrush-written compiler is a later roadmap goal.
+- **Pin dependencies and expose trust boundaries.** Git dependencies are locked to exact commits and content hashes. Catalogued .NET adapters have declared signatures and provenance, but run as trusted code with full process authority; audit reports are not a sandbox. See the [foreign interop contract](docs/foreign-interop.md).
+- **Use one toolchain and an AI review loop.** The intended scope is libraries, CLI tools, and small web apps. The development model is for AI systems to build and test the core compiler and standard libraries, with independent review by other AI systems. People set goals and priorities at a high level.
 
 ## Try it
 
