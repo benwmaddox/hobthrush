@@ -21,7 +21,7 @@
         "kind": "path",
         "path": "../text-validation"
       },
-      "content_sha256": "74af1815d3462fbde59e5ddcb84d20efebcc6f1706f710b988ad6b7d45d20d74",
+      "content_sha256": "a1f615275721f0134e2711773cca7c2ebc9350a3b3cb9c263b0cbc05aa1cce30",
       "managed_adapter": null,
       "dependencies": {}
     }

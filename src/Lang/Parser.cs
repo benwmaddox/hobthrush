@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 
 internal static class Lexer
@@ -67,6 +68,17 @@ internal static class Lexer
                 {
                     i++;
                     column++;
+                }
+
+                if (i + 3 <= source.Length &&
+                    (source.AsSpan(i, 3).SequenceEqual("i64") ||
+                     source.AsSpan(i, 3).SequenceEqual("u32") ||
+                     source.AsSpan(i, 3).SequenceEqual("u64")) &&
+                    (i + 3 == source.Length ||
+                     !(char.IsLetterOrDigit(source[i + 3]) || source[i + 3] == '_')))
+                {
+                    i += 3;
+                    column += 3;
                 }
                 tokens.Add(new Token("number", source[start..i], startLine, startColumn, file));
                 continue;
@@ -1412,9 +1424,7 @@ internal sealed class Parser
         if (token.Kind == "number")
         {
             Take();
-            if (!int.TryParse(token.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var value))
-                Fail(token, "E_TYPE_MISMATCH", "Integer literal is outside i32 range");
-            return ParsePostfix(RegisterExpression(new NumberExpr(token, value)));
+            return ParsePostfix(RegisterExpression(ParseIntegerLiteral(token, token)));
         }
         if (Is("-"))
         {
@@ -1422,21 +1432,25 @@ internal sealed class Parser
             if (Current.Kind == "number")
             {
                 var magnitudeToken = Take();
-                if (!uint.TryParse(magnitudeToken.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var magnitude)
-                    || magnitude > 2147483648u)
+                var literalKind = IntegerLiteralKindFromToken(magnitudeToken);
+                if (literalKind is IntegerLiteralKind.I32 or IntegerLiteralKind.I64)
                 {
-                    Fail(magnitudeToken, "E_TYPE_MISMATCH", "Integer literal is outside i32 range");
+                    var negativeLiteral = ParseIntegerLiteral(magnitudeToken, minus, negative: true);
+                    return ParsePostfix(RegisterExpression(negativeLiteral));
                 }
-                var value = magnitude == 2147483648u ? int.MinValue : -(int)magnitude;
-                return ParsePostfix(RegisterExpression(new NumberExpr(minus, value)));
+
+                var positiveLiteral = RegisterExpression(ParseIntegerLiteral(magnitudeToken, magnitudeToken));
+                var unaryDepth = ExpressionDepth(positiveLiteral) + 1;
+                if (unaryDepth > MaximumNestingDepth)
+                    Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
+                return ParsePostfix(RegisterExpression(new UnaryExpr(minus, "-", positiveLiteral), unaryDepth));
             }
 
             var operand = ParseExpr(6, allowStructConstruction);
-            var zero = RegisterExpression(new NumberExpr(minus, 0));
-            var depth = Math.Max(ExpressionDepth(zero), ExpressionDepth(operand)) + 1;
+            var depth = ExpressionDepth(operand) + 1;
             if (depth > MaximumNestingDepth)
                 Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
-            var negated = RegisterExpression(new BinaryExpr(minus, "-", zero, operand), depth);
+            var negated = RegisterExpression(new UnaryExpr(minus, "-", operand), depth);
             return ParsePostfix(negated);
         }
         if (token.Kind == "text")
@@ -1519,6 +1533,63 @@ internal sealed class Parser
         Fail(token, "E_SYNTAX", $"Expected expression, found '{token.Text}'");
         throw new ParseFailure();
     }
+
+    private static IntegerLiteralKind IntegerLiteralKindFromToken(Token token) =>
+        token.Text.EndsWith("i64", StringComparison.Ordinal)
+            ? IntegerLiteralKind.I64
+            : token.Text.EndsWith("u32", StringComparison.Ordinal)
+                ? IntegerLiteralKind.U32
+                : token.Text.EndsWith("u64", StringComparison.Ordinal)
+                    ? IntegerLiteralKind.U64
+                    : IntegerLiteralKind.I32;
+
+    private NumberExpr ParseIntegerLiteral(Token literalAt, Token expressionAt, bool negative = false)
+    {
+        var kind = IntegerLiteralKindFromToken(literalAt);
+        var suffixLength = kind == IntegerLiteralKind.I32 ? 0 : 3;
+        var digitsLength = literalAt.Text.Length - suffixLength;
+        var significantStart = 0;
+        while (significantStart < digitsLength && literalAt.Text[significantStart] == '0')
+            significantStart++;
+        var significantDigits = digitsLength - significantStart;
+        var maximumDigits = kind switch
+        {
+            IntegerLiteralKind.I32 => 10,
+            IntegerLiteralKind.I64 => 19,
+            IntegerLiteralKind.U32 => 10,
+            IntegerLiteralKind.U64 => 20,
+            _ => throw new InvalidOperationException("Unknown integer literal kind")
+        };
+        if (significantDigits > maximumDigits)
+            Fail(literalAt, "E_TYPE_MISMATCH", $"Integer literal is outside {IntegerLiteralName(kind)} range");
+        var magnitude = BigInteger.Zero;
+        if (significantDigits != 0 &&
+            !BigInteger.TryParse(literalAt.Text.AsSpan(significantStart, significantDigits), NumberStyles.None, CultureInfo.InvariantCulture, out magnitude))
+            Fail(literalAt, "E_TYPE_MISMATCH", $"Integer literal is outside {IntegerLiteralName(kind)} range");
+
+        var value = negative ? -magnitude : magnitude;
+        var (minimum, maximum) = kind switch
+        {
+            IntegerLiteralKind.I32 => (new BigInteger(int.MinValue), new BigInteger(int.MaxValue)),
+            IntegerLiteralKind.I64 => (new BigInteger(long.MinValue), new BigInteger(long.MaxValue)),
+            IntegerLiteralKind.U32 => (BigInteger.Zero, new BigInteger(uint.MaxValue)),
+            IntegerLiteralKind.U64 => (BigInteger.Zero, new BigInteger(ulong.MaxValue)),
+            _ => throw new InvalidOperationException("Unknown integer literal kind")
+        };
+        if (value < minimum || value > maximum)
+            Fail(literalAt, "E_TYPE_MISMATCH", $"Integer literal is outside {IntegerLiteralName(kind)} range");
+
+        return new NumberExpr(expressionAt, value.ToString(CultureInfo.InvariantCulture), kind);
+    }
+
+    private static string IntegerLiteralName(IntegerLiteralKind kind) => kind switch
+    {
+        IntegerLiteralKind.I32 => "i32",
+        IntegerLiteralKind.I64 => "i64",
+        IntegerLiteralKind.U32 => "u32",
+        IntegerLiteralKind.U64 => "u64",
+        _ => throw new InvalidOperationException("Unknown integer literal kind")
+    };
 
     private bool IsTypeArgumentListFollowedByStructBrace()
     {

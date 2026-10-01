@@ -1,0 +1,55 @@
+module fixture::invalid_wide_integer_types;
+
+fn takes_i64(value: i64) -> i64 effects {} { return value; }
+
+fn mixed_arithmetic(left: i64, right: u32) -> i64 effects {} {
+    return left + right;
+}
+
+fn mixed_comparison(left: i64, right: u32) -> bool effects {} {
+    return left < right;
+}
+
+fn mixed_equality(left: i64, right: u32) -> bool effects {} {
+    return left == right;
+}
+
+fn mixed_initialization() -> i64 effects {} {
+    let value: i64 = 1u32;
+    return value;
+}
+
+fn mixed_return() -> i64 effects {} {
+    return 1u32;
+}
+
+fn mixed_call() -> i64 effects {} {
+    return self::fixture::invalid_wide_integer_types::takes_i64(1u32);
+}
+
+fn unsigned_negation(value: u64) -> u64 effects {} {
+    return -value;
+}
+
+fn reserved_wide_type_parameters<i64, u32, u64>() -> i32 effects {} {
+    return 0;
+}
+
+union ScanError { Failed }
+
+fn run(args: self::fixture::invalid_wide_integer_types::ScanArgs) -> Result<Text, self::fixture::invalid_wide_integer_types::ScanError> effects {} {
+    return Ok("checked");
+}
+
+fn describe_error(error: self::fixture::invalid_wide_integer_types::ScanError) -> Text effects {} {
+    return match error {
+        self::fixture::invalid_wide_integer_types::ScanError.Failed => "scan failed",
+    };
+}
+
+command scan {
+    help "Scan with a wide integer limit.";
+    argument limit: u32 help "Maximum item count.";
+    handler: self::fixture::invalid_wide_integer_types::run;
+    error: self::fixture::invalid_wide_integer_types::describe_error;
+}

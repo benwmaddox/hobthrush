@@ -1,0 +1,20 @@
+module fixture::invalid_wide_integer_codecs;
+
+pub struct Parameters { value: u64 }
+pub struct Row { value: u64 }
+pub union Reply { Found(self::fixture::invalid_wide_integer_codecs::Row), Empty }
+
+pub fn read(db: DbRead, parameters: self::fixture::invalid_wide_integer_codecs::Parameters) -> Result<Option<self::fixture::invalid_wide_integer_codecs::Row>, DbError> effects { db.read } {
+    return db.query_one("SELECT value FROM records", parameters);
+}
+
+fn route_reply() -> self::fixture::invalid_wide_integer_codecs::Reply effects {} {
+    return self::fixture::invalid_wide_integer_codecs::Reply.Empty;
+}
+
+route GET "/items/{id}" {
+    path id: i64;
+    handler: self::fixture::invalid_wide_integer_codecs::route_reply;
+    response Found: 200 json self::fixture::invalid_wide_integer_codecs::Row;
+    response Empty: 404;
+}

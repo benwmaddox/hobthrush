@@ -578,5 +578,45 @@
       "E_TYPE_MISMATCH",
       "E_UNSUPPORTED"
     ]
+  },
+  {
+    "file": "107-valid-checked-wide-integers.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "108-invalid-wide-integer-literal-range.lang",
+    "status": "active",
+    "expectedCodes": ["E_TYPE_MISMATCH"]
+  },
+  {
+    "file": "109-invalid-wide-integer-types.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_COMMAND_DECL",
+      "E_NAME_DUPLICATE",
+      "E_NAME_DUPLICATE",
+      "E_NAME_DUPLICATE",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
+  },
+  {
+    "file": "110-invalid-wide-integer-codecs.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_ROUTE_BINDING",
+      "E_ROUTE_CODEC_UNSUPPORTED",
+      "E_DB_CODEC_UNSUPPORTED",
+      "E_DB_CODEC_UNSUPPORTED"
+    ]
   }
 ]
