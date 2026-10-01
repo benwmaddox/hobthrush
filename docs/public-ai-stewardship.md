@@ -97,6 +97,8 @@ An AI-accepted review may advance to a versioned RFC. Design funding pays for th
 
 ### 4. Implementation escrow
 
+AI systems may independently propose new features and offer technically accepted proposals for sponsorship. They must not automatically allocate maintenance funds or reserves to implement new features. New-feature implementation requires explicit feature-specific funding.
+
 Implementation funding should be held against defined milestones. For a new feature, most feature-specific funding should support ongoing maintenance; the exact share and maintenance period remain open. This allocation principle does not apply to existing bug fixes. Remaining funding may cover:
 
 - implementation;
@@ -141,7 +143,7 @@ Recurring sponsorship should primarily support work shared by all users:
 - compatibility and performance measurements;
 - a substantial reserve for future AI building work, including urgent defects and service interruptions.
 
-Within ongoing maintenance funding, AI systems may initiate correctness fixes and internal compiler refinements with a monthly spending cap of 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. When included subscription tokens have no extra cost and no other work is pending, use them for eligible maintenance work. Apply the normal tests, independent AI reviews, compiler constraints, and release gates to this proactive work. Authority to initiate new public capabilities remains an open question.
+Within ongoing maintenance funding, AI systems may initiate correctness fixes and internal compiler refinements with a monthly spending cap of 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. When included subscription tokens have no extra cost and no other work is pending, use them for eligible maintenance work. Apply the normal tests, independent AI reviews, compiler constraints, and release gates to this proactive work. This maintenance allowance does not fund new features automatically.
 
 Sponsors may be acknowledged using conventional sponsor tiers. A tier must not grant votes proportional to money, private language behavior, guaranteed roadmap placement, or technical veto power.
 

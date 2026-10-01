@@ -29,7 +29,9 @@ For a new feature, most feature-specific payment should support ongoing maintena
 
 AI systems may initiate correctness fixes and internal compiler refinements using ongoing maintenance funding. Monthly spending on this proactive work is capped at 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. If an active subscription includes tokens that can be used at no extra cost and no other work is pending, use them for eligible maintenance work.
 
-Proactive changes remain subject to tests, independent AI reviews, compiler constraints, and release gates. Authority to initiate new public capabilities remains an open question.
+Proactive changes remain subject to tests, independent AI reviews, compiler constraints, and release gates.
+
+AI systems may independently propose new public capabilities. Proposals must pass the normal goal-fit and technical review before being offered for sponsorship. AI must not automatically allocate maintenance funds or reserves to new features; implementation requires explicit feature-specific funding. The proactive maintenance allowance covers correctness fixes and internal compiler refinements.
 
 ## Scope and evolution
 
@@ -51,7 +53,6 @@ Proactive changes remain subject to tests, independent AI reviews, compiler cons
 
 These questions remain open and do not override the settled decisions above:
 
-- What authority, if any, should AI systems have to initiate new public capabilities?
 - What criteria should make an AI system stop, defer, or reject a proposed change?
 - How should eligible work be ranked within each priority class?
 - What exact funding share and maintenance period should apply to feature-specific sponsorship?
