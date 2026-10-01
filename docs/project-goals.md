@@ -31,7 +31,9 @@ Hold back 30% of sponsored feature funds for deep independent AI reviews at one 
 
 ## Proactive work and reserve
 
-AI systems may initiate correctness fixes and internal compiler refinements using ongoing maintenance funding. Monthly spending on this proactive work is capped at 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. If an active subscription includes tokens that can be used at no extra cost and no other work is pending, use them for eligible maintenance work.
+Treat general reserves as a fund that makes bounded monthly distributions for ongoing maintenance, core hosting, and other shared needs. The monthly spending cap is `max(1% of trailing twelve-month project revenue, 3% of current general reserves)`. Feature-specific spending, including the 30% review-and-remediation reserve, is funded separately and does not count against this general-needs cap or form part of the general reserves used in its calculation. Keep a substantial general reserve for future AI building work.
+
+AI systems may initiate correctness fixes and internal compiler refinements within the general maintenance budget. If an active subscription includes tokens that can be used at no extra cost and no other work is pending, use them for eligible maintenance work.
 
 Proactive changes remain subject to tests, independent AI reviews, compiler constraints, and release gates.
 
@@ -60,4 +62,4 @@ These questions remain open and do not override the settled decisions above:
 - What criteria should make an AI system stop, defer, or reject a proposed change?
 - How should eligible work be ranked within each priority class?
 - Beyond the confirmed 30% reserve, how should feature sponsorship be split between implementation and ongoing care? How should the review reserve be split across the three reviews and fixes?
-- Should maintenance funds have a minimum reserve balance? How should revenue be counted for the monthly cap, and may unused spending capacity carry forward?
+- Should maintenance funds have a minimum reserve balance? How should revenue and current general reserves be measured for the monthly cap, and may unused spending capacity carry forward?

@@ -147,7 +147,9 @@ Recurring sponsorship should primarily support work shared by all users:
 - compatibility and performance measurements;
 - a substantial reserve for future AI building work, including urgent defects and service interruptions.
 
-Within ongoing maintenance funding, AI systems may initiate correctness fixes and internal compiler refinements with a monthly spending cap of 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. When included subscription tokens have no extra cost and no other work is pending, use them for eligible maintenance work. Apply the normal tests, independent AI reviews, compiler constraints, and release gates to this proactive work. This maintenance allowance does not fund new features automatically.
+General reserves provide bounded monthly distributions for ongoing maintenance, core hosting, and other shared needs. The monthly spending cap is `max(1% of trailing twelve-month project revenue, 3% of current general reserves)`. Feature-specific spending and its 30% review-and-remediation reserve are separate: they do not count against this cap or form part of the general reserves used to calculate it. Keep a substantial general reserve for future AI building work.
+
+AI systems may initiate correctness fixes and internal compiler refinements within the general maintenance budget. When included subscription tokens have no extra cost and no other work is pending, use them for eligible maintenance work. Apply the normal tests, independent AI reviews, compiler constraints, and release gates to this proactive work. This maintenance allowance does not fund new features automatically.
 
 Sponsors may be acknowledged using conventional sponsor tiers. A tier must not grant votes proportional to money, private language behavior, guaranteed roadmap placement, or technical veto power.
 
