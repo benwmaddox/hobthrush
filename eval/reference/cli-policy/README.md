@@ -1,6 +1,6 @@
 # Policy Gate
 
-Run `lang run eval/reference/cli-policy -- decide samples/policy.txt` to
+Run `hob run eval/reference/cli-policy -- decide samples/policy.txt` to
 evaluate a policy file. The command ignores empty lines, surrounding
 whitespace, and lines other than the exact uppercase markers below.
 

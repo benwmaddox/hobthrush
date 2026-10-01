@@ -1,0 +1,29 @@
+{
+  "schema_version": 3,
+  "root": {
+    "name": "web-example",
+    "version": "0.1.0",
+    "manifest_sha256": "ecf99c170ee9184f4e242e064dcee707342ecf64d7c051638e446d45d6a37b0b",
+    "source": {
+      "kind": "root"
+    },
+    "managed_adapter": null,
+    "dependencies": {
+      "validation": "../text-validation"
+    }
+  },
+  "packages": [
+    {
+      "path": "../text-validation",
+      "name": "text-validation",
+      "version": "0.1.0",
+      "source": {
+        "kind": "path",
+        "path": "../text-validation"
+      },
+      "content_sha256": "6891b78d0c8644a62dab072b65b77f92fa54ec8199658780547573961fd729a4",
+      "managed_adapter": null,
+      "dependencies": {}
+    }
+  ]
+}

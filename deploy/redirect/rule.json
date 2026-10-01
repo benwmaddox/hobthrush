@@ -1,0 +1,16 @@
+{
+  "ref": "hobthrush_github_redirect",
+  "description": "Temporary GitHub redirect",
+  "expression": "(http.host in {\"hobthrush.com\" \"www.hobthrush.com\"})",
+  "action": "redirect",
+  "enabled": true,
+  "action_parameters": {
+    "from_value": {
+      "target_url": {
+        "value": "https://github.com/benwmaddox/hobthrush"
+      },
+      "status_code": 302,
+      "preserve_query_string": false
+    }
+  }
+}

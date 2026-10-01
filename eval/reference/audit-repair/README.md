@@ -1,6 +1,6 @@
 # First Line Reader
 
-Run `lang run eval/reference/audit-repair -- first samples/records.txt` to
+Run `hob run eval/reference/audit-repair -- first samples/records.txt` to
 print the first nonempty line after trimming it. The command prints `EMPTY`
 when the file contains no nonempty lines. Read failures are reported as
 `Unable to read input file`.

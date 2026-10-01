@@ -21,8 +21,8 @@ The directories in `eval/reference` are known-good expected-output packages used
 Build the Release solution first, then run the grader:
 
 ```sh
-dotnet build lang.slnx --configuration Release --nologo
-dotnet run --project tests/Lang.OutcomeEval/Lang.OutcomeEval.csproj --configuration Release --no-build -- --compiler src/Lang/bin/Release/net10.0/lang.dll --results artifacts/outcome-evals --agent-model reference-fixture --agent-revision local-checkout --agent-tool outcome-eval --verify-seeds
+dotnet build hobthrush.slnx --configuration Release --nologo
+dotnet run --project tests/Hob.OutcomeEval/Hob.OutcomeEval.csproj --configuration Release --no-build -- --compiler src/Hob/bin/Release/net10.0/hob.dll --results artifacts/outcome-evals --agent-model reference-fixture --agent-revision local-checkout --agent-tool outcome-eval --verify-seeds
 ```
 
 The three identity values above are the approved CI fixture sentinels. The grader writes `candidate_agent.identity_kind` as `fixture` only when all three are exactly `reference-fixture`, `local-checkout`, and `outcome-eval`; if any value differs, it records `agent`. For a real run, supply the actual model ID, model/build revision, and tool/version. These values are required provenance supplied by the caller; the grader does not infer or validate them.
@@ -30,7 +30,7 @@ The three identity values above are the approved CI fixture sentinels. The grade
 To supply candidate workspaces, append one or more overrides, for example:
 
 ```sh
-dotnet run --project tests/Lang.OutcomeEval/Lang.OutcomeEval.csproj --configuration Release --no-build -- --compiler src/Lang/bin/Release/net10.0/lang.dll --results artifacts/outcome-evals/run-01 --agent-model provider:model-id --agent-revision model-build-or-commit --agent-tool agent-tool-and-version --candidate cli-policy=path/to/cli-policy --candidate web-greeting=path/to/web-greeting --candidate audit-repair=path/to/audit-repair --verify-seeds
+dotnet run --project tests/Hob.OutcomeEval/Hob.OutcomeEval.csproj --configuration Release --no-build -- --compiler src/Hob/bin/Release/net10.0/hob.dll --results artifacts/outcome-evals/run-01 --agent-model provider:model-id --agent-revision model-build-or-commit --agent-tool agent-tool-and-version --candidate cli-policy=path/to/cli-policy --candidate web-greeting=path/to/web-greeting --candidate audit-repair=path/to/audit-repair --verify-seeds
 ```
 
 Each override uses one `scenario-id=directory` value. An unknown or repeated scenario ID, missing required argument, invalid compiler path, or other configuration error exits with code `2`. Exit code `0` means all selected candidates and, when enabled, all seed mutations passed. Exit code `1` means one or more checks/seeds failed or an evaluation error occurred.

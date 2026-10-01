@@ -1,5 +1,0 @@
-<Solution>
-  <Project Path="src/Lang/Lang.csproj" />
-  <Project Path="tests/Lang.IntegrationTests/Lang.IntegrationTests.csproj" />
-  <Project Path="tests/Lang.OutcomeEval/Lang.OutcomeEval.csproj" />
-</Solution>

@@ -1,6 +1,6 @@
 # Task
 
-Build a `lang` command-line package called `policy-gate`. It must accept
+Build a `hob` command-line package called `policy-gate`. It must accept
 `decide FILE`, read a UTF-8 text file and evaluate its lines, and ignore blank
 lines and whitespace around each line. The exact line `GRANT` is a grant and
 the exact line `REVOKE` is a revocation; ignore all other lines and casing.

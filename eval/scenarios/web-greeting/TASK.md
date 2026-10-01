@@ -1,6 +1,6 @@
 # Task
 
-Build a managed `lang` web package for one saved greeting. `GET /health`
+Build a managed `hob` web package for one saved greeting. `GET /health`
 returns 200. `GET /api/greeting` returns 404 before a greeting exists and
 returns the saved greeting as JSON afterward. `POST /api/greeting` accepts a
 JSON object with `name` and `city` text fields. Trim both values; return 400

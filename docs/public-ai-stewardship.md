@@ -4,7 +4,7 @@
 
 ## Purpose
 
-`lang` is being designed for software work in which a person specifies an outcome and agents produce implementation and evidence within explicit constraints. The project could eventually use the same operating model for its own maintenance: public requests, agent-produced analysis and implementation, independent review, and evidence-backed releases.
+Hobthrush is being designed for software work in which a person specifies an outcome and agents produce implementation and evidence within explicit constraints. The project could eventually use the same operating model for its own maintenance: public requests, agent-produced analysis and implementation, independent review, and evidence-backed releases.
 
 The useful experiment is transparent software stewardship with ordinary sponsorship. It is not a financial product. The project would not issue cryptocurrency, tokens, equity, tradable governance rights, revenue-sharing interests, or promises of financial return.
 
@@ -44,7 +44,7 @@ Changing the charter should require a public RFC, independent review, a compatib
 
 ## Operating roles
 
-The work should be divided between explicit roles. Separate agents or isolated runs may fill these roles.
+The work should be divided between explicit roles. AI systems perform technical design, implementation, testing, and independent review; separate AI systems or isolated runs fill the reviewing roles. People collaborate on goals, priorities, and consequential decisions at a high level while AI systems carry out day-to-day changes.
 
 | Role | Responsibility | May not do alone |
 | --- | --- | --- |
@@ -137,6 +137,8 @@ Recurring sponsorship should primarily support work shared by all users:
 - a reserve for urgent defects and service interruptions.
 
 Sponsors may be acknowledged using conventional sponsor tiers. A tier must not grant votes proportional to money, private language behavior, guaranteed roadmap placement, or technical veto power.
+
+Up to 10% of project funds may support human project management. Record these allocations in the public accounts alongside AI execution, review, and infrastructure costs.
 
 ## Public accounting
 

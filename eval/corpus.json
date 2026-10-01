@@ -15,10 +15,10 @@
           "id": "revoke-precedence-bug",
           "kind": "semantic",
           "expected_check_id": "cli-policy.priority-order",
-          "files": ["src/app/policy.lang"],
+          "files": ["src/app/policy.hob"],
           "replace_exactly": [
             {
-              "path": "src/app/policy.lang",
+              "path": "src/app/policy.hob",
               "old": "    if revoked {\n        return Ok(\"REVOKED\");\n    }\n    if granted {\n        return Ok(\"GRANTED\");\n    }\n    return Ok(\"UNDECIDED\");",
               "new": "    if granted {\n        return Ok(\"GRANTED\");\n    }\n    if revoked {\n        return Ok(\"REVOKED\");\n    }\n    return Ok(\"UNDECIDED\");"
             }
@@ -61,10 +61,10 @@
           "id": "untrimmed-city",
           "kind": "semantic",
           "expected_check_id": "web-greeting.trim-and-persistence",
-          "files": ["src/app/main.lang"],
+          "files": ["src/app/main.hob"],
           "replace_exactly": [
             {
-              "path": "src/app/main.lang",
+              "path": "src/app/main.hob",
               "old": "    let city: Text = request.city.trim();",
               "new": "    let city: Text = request.city;"
             }
@@ -110,15 +110,15 @@
           "id": "missing-fs-read-grant-and-effect-bound",
           "kind": "constraint",
           "expected_check_id": "audit-repair.expected-diagnostics",
-          "files": ["lang.toml", "src/app/reader.lang"],
+          "files": ["hob.toml", "src/app/reader.hob"],
           "replace_exactly": [
             {
-              "path": "lang.toml",
+              "path": "hob.toml",
               "old": "fs.read = \"allow\"\n",
               "new": ""
             },
             {
-              "path": "src/app/reader.lang",
+              "path": "src/app/reader.hob",
               "old": ") -> Result<Text, self::app::main::ReadFailure> effects { fs.read } {",
               "new": ") -> Result<Text, self::app::main::ReadFailure> effects {} {"
             }

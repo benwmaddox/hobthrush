@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS greeting (
 );
 
 INSERT INTO greeting (id, name, city)
-VALUES (1, 'Hello from lang', 'London')
+VALUES (1, 'Hello from hob', 'London')
 ON CONFLICT(id) DO NOTHING;

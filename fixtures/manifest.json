@@ -1,121 +1,121 @@
 [
   {
-    "file": "01-valid-constant.lang",
+    "file": "01-valid-constant.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "02-valid-parameter.lang",
+    "file": "02-valid-parameter.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "03-valid-local.lang",
+    "file": "03-valid-local.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "04-missing-module.lang",
+    "file": "04-missing-module.hob",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "05-missing-semicolon.lang",
+    "file": "05-missing-semicolon.hob",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "06-duplicate-function.lang",
+    "file": "06-duplicate-function.hob",
     "status": "active",
     "expectedCode": "E_NAME_DUPLICATE"
   },
   {
-    "file": "07-unresolved-name.lang",
+    "file": "07-unresolved-name.hob",
     "status": "active",
     "expectedCode": "E_NAME_UNRESOLVED"
   },
   {
-    "file": "08-wrong-arity.lang",
+    "file": "08-wrong-arity.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "09-literal-overflow.lang",
+    "file": "09-literal-overflow.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "10-missing-return.lang",
+    "file": "10-missing-return.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "11-union-match.lang",
+    "file": "11-union-match.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "12-match-missing-arm.lang",
+    "file": "12-match-missing-arm.hob",
     "status": "active",
     "expectedCode": "E_MATCH_NONEXHAUSTIVE"
   },
   {
-    "file": "13-option-mismatch.lang",
+    "file": "13-option-mismatch.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "14-effect-transitive.lang",
+    "file": "14-effect-transitive.hob",
     "status": "active",
     "expectedCode": "E_EFFECT_EXCEEDED"
   },
   {
-    "file": "15-capability-missing.lang",
+    "file": "15-capability-missing.hob",
     "status": "active",
     "expectedCode": "E_CAPABILITY_MISSING"
   },
   {
-    "file": "16-resource-escape.lang",
+    "file": "16-resource-escape.hob",
     "status": "active",
     "expectedCode": "E_RESOURCE_ESCAPE"
   },
   {
-    "file": "17-cli-command.lang",
+    "file": "17-cli-command.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "18-route-mapping.lang",
+    "file": "18-route-mapping.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "19-route-missing-mapping.lang",
+    "file": "19-route-missing-mapping.hob",
     "status": "active",
     "expectedCode": "E_ROUTE_RESPONSE_MISSING"
   },
   {
-    "file": "20-null-rejected.lang",
+    "file": "20-null-rejected.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "21-payload-mismatch.lang",
+    "file": "21-payload-mismatch.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "22-valid-structs.lang",
+    "file": "22-valid-structs.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "23-struct-field-type-mismatch.lang",
+    "file": "23-struct-field-type-mismatch.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "24-struct-invalid-initializers.lang",
+    "file": "24-struct-invalid-initializers.hob",
     "status": "active",
     "expectedCode": null,
     "expectedCodes": [
@@ -125,387 +125,387 @@
     ]
   },
   {
-    "file": "25-struct-direct-recursion.lang",
+    "file": "25-struct-direct-recursion.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "26-control-flow-text.lang",
+    "file": "26-control-flow-text.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "27-unreachable-after-if.lang",
+    "file": "27-unreachable-after-if.hob",
     "status": "active",
     "expectedCode": "E_UNREACHABLE"
   },
   {
-    "file": "28-comparison-type-mismatch.lang",
+    "file": "28-comparison-type-mismatch.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "29-if-missing-return.lang",
+    "file": "29-if-missing-return.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "30-if-branch-local-escape.lang",
+    "file": "30-if-branch-local-escape.hob",
     "status": "active",
     "expectedCode": "E_NAME_UNRESOLVED"
   },
   {
-    "file": "31-duplicate-generic-parameter.lang",
+    "file": "31-duplicate-generic-parameter.hob",
     "status": "active",
     "expectedCode": "E_NAME_DUPLICATE"
   },
   {
-    "file": "32-result-only-generic-parameter.lang",
+    "file": "32-result-only-generic-parameter.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "33-repeated-generic-argument-conflict.lang",
+    "file": "33-repeated-generic-argument-conflict.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "34-generic-body-type-misuse.lang",
+    "file": "34-generic-body-type-misuse.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "35-malformed-generic-declaration.lang",
+    "file": "35-malformed-generic-declaration.hob",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "36-constructor-generic-inference.lang",
+    "file": "36-constructor-generic-inference.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "37-valid-test.lang",
+    "file": "37-valid-test.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "38-test-assert-non-bool.lang",
+    "file": "38-test-assert-non-bool.hob",
     "status": "active",
     "expectedCode": "E_TYPE_MISMATCH"
   },
   {
-    "file": "39-test-return-disallowed.lang",
+    "file": "39-test-return-disallowed.hob",
     "status": "active",
     "expectedCode": "E_UNSUPPORTED"
   },
   {
-    "file": "40-test-if-disallowed.lang",
+    "file": "40-test-if-disallowed.hob",
     "status": "active",
     "expectedCode": "E_UNSUPPORTED"
   },
   {
-    "file": "41-test-duplicate-name.lang",
+    "file": "41-test-duplicate-name.hob",
     "status": "active",
     "expectedCode": "E_NAME_DUPLICATE"
   },
   {
-    "file": "42-test-missing-assert.lang",
+    "file": "42-test-missing-assert.hob",
     "status": "active",
     "expectedCode": "E_SYNTAX"
   },
   {
-    "file": "43-valid-list-iteration.lang",
+    "file": "43-valid-list-iteration.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "44-immutable-assignment.lang",
+    "file": "44-immutable-assignment.hob",
     "status": "active",
     "expectedCodes": ["E_ASSIGN_IMMUTABLE"]
   },
   {
-    "file": "45-effect-in-loop.lang",
+    "file": "45-effect-in-loop.hob",
     "status": "active",
     "expectedCodes": ["E_EFFECT_EXCEEDED"]
   },
   {
-    "file": "46-loop-may-not-return.lang",
+    "file": "46-loop-may-not-return.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "47-list-resource-escape.lang",
+    "file": "47-list-resource-escape.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "48-transitive-fs-write-effect.lang",
+    "file": "48-transitive-fs-write-effect.hob",
     "status": "active",
     "expectedCodes": ["E_EFFECT_EXCEEDED"]
   },
   {
-    "file": "49-valid-map.lang",
+    "file": "49-valid-map.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "50-map-empty-needs-context.lang",
+    "file": "50-map-empty-needs-context.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "51-map-key-type.lang",
+    "file": "51-map-key-type.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "52-map-arity.lang",
+    "file": "52-map-arity.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH", "E_TYPE_MISMATCH"]
   },
   {
-    "file": "53-map-member-arguments.lang",
+    "file": "53-map-member-arguments.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH", "E_TYPE_MISMATCH"]
   },
   {
-    "file": "54-map-unknown-member.lang",
+    "file": "54-map-unknown-member.hob",
     "status": "active",
     "expectedCodes": ["E_FIELD_UNKNOWN", "E_FIELD_UNKNOWN"]
   },
   {
-    "file": "55-map-resource-direct.lang",
+    "file": "55-map-resource-direct.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "56-map-resource-nested.lang",
+    "file": "56-map-resource-nested.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "57-map-resource-generic.lang",
+    "file": "57-map-resource-generic.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "58-structural-equality.lang",
+    "file": "58-structural-equality.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "59-generic-equality-needs-bound.lang",
+    "file": "59-generic-equality-needs-bound.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "60-resource-equality-rejected.lang",
+    "file": "60-resource-equality-rejected.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "61-lambda-value-capture.lang",
+    "file": "61-lambda-value-capture.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "62-lambda-var-capture-rejected.lang",
+    "file": "62-lambda-var-capture-rejected.hob",
     "status": "active",
     "expectedCodes": ["E_CLOSURE_CAPTURE_MUTABLE"]
   },
   {
-    "file": "63-lambda-resource-capture-rejected.lang",
+    "file": "63-lambda-resource-capture-rejected.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "64-lambda-generic-capture-rejected.lang",
+    "file": "64-lambda-generic-capture-rejected.hob",
     "status": "active",
     "expectedCodes": ["E_UNSUPPORTED"]
   },
   {
-    "file": "65-valid-generic-structs.lang",
+    "file": "65-valid-generic-structs.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "66-generic-struct-arity.lang",
+    "file": "66-generic-struct-arity.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "67-generic-struct-unbound-parameter.lang",
+    "file": "67-generic-struct-unbound-parameter.hob",
     "status": "active",
     "expectedCodes": ["E_NAME_UNRESOLVED"]
   },
   {
-    "file": "68-generic-struct-field-mismatch.lang",
+    "file": "68-generic-struct-field-mismatch.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "69-generic-struct-recursion-cycle.lang",
+    "file": "69-generic-struct-recursion-cycle.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "70-generic-struct-recursion-growth.lang",
+    "file": "70-generic-struct-recursion-growth.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "71-generic-struct-function-conflict.lang",
+    "file": "71-generic-struct-function-conflict.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "72-generic-struct-resource-escape.lang",
+    "file": "72-generic-struct-resource-escape.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "73-generic-struct-equality-unbound.lang",
+    "file": "73-generic-struct-equality-unbound.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "74-valid-generic-unions.lang",
+    "file": "74-valid-generic-unions.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "75-generic-union-arity.lang",
+    "file": "75-generic-union-arity.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "76-generic-union-unbound-parameter.lang",
+    "file": "76-generic-union-unbound-parameter.hob",
     "status": "active",
     "expectedCodes": ["E_NAME_UNRESOLVED"]
   },
   {
-    "file": "77-generic-union-payload-mismatch.lang",
+    "file": "77-generic-union-payload-mismatch.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "78-generic-union-function-conflict.lang",
+    "file": "78-generic-union-function-conflict.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "79-generic-union-recursion-growth.lang",
+    "file": "79-generic-union-recursion-growth.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "80-generic-union-resource-escape.lang",
+    "file": "80-generic-union-resource-escape.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE", "E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "81-generic-union-match-missing-arm.lang",
+    "file": "81-generic-union-match-missing-arm.hob",
     "status": "active",
     "expectedCodes": ["E_MATCH_NONEXHAUSTIVE"]
   },
   {
-    "file": "82-generic-union-route-reply.lang",
+    "file": "82-generic-union-route-reply.hob",
     "status": "active",
     "expectedCodes": ["E_ROUTE_HANDLER"]
   },
   {
-    "file": "83-generic-union-route-codec.lang",
+    "file": "83-generic-union-route-codec.hob",
     "status": "active",
     "expectedCodes": ["E_ROUTE_CODEC_UNSUPPORTED"]
   },
   {
-    "file": "84-generic-union-sqlite-codec.lang",
+    "file": "84-generic-union-sqlite-codec.hob",
     "status": "active",
     "expectedCodes": ["E_DB_CODEC_UNSUPPORTED", "E_DB_CODEC_UNSUPPORTED"]
   },
   {
-    "file": "85-generic-union-pattern-type-arguments.lang",
+    "file": "85-generic-union-pattern-type-arguments.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "86-valid-static-trait-scalar.lang",
+    "file": "86-valid-static-trait-scalar.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "87-valid-static-trait-closed-targets.lang",
+    "file": "87-valid-static-trait-closed-targets.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "88-valid-static-trait-private-signature.lang",
+    "file": "88-valid-static-trait-private-signature.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "89-valid-static-trait-phantom-resource.lang",
+    "file": "89-valid-static-trait-phantom-resource.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "90-valid-static-trait-unused-bound.lang",
+    "file": "90-valid-static-trait-unused-bound.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "91-trait-public-private-signature.lang",
+    "file": "91-trait-public-private-signature.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_VISIBILITY"]
   },
   {
-    "file": "92-trait-recursive-obligation.lang",
+    "file": "92-trait-recursive-obligation.hob",
     "status": "active",
     "expectedCodes": ["E_TRAIT_CONSTRAINT_RECURSIVE"]
   },
   {
-    "file": "93-trait-forwarded-cycle.lang",
+    "file": "93-trait-forwarded-cycle.hob",
     "status": "active",
     "expectedCodes": ["E_TRAIT_CONSTRAINT_RECURSIVE"]
   },
   {
-    "file": "94-trait-stored-resource.lang",
+    "file": "94-trait-stored-resource.hob",
     "status": "active",
     "expectedCodes": ["E_RESOURCE_ESCAPE"]
   },
   {
-    "file": "95-trait-duplicate-no-call.lang",
+    "file": "95-trait-duplicate-no-call.hob",
     "status": "active",
     "expectedCodes": ["E_TRAIT_IMPL_DUPLICATE"]
   },
   {
-    "file": "96-trait-impl-signature.lang",
+    "file": "96-trait-impl-signature.hob",
     "status": "active",
     "expectedCodes": ["E_TRAIT_IMPL_SIGNATURE"]
   },
   {
-    "file": "97-trait-impl-missing.lang",
+    "file": "97-trait-impl-missing.hob",
     "status": "active",
     "expectedCodes": ["E_TRAIT_IMPL_MISSING"]
   },
   {
-    "file": "98-valid-newtype-scalar.lang",
+    "file": "98-valid-newtype-scalar.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "99-valid-newtype-generic-values.lang",
+    "file": "99-valid-newtype-generic-values.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "100-valid-newtype-guarded-recursion.lang",
+    "file": "100-valid-newtype-guarded-recursion.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "101-invalid-newtype-implicit-assignment.lang",
+    "file": "101-invalid-newtype-implicit-assignment.hob",
     "status": "active",
     "expectedCodes": [
       "E_TYPE_MISMATCH",
@@ -518,7 +518,7 @@
     ]
   },
   {
-    "file": "102-invalid-newtype-resource.lang",
+    "file": "102-invalid-newtype-resource.hob",
     "status": "active",
     "expectedCodes": [
       "E_RESOURCE_ESCAPE",
@@ -539,7 +539,7 @@
     ]
   },
   {
-    "file": "103-invalid-newtype-direct-cycle.lang",
+    "file": "103-invalid-newtype-direct-cycle.hob",
     "status": "active",
     "expectedCodes": [
       "E_TYPE_MISMATCH",
@@ -548,17 +548,17 @@
     ]
   },
   {
-    "file": "104-invalid-newtype-generic-declaration.lang",
+    "file": "104-invalid-newtype-generic-declaration.hob",
     "status": "active",
     "expectedCodes": ["E_UNSUPPORTED"]
   },
   {
-    "file": "105-valid-immutable-bytes.lang",
+    "file": "105-valid-immutable-bytes.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "106-invalid-immutable-bytes-basics.lang",
+    "file": "106-invalid-immutable-bytes-basics.hob",
     "status": "active",
     "expectedCodes": [
       "E_NAME_DUPLICATE",
@@ -580,17 +580,17 @@
     ]
   },
   {
-    "file": "107-valid-checked-wide-integers.lang",
+    "file": "107-valid-checked-wide-integers.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "108-invalid-wide-integer-literal-range.lang",
+    "file": "108-invalid-wide-integer-literal-range.hob",
     "status": "active",
     "expectedCodes": ["E_TYPE_MISMATCH"]
   },
   {
-    "file": "109-invalid-wide-integer-types.lang",
+    "file": "109-invalid-wide-integer-types.hob",
     "status": "active",
     "expectedCodes": [
       "E_COMMAND_DECL",
@@ -610,7 +610,7 @@
     ]
   },
   {
-    "file": "110-invalid-wide-integer-codecs.lang",
+    "file": "110-invalid-wide-integer-codecs.hob",
     "status": "active",
     "expectedCodes": [
       "E_ROUTE_BINDING",
@@ -620,12 +620,12 @@
     ]
   },
   {
-    "file": "111-valid-f64-values.lang",
+    "file": "111-valid-f64-values.hob",
     "status": "active",
     "expectedCode": null
   },
   {
-    "file": "112-invalid-f64-types.lang",
+    "file": "112-invalid-f64-types.hob",
     "status": "active",
     "expectedCodes": [
       "E_TYPE_MISMATCH",
@@ -639,12 +639,12 @@
     ]
   },
   {
-    "file": "113-valid-unit-values.lang",
+    "file": "113-valid-unit-values.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "114-invalid-unit-boundaries.lang",
+    "file": "114-invalid-unit-boundaries.hob",
     "status": "active",
     "expectedCodes": [
       "E_NAME_DUPLICATE",
@@ -654,12 +654,12 @@
     ]
   },
   {
-    "file": "115-valid-result-propagation.lang",
+    "file": "115-valid-result-propagation.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "116-invalid-result-propagation.lang",
+    "file": "116-invalid-result-propagation.hob",
     "status": "active",
     "expectedCodes": [
       "E_TYPE_MISMATCH",
@@ -671,12 +671,12 @@
     ]
   },
   {
-    "file": "117-valid-integer-arithmetic-modes.lang",
+    "file": "117-valid-integer-arithmetic-modes.hob",
     "status": "active",
     "expectedCodes": []
   },
   {
-    "file": "118-invalid-integer-arithmetic-modes.lang",
+    "file": "118-invalid-integer-arithmetic-modes.hob",
     "status": "active",
     "expectedCodes": [
       "E_NAME_DUPLICATE",

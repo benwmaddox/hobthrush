@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/Hob/Hob.csproj" />
+  <Project Path="tests/Hob.IntegrationTests/Hob.IntegrationTests.csproj" />
+  <Project Path="tests/Hob.OutcomeEval/Hob.OutcomeEval.csproj" />
+</Solution>
