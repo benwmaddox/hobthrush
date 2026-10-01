@@ -2,6 +2,8 @@
 
 **Status:** Proposed public funding arrangements for the AI-operated development model. This document does not authorize fundraising or create financial obligations for the project.
 
+The [project goals record](project-goals.md) captures settled owner decisions and open questions; it is the basis for any future technical charter, and this funding proposal does not resolve the open questions.
+
 ## Purpose
 
 Hobthrush is designed for AI systems to control detailed software work: reading and changing code, evaluating requests, technical design, implementation, testing, independent review, acceptance, and maintenance within explicit goals, permissions, and mandatory gates. People set high-level goals and priorities; code inspection and intervention in individual changes are exceptional, not routine.
@@ -12,7 +14,7 @@ The useful experiment is transparent software stewardship with ordinary sponsors
 
 > Funding purchases bounded work. It does not purchase technical acceptance.
 
-A sponsor may fund review, design, implementation, verification, or shared maintenance. Payment does not guarantee that a proposal is accepted, merged, released, or retained. Technical decisions continue to follow the project charter, compatibility requirements, security boundaries, and demonstrated user value.
+A sponsor may directly fund a technically accepted bug fix or feature, promoting it into funded work and supplying capacity for implementation and maintenance. Sponsorship signals importance; AI review decides whether work should be accepted. Correctness bugs retain first priority. Payment does not guarantee that a proposal is accepted, merged, released, or retained.
 
 ## Principles
 
@@ -74,7 +76,7 @@ Anyone may submit an idea. AI triage categorizes it and records one of these out
 - eligible for technical review;
 - incompatible with the current charter.
 
-No payment is required for this stage. The resulting queue is prioritized against project goals, user need, compatibility, and maintenance cost; technically eligible work may be opened for sponsorship.
+No payment is required for this stage. Correctness bugs always outrank other work; other reliability work remains a high priority scaled by severity. AI prioritizes the remaining eligible work by project goals, user need, compatibility, and maintenance cost. Technically accepted fixes and features may be opened for direct sponsorship, which funds capacity rather than acceptance.
 
 ### 2. Sponsored technical review
 
@@ -95,14 +97,13 @@ An AI-accepted review may advance to a versioned RFC. Design funding pays for th
 
 ### 4. Implementation escrow
 
-Implementation funding should be held against defined milestones. A typical allocation covers:
+Implementation funding should be held against defined milestones. For a new feature, most feature-specific funding should support ongoing maintenance; the exact share and maintenance period remain open. This allocation principle does not apply to existing bug fixes. Remaining funding may cover:
 
 - implementation;
 - tests and evaluator changes;
 - documentation and migration work;
 - independent AI review;
-- release verification;
-- an explicit maintenance allocation when the change creates lasting cost.
+- release verification.
 
 Funds are released for completed deliverables, not for merge. Unspent restricted funds follow terms published before sponsorship, such as refund, sponsor-approved redirection, or transfer to the general maintenance fund.
 
@@ -138,7 +139,9 @@ Recurring sponsorship should primarily support work shared by all users:
 - release preparation and signing;
 - AI-led issue triage and documentation maintenance;
 - compatibility and performance measurements;
-- a reserve for urgent defects and service interruptions.
+- a substantial reserve for future AI building work, including urgent defects and service interruptions.
+
+Within ongoing maintenance funding, AI systems may initiate correctness fixes and internal compiler refinements with a monthly spending cap of 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. When included subscription tokens have no extra cost and no other work is pending, use them for eligible maintenance work. Apply the normal tests, independent AI reviews, compiler constraints, and release gates to this proactive work. Authority to initiate new public capabilities remains an open question.
 
 Sponsors may be acknowledged using conventional sponsor tiers. A tier must not grant votes proportional to money, private language behavior, guaranteed roadmap placement, or technical veto power.
 

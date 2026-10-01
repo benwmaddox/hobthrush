@@ -4,7 +4,7 @@
 **Date:** September 24, 2026
 **Project name:** Hobthrush; `hob` for the executable and `.hob` for source files.
 **Primary target:** Reliable libraries, command-line tools, JSON web services, and small server-rendered web applications.
-**Owner decision:** Build this as a new language and toolchain. Do not add features to Stasis or depend on Stasis internals.
+**Owner decision:** Build this as a new language and toolchain. Do not add features to Stasis or depend on Stasis internals. The settled project goals and remaining open questions are recorded in [project-goals.md](project-goals.md).
 
 **Pre-1.0 contract policy:** Language development is iterative. Source syntax, CLI behavior, manifests, lockfiles, metadata, and inspection schemas may change without backward-compatibility or migration guarantees. Schema numbers identify the current serialized format for tooling and tests; they do not promise support for historical formats. When a contract changes, update the compiler, tests, documentation, and examples together, and regenerate affected artifacts.
 
@@ -24,7 +24,7 @@ This is a productivity-oriented language with managed memory. It permits ordinar
 
 ### Growth and stability
 
-Before 1.0, source syntax and contracts can change with matching updates to the compiler, tests, documentation, and examples. After 1.0, public language syntax and source semantics should change rarely and only when AI reviewers find a clear need, strong fit with project goals, and an acceptable compatibility path. Compiler, runtime, and tooling internals may continue to be refined more often while preserving observable contracts. The standard library is the primary place for general capability growth when a feature fits there; AI systems review suggestions and coordinate API-compatible changes.
+Before 1.0, source syntax and contracts can change with matching updates to the compiler, tests, documentation, and examples. After 1.0, public language syntax and source semantics should change rarely and only when AI reviewers find a clear need, strong fit with project goals, and an acceptable compatibility path. Preserve source compatibility where possible; make breaking source changes only in major versions and provide a code-migration process. Compiler, runtime, and tooling internals may continue to be refined more often while preserving observable contracts. The standard library is the primary place for general capability growth when a feature fits there; AI systems review suggestions and coordinate API-compatible changes. See [project goals](project-goals.md) for settled scope and reliability decisions.
 
 ### Why someone would try it
 

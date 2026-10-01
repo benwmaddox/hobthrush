@@ -1,0 +1,58 @@
+# Hobthrush project goals
+
+**Decision record:** 2026-10-01
+**Status:** Living record of owner decisions. The settled decisions below guide the project. The open questions are not policy. This records direction, not a claim that every intended AI workflow is implemented.
+
+## Purpose and success
+
+The primary goal is reliable AI-built software that stays correct over time and through many incremental changes. Success means AI systems can build and maintain production applications from people's goals, within explicit constraints.
+
+The secondary goal is a self-improving ecosystem: Hobthrush's language, compiler, standard library, and tools should help AI systems build software correctly and improve the systems they use.
+
+## Reliability and verification
+
+Reliability applies to every layer: compiler, standard library, and applications built with Hobthrush. Correctness bugs always outrank other work. Other reliability work remains a high priority, scaled by severity. Require tests or executable checks for reliability failures in the compiler and standard library; recommend comparable safeguards downstream, where incorrect results can mislead users.
+
+When behavior can be tested, changes must include tests that check it. For changes that are hard to test adequately, require all three: multiple independent AI reviews, a rigorous written argument explaining the validation approach and its limits, and clear project value.
+
+AI systems do the detailed reading, design, implementation, testing, and maintenance of project code. Independent AI systems review their work against compiler-enforced constraints, black-box outcomes, and published goals. Source is written primarily for AI to read and modify. People set high-level goals; human inspection of code or individual changes should be rare.
+
+## Priority and direct sponsorship
+
+Correctness bug fixes always outrank other work. Other reliability work remains a high priority, ordered by severity. How eligible work is ranked within each priority class remains open.
+
+Sponsorship gives funders a direct way to advance an eligible fix or feature into funded work. Once AI review accepts an item, its sponsor supplies capacity for implementation and maintenance and signals its importance. Sponsorship cannot buy acceptance or move non-correctness work ahead of correctness bugs.
+
+For a new feature, most feature-specific payment should support ongoing maintenance. This does not apply to existing bug fixes. The exact funding share and maintenance period remain open.
+
+## Proactive work and reserve
+
+AI systems may initiate correctness fixes and internal compiler refinements using ongoing maintenance funding. Monthly spending on this proactive work is capped at 1% of project revenue from the trailing twelve months. Keep a substantial reserve for future AI building work. If an active subscription includes tokens that can be used at no extra cost and no other work is pending, use them for eligible maintenance work.
+
+Proactive changes remain subject to tests, independent AI reviews, compiler constraints, and release gates. Authority to initiate new public capabilities remains an open question.
+
+## Scope and evolution
+
+- Build libraries first. Put reusable behavior in libraries; promote it into the compiler only for structural changes to generated output or stronger constraints that are unreasonable to enforce as a library.
+- Defer or exclude compiler and standard-library changes when their intended role is ambiguous until it is clarified.
+- Do not accumulate features for their own sake. Favor reliable outcomes, clear constraints, and useful composability.
+- After 1.0, preserve source compatibility where possible. Make breaking source changes only in major versions and provide a code-migration process.
+- Keep public language-surface changes rare after 1.0. Refine compiler, runtime, and tooling internals more often when observable contracts remain intact.
+- Govern standard-library growth through AI review and coordination. AI systems assess suggestions against project goals, user need, and compatibility, then coordinate changes. Standard-library additions need not be rare when they meet those criteria.
+
+## Non-goals
+
+- Absolute-best performance. Very good performance remains desirable.
+- Feature accumulation without a clear user outcome.
+- Choosing designs primarily for human readability at the expense of AI's ability to read and modify the code.
+- Hard real-time guarantees.
+
+## Open questions
+
+These questions remain open and do not override the settled decisions above:
+
+- What authority, if any, should AI systems have to initiate new public capabilities?
+- What criteria should make an AI system stop, defer, or reject a proposed change?
+- How should eligible work be ranked within each priority class?
+- What exact funding share and maintenance period should apply to feature-specific sponsorship?
+- Should maintenance funds have a minimum reserve balance? How should revenue be counted for the monthly cap, and may unused spending capacity carry forward?

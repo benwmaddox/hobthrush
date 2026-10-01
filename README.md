@@ -10,9 +10,9 @@ The command is `hob`, source files use `.hob`, and packages use `hob.toml` and `
 
 ## Goals and contributions
 
-Hobthrush is an experimental language designed for AI systems to read, write, and maintain reliable software. Enforceable compiler rules, machine-readable contracts, and black-box outcome tests keep work on task. People set high-level goals and priorities; code inspection or intervention in an individual change should be rare. See the [product brief](docs/PRD.md) and [roadmap](docs/roadmap.md).
+Hobthrush is an experimental language designed for AI systems to read, write, and maintain reliable software. Enforceable compiler rules, machine-readable contracts, and black-box outcome tests keep work on task. People set high-level goals and priorities; code inspection or intervention in an individual change should be rare. See the [project goals](docs/project-goals.md), [product brief](docs/PRD.md), and [roadmap](docs/roadmap.md).
 
-Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports AI review and categorization of bugs and feature requests. AI systems assess fit, need, and compatibility, then prioritize eligible work for sponsorship. Dedicated funds can support specific features only after they meet project goals and technical criteria. Up to 10% of funds may support human management of the project. Funding supports work; independent AI review and technical checks determine acceptance.
+Under the [proposed stewardship model](docs/public-ai-stewardship.md), general funding supports AI review of requests. Once AI review accepts a fix or feature, sponsors can directly promote it to funded work and supply implementation capacity. Sponsorship signals importance, but correctness fixes remain first and payment cannot buy acceptance. Most feature-specific funding should support ongoing maintenance; bug-fix funding is exempt. Up to 10% of funds may support human project management.
 
 Issues, examples, documentation, and code contributions are inputs to the AI-operated development process. AI systems decide how to use them against project goals and constraints, and may incorporate them directly into updates. Please share only material you are comfortable having incorporated.
 
