@@ -1,10 +1,12 @@
-# lang
+# Hobthrush
 
 **A language for software written with agents and reviewed by people.**
 
-`lang` is an experimental general-purpose language that makes types, errors, and side effects visible to both developers and tools. Its compiler checks exhaustive matches and declared effects, then provides structured diagnostics and machine-readable API and audit reports. You can use the same toolchain to build libraries, typed command-line tools, and small web apps.
+Named for a folklore helper that quietly finishes people's work while they sleep.
 
-The name is temporary, and the language is pre-1.0. Syntax and tooling may change without migration support.
+Hobthrush is an experimental general-purpose language that makes types, errors, and side effects visible to both developers and tools. Its compiler checks exhaustive matches and declared effects, then provides structured diagnostics and machine-readable API and audit reports. You can use the same toolchain to build libraries, typed command-line tools, and small web apps.
+
+The command is `hob`, source files use `.hob`, and packages use `hob.toml` and `hob.lock`. The language is pre-1.0; syntax and tooling may change without migration support.
 
 ## Goals and contributions
 
@@ -23,12 +25,14 @@ Focused issues, examples, documentation, and pull requests are welcome. Contribu
 Install the .NET SDK version pinned in [global.json](global.json), then run from the repository root:
 
 ```sh
-dotnet build lang.slnx --configuration Release
-dotnet run --project src/Lang --configuration Release -- run examples/pure/src/main.lang
-dotnet run --project src/Lang --configuration Release -- test examples/text-validation
+dotnet build hobthrush.slnx --configuration Release
+dotnet run --project src/Hob --configuration Release -- run examples/pure/src/main.hob
+dotnet run --project src/Hob --configuration Release -- test examples/text-validation
 ```
 
 The first program prints a value; the last command runs the validation library's language tests.
+
+Use `hob new` to create a package, `hob add` to add dependencies, and `hob lock` to pin them. `hob check`, `hob build`, `hob run`, and `hob test` check, build, run, and test your code. `hob inspect api`, `hob inspect effects`, and `hob audit` expose compiler-derived metadata. See the [command reference](docs/grammar.md) for arguments and limits.
 
 ## Explore
 

@@ -1,7 +1,7 @@
 # Greeting Service
 
-Run the managed web package with `lang run eval/reference/web-greeting --
---urls http://127.0.0.1:5000`. Set `LANG_SQLITE_PATH` to use an isolated
+Run the managed web package with `hob run eval/reference/web-greeting --
+--urls http://127.0.0.1:5000`. Set `HOB_SQLITE_PATH` to use an isolated
 database file.
 
 | Method | Path | Result |

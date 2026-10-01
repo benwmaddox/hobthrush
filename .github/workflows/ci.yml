@@ -16,11 +16,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - run: dotnet build lang.slnx --configuration Release --nologo
+      - run: dotnet build hobthrush.slnx --configuration Release --nologo
       - name: Run agent outcome evaluations
         run: >-
-          dotnet run --project tests/Lang.OutcomeEval/Lang.OutcomeEval.csproj --configuration Release --no-build --
-          --compiler src/Lang/bin/Release/net10.0/lang.dll
+          dotnet run --project tests/Hob.OutcomeEval/Hob.OutcomeEval.csproj --configuration Release --no-build --
+          --compiler src/Hob/bin/Release/net10.0/hob.dll
           --results artifacts/outcome-evals
           --agent-model reference-fixture
           --agent-revision local-checkout
@@ -33,7 +33,7 @@ jobs:
           name: outcome-evals-${{ runner.os }}
           path: artifacts/outcome-evals/
           if-no-files-found: warn
-      - run: dotnet run --project src/Lang --configuration Release -- test
+      - run: dotnet run --project src/Hob --configuration Release -- test
       - name: Ensure Linux NativeAOT prerequisites
         if: runner.os == 'Linux'
         run: |
@@ -42,10 +42,10 @@ jobs:
             sudo apt-get install -y clang zlib1g-dev
           fi
       - name: Run integration tests, including NativeAOT publish and execution
-        run: dotnet run --project tests/Lang.IntegrationTests --configuration Release --no-build
+        run: dotnet run --project tests/Hob.IntegrationTests --configuration Release --no-build
         timeout-minutes: 25
-      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/pure/src/main.lang
-      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/types/src/main.lang
-      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/structs/src/main.lang
-      - run: dotnet run --project src/Lang --configuration Release --no-build -- check examples/library-package
-      - run: dotnet run --project src/Lang --configuration Release --no-build -- run examples/library-package
+      - run: dotnet run --project src/Hob --configuration Release --no-build -- run examples/pure/src/main.hob
+      - run: dotnet run --project src/Hob --configuration Release --no-build -- run examples/types/src/main.hob
+      - run: dotnet run --project src/Hob --configuration Release --no-build -- run examples/structs/src/main.hob
+      - run: dotnet run --project src/Hob --configuration Release --no-build -- check examples/library-package
+      - run: dotnet run --project src/Hob --configuration Release --no-build -- run examples/library-package
