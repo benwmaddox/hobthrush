@@ -8,6 +8,7 @@ internal enum LangTypeKind
     U32,
     U64,
     F64,
+    ArithmeticError,
     Unit,
     Bool,
     Text,
@@ -87,6 +88,7 @@ internal sealed class LangType : IEquatable<LangType>
     public bool IsU32 => Kind == LangTypeKind.U32;
     public bool IsU64 => Kind == LangTypeKind.U64;
     public bool IsF64 => Kind == LangTypeKind.F64;
+    public bool IsArithmeticError => Kind == LangTypeKind.ArithmeticError;
     public bool IsUnit => Kind == LangTypeKind.Unit;
     public bool IsBool => Kind == LangTypeKind.Bool;
     public bool IsText => Kind == LangTypeKind.Text;
@@ -126,6 +128,7 @@ internal sealed class LangType : IEquatable<LangType>
     internal static LangType U32 { get; } = new(LangTypeKind.U32, "u32");
     internal static LangType U64 { get; } = new(LangTypeKind.U64, "u64");
     internal static LangType F64 { get; } = new(LangTypeKind.F64, "f64");
+    internal static LangType ArithmeticError { get; } = new(LangTypeKind.ArithmeticError, "ArithmeticError");
     internal static LangType Unit { get; } = new(LangTypeKind.Unit, "Unit");
     internal static LangType Bool { get; } = new(LangTypeKind.Bool, "bool");
     internal static LangType Text { get; } = new(LangTypeKind.Text, "Text");
@@ -491,6 +494,14 @@ internal sealed record TypedLambdaInvokeExpr(
     TypedExpr Body,
     Token At) : TypedExpr(Type, At);
 internal sealed record TypedBinaryExpr(LangType Type, string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(Type, At);
+internal sealed record TypedIntegerArithmeticExpr(
+    LangType Type,
+    LangType ValueType,
+    IntegerArithmeticMode Mode,
+    IntegerArithmeticOperator Operation,
+    TypedExpr Receiver,
+    TypedExpr Right,
+    Token At) : TypedExpr(Type, At);
 internal sealed record TypedUnaryExpr(LangType Type, string Op, TypedExpr Operand, Token At) : TypedExpr(Type, At);
 internal sealed record TypedCompareExpr(string Op, TypedExpr Left, TypedExpr Right, Token At) : TypedExpr(LangType.Bool, At);
 internal sealed record TypedTextLengthExpr(TypedExpr Target, Token At) : TypedExpr(LangType.I32, At);
@@ -604,7 +615,8 @@ internal enum BuiltinVariant
     ProcessStartFailed,
     ProcessTimedOut,
     DbErrorStatement,
-    DbErrorRowShape
+    DbErrorRowShape,
+    ArithmeticErrorOverflow
 }
 
 internal sealed record TypedBuiltinConstructExpr(
@@ -3156,7 +3168,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "i64" or "u32" or "u64" or "f64" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
             "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "ProcessRunner" or "Secret" or
-            "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError";
+            "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError" or
+            "ArithmeticError";
 
     private static bool IsReservedTypeParameterName(string name) =>
         IsReservedTypeName(name) || name is "Bytes" or "BytesError" or "Unit";
@@ -3857,6 +3870,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             case TypedBinaryExpr binary:
                 ValidateResourceListExpression(binary.Left);
                 ValidateResourceListExpression(binary.Right);
+                break;
+            case TypedIntegerArithmeticExpr arithmetic:
+                ValidateResourceListExpression(arithmetic.Receiver);
+                ValidateResourceListExpression(arithmetic.Right);
                 break;
             case TypedUnaryExpr unary:
                 ValidateResourceListExpression(unary.Operand);
@@ -4972,6 +4989,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             TypedMapKeysExpr map => [map.Target],
             TypedMapLengthExpr map => [map.Target],
             TypedBinaryExpr binary => [binary.Left, binary.Right],
+            TypedIntegerArithmeticExpr arithmetic => [arithmetic.Receiver, arithmetic.Right],
             TypedUnaryExpr unary => [unary.Operand],
             TypedCompareExpr comparison => [comparison.Left, comparison.Right],
             TypedCallExpr call => call.Arguments,
@@ -5135,6 +5153,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 Add("E_TYPE_MISMATCH", "ProcessError variants can only be produced by process operations", expression.At);
             else
                 Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on ProcessError", expression.At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Target is NameExpr arithmeticErrorName &&
+            !locals.ContainsKey(arithmeticErrorName.Name) &&
+            arithmeticErrorName.Name == "ArithmeticError")
+        {
+            if (expression.Field == "Overflow")
+                Add("E_TYPE_MISMATCH", "ArithmeticError.Overflow can only be produced by checked integer arithmetic", expression.At);
+            else
+                Add("E_NAME_UNRESOLVED", $"Variant '{expression.Field}' is not declared on ArithmeticError", expression.At);
             return new TypedErrorExpr(expression.At);
         }
 
@@ -5344,6 +5373,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 case LangTypeKind.U32:
                 case LangTypeKind.U64:
                 case LangTypeKind.F64:
+                case LangTypeKind.ArithmeticError:
                 case LangTypeKind.Unit:
                 case LangTypeKind.Bool:
                 case LangTypeKind.Text:
@@ -5515,6 +5545,61 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return new TypedErrorExpr(expression.At);
     }
 
+    private TypedExpr CheckIntegerArithmeticMemberCall(
+        MemberCallExpr expression,
+        TypedExpr receiver,
+        Dictionary<string, LocalSymbol> locals,
+        int depth,
+        IntegerArithmeticMode mode,
+        IntegerArithmeticOperator operation)
+    {
+        if (!IsIntegerType(receiver.Type))
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Integer arithmetic mode '{expression.Member}' requires an i32, i64, u32, or u64 receiver, found '{receiver.Type.DisplayName}'",
+                expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        if (expression.Arguments.Count != 1)
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Integer arithmetic mode '{expression.Member}' expects 1 argument, got {expression.Arguments.Count}",
+                expression.MemberAt);
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var right = CheckExpr(expression.Arguments[0], null, locals, depth);
+        if (right.Type.IsError)
+            return new TypedErrorExpr(expression.At);
+        if (right.Type != receiver.Type)
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Integer arithmetic mode '{expression.Member}' expects '{receiver.Type.DisplayName}' argument, found '{right.Type.DisplayName}'",
+                expression.Arguments[0].At);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var resultType = mode == IntegerArithmeticMode.Checked
+            ? LangType.Result(receiver.Type, LangType.ArithmeticError)
+            : receiver.Type;
+        return new TypedIntegerArithmeticExpr(
+            resultType,
+            receiver.Type,
+            mode,
+            operation,
+            receiver,
+            right,
+            expression.At);
+    }
+
     private TypedExpr CheckMemberCall(
         MemberCallExpr expression,
         LangType? expected,
@@ -5613,6 +5698,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     Add("E_TYPE_MISMATCH", "ProcessError variants can only be produced by process operations", expression.MemberAt);
                 else
                     Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on ProcessError", expression.MemberAt);
+                return new TypedErrorExpr(expression.At);
+            }
+
+            if (targetName.Name == "ArithmeticError")
+            {
+                foreach (var argument in expression.Arguments)
+                    _ = CheckExpr(argument, null, locals, depth);
+                if (expression.Member == "Overflow")
+                    Add("E_TYPE_MISMATCH", "ArithmeticError.Overflow can only be produced by checked integer arithmetic", expression.MemberAt);
+                else
+                    Add("E_NAME_UNRESOLVED", $"Variant '{expression.Member}' is not declared on ArithmeticError", expression.MemberAt);
                 return new TypedErrorExpr(expression.At);
             }
 
@@ -5721,6 +5817,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 _ = CheckExpr(argument, null, locals, depth);
             return new TypedErrorExpr(expression.At);
         }
+
+        if (IntegerArithmeticMember.TryParse(expression.Member.AsSpan(), out var arithmeticMode, out var arithmeticOperation))
+            return CheckIntegerArithmeticMemberCall(expression, receiver, locals, depth, arithmeticMode, arithmeticOperation);
 
         if (expression.Member is "get_text" or "get_secret_text" or "reveal_text" or "info")
             return CheckConfigCapabilityIntrinsic(expression, receiver, locals, depth);
@@ -6910,6 +7009,12 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 new("DbError.RowShape", "dberror:RowShape", null, 1, BuiltinVariant.DbErrorRowShape, [])
             ]);
         }
+        if (type.IsArithmeticError)
+        {
+            return ReadOnly<VariantShape>([
+                new("ArithmeticError.Overflow", "arithmeticerror:Overflow", null, 0, BuiltinVariant.ArithmeticErrorOverflow, [])
+            ]);
+        }
         if (type.IsHttpError)
         {
             return ReadOnly<VariantShape>([
@@ -6957,12 +7062,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return null;
             }
         }
-        else if (scrutineeType.IsFsError || scrutineeType.IsBytesError || scrutineeType.IsDbError || scrutineeType.IsHttpError || scrutineeType.IsProcessError)
+        else if (scrutineeType.IsFsError || scrutineeType.IsBytesError || scrutineeType.IsDbError ||
+                 scrutineeType.IsHttpError || scrutineeType.IsProcessError || scrutineeType.IsArithmeticError)
         {
             var builtinErrorName = scrutineeType.IsFsError
                 ? "FsError"
                 : scrutineeType.IsBytesError ? "BytesError"
-                : scrutineeType.IsDbError ? "DbError" : scrutineeType.IsHttpError ? "HttpError" : "ProcessError";
+                : scrutineeType.IsDbError ? "DbError"
+                : scrutineeType.IsHttpError ? "HttpError"
+                : scrutineeType.IsProcessError ? "ProcessError" : "ArithmeticError";
             if (pattern.Union is null || pattern.Union.IsQualified || pattern.Union.Declaration != builtinErrorName)
             {
                 Add("E_TYPE_MISMATCH", $"Expected pattern from '{builtinErrorName}.<variant>', found '{pattern.VariantName}'", pattern.At);
@@ -6976,7 +7084,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         var shapeName = scrutineeType.Kind == LangTypeKind.Union || scrutineeType.IsFsError || scrutineeType.IsBytesError || scrutineeType.IsDbError ||
-                        scrutineeType.IsHttpError || scrutineeType.IsProcessError
+                        scrutineeType.IsHttpError || scrutineeType.IsProcessError || scrutineeType.IsArithmeticError
             ? $"{pattern.Union!.Declaration}.{pattern.VariantName}"
             : pattern.VariantName;
         var shape = shapes.FirstOrDefault(item => item.Name == shapeName);
@@ -7227,6 +7335,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     return NoTypeArguments(syntax, LangType.Bytes);
                 case "BytesError":
                     return NoTypeArguments(syntax, LangType.BytesError);
+                case "ArithmeticError":
+                    return NoTypeArguments(syntax, LangType.ArithmeticError);
                 case "Config":
                     return NoTypeArguments(syntax, LangType.Config);
                 case "Secrets":
@@ -7274,6 +7384,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, LangType.U64);
             case "f64":
                 return NoTypeArguments(syntax, LangType.F64);
+            case "ArithmeticError":
+                return NoTypeArguments(syntax, LangType.ArithmeticError);
             case "Unit":
                 return NoTypeArguments(syntax, LangType.Unit);
             case "bool":

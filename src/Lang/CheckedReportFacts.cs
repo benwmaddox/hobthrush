@@ -124,6 +124,7 @@ internal static class CheckedReportFacts
             TypedLambdaInvokeExpr lambda => [lambda.Argument, lambda.Body],
             TypedListExpr list => list.Items,
             TypedBinaryExpr binary => [binary.Left, binary.Right],
+            TypedIntegerArithmeticExpr arithmetic => [arithmetic.Receiver, arithmetic.Right],
             TypedUnaryExpr unary => [unary.Operand],
             TypedCompareExpr comparison => [comparison.Left, comparison.Right],
             TypedTextLengthExpr length => [length.Target],
@@ -289,6 +290,10 @@ internal static class CheckedReportFacts
                 case TypedBinaryExpr binary:
                     VisitExpression(binary.Left, witnesses);
                     VisitExpression(binary.Right, witnesses);
+                    break;
+                case TypedIntegerArithmeticExpr arithmetic:
+                    VisitExpression(arithmetic.Receiver, witnesses);
+                    VisitExpression(arithmetic.Right, witnesses);
                     break;
                 case TypedUnaryExpr unary:
                     VisitExpression(unary.Operand, witnesses);

@@ -468,6 +468,7 @@ internal static class Emitter
 
             EmitBuiltinTypes();
             if (UsesResultPropagation) EmitResultPropagationRuntime();
+            if (NeedsArithmeticErrorType) EmitArithmeticErrorType();
             if (NeedsBytesType) EmitBytesType();
             if (NeedsBytesErrorType) EmitBytesErrorType();
             if (NeedsConfigSnapshot) EmitConfigSnapshotRuntime();
@@ -597,6 +598,16 @@ internal static class Emitter
             _source.AppendLine("    {");
             _source.AppendLine("        private protected BytesError() { }");
             _source.AppendLine("        public sealed record InvalidOctet() : BytesError;");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitArithmeticErrorType()
+        {
+            _source.AppendLine("    public abstract record ArithmeticError");
+            _source.AppendLine("    {");
+            _source.AppendLine("        private protected ArithmeticError() { }");
+            _source.AppendLine("        public sealed record Overflow() : ArithmeticError;");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1519,6 +1530,7 @@ internal static class Emitter
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedLambdaInvokeExpr lambda => EmitLambdaInvoke(lambda),
             TypedBinaryExpr binary => EmitBinary(binary),
+            TypedIntegerArithmeticExpr arithmetic => EmitIntegerArithmetic(arithmetic),
             TypedUnaryExpr unary => EmitUnary(unary),
             TypedCompareExpr comparison => EmitComparison(comparison),
             TypedCallExpr { IsAsync: true } => throw new InvalidOperationException("Async calls must be emitted beneath a checked await expression"),
@@ -1856,6 +1868,10 @@ internal static class Emitter
             return helper + "(" + EmitExpr(expression.Left) + ", " + EmitExpr(expression.Right) + ")";
         }
 
+        private string EmitIntegerArithmetic(TypedIntegerArithmeticExpr expression) =>
+            ArithmeticHelperName(expression.Mode, expression.Operation, expression.ValueType) +
+            "(" + EmitExpr(expression.Receiver) + ", " + EmitExpr(expression.Right) + ")";
+
         private string EmitComparison(TypedCompareExpr expression)
         {
             var left = EmitExpr(expression.Left);
@@ -1973,6 +1989,7 @@ internal static class Emitter
             EmitEmptyUnionStructuralEquality(LangTypeKind.HttpError, "HttpError",
                 ["InvalidTarget", "Transport", "Timeout", "ResponseTooLarge", "InvalidText"]);
             EmitEmptyUnionStructuralEquality(LangTypeKind.DbError, "DbError", ["Statement", "RowShape"]);
+            EmitEmptyUnionStructuralEquality(LangTypeKind.ArithmeticError, "ArithmeticError", ["Overflow"]);
 
             if (UsesTypeKind(LangTypeKind.FilePath))
                 _source.AppendLine("    private static bool StructuralEqualsFilePath(FilePath left, FilePath right) => global::System.String.Equals(left.Value, right.Value, global::System.StringComparison.Ordinal);");
@@ -2145,6 +2162,7 @@ internal static class Emitter
                 case LangTypeKind.ProcessError:
                 case LangTypeKind.HttpError:
                 case LangTypeKind.DbError:
+                case LangTypeKind.ArithmeticError:
                     return "StructuralEquals" + type.DisplayName + "(" + left + ", " + right + ")";
                 default:
                     throw new InvalidOperationException("Unsupported type reached structural equality emission: " + type.DisplayName);
@@ -2167,6 +2185,7 @@ internal static class Emitter
                     case LangTypeKind.U32:
                     case LangTypeKind.U64:
                     case LangTypeKind.F64:
+                    case LangTypeKind.ArithmeticError:
                     case LangTypeKind.Unit:
                     case LangTypeKind.Bool:
                     case LangTypeKind.Text:
@@ -2359,6 +2378,7 @@ internal static class Emitter
             BuiltinVariant.BytesInvalidOctet or
             BuiltinVariant.DbErrorStatement or
             BuiltinVariant.DbErrorRowShape or
+            BuiltinVariant.ArithmeticErrorOverflow or
             BuiltinVariant.HttpInvalidTarget or
             BuiltinVariant.HttpTransport or
             BuiltinVariant.HttpTimeout or
@@ -2415,6 +2435,7 @@ internal static class Emitter
                     BuiltinVariant.BytesInvalidOctet => "InvalidOctet",
                     BuiltinVariant.DbErrorStatement => "Statement",
                     BuiltinVariant.DbErrorRowShape => "RowShape",
+                    BuiltinVariant.ArithmeticErrorOverflow => "Overflow",
                     BuiltinVariant.HttpInvalidTarget => "InvalidTarget",
                     BuiltinVariant.HttpTransport => "Transport",
                     BuiltinVariant.HttpTimeout => "Timeout",
@@ -2443,6 +2464,147 @@ internal static class Emitter
                 "var Local_" + binding.LocalId.ToString(CultureInfo.InvariantCulture))) + ")";
         }
 
+        private static string ArithmeticHelperName(
+            IntegerArithmeticMode mode,
+            IntegerArithmeticOperator operation,
+            LangType type)
+        {
+            var modeName = mode switch
+            {
+                IntegerArithmeticMode.Checked => "Checked",
+                IntegerArithmeticMode.Saturating => "Saturating",
+                IntegerArithmeticMode.Wrapping => "Wrapping",
+                _ => throw new InvalidOperationException("Unknown integer arithmetic mode")
+            };
+            var operationName = operation switch
+            {
+                IntegerArithmeticOperator.Add => "Add",
+                IntegerArithmeticOperator.Subtract => "Subtract",
+                IntegerArithmeticOperator.Multiply => "Multiply",
+                _ => throw new InvalidOperationException("Unknown integer arithmetic operation")
+            };
+            var typeName = type.Kind switch
+            {
+                LangTypeKind.I32 => "i32",
+                LangTypeKind.I64 => "i64",
+                LangTypeKind.U32 => "u32",
+                LangTypeKind.U64 => "u64",
+                _ => throw new InvalidOperationException("Integer arithmetic helper requires an integer type")
+            };
+            return modeName + operationName + "_" + typeName;
+        }
+
+        private void EmitIntegerArithmeticHelper(TypedIntegerArithmeticExpr expression)
+        {
+            var name = ArithmeticHelperName(expression.Mode, expression.Operation, expression.ValueType);
+            var type = EmitType(expression.ValueType);
+            var operation = expression.Operation switch
+            {
+                IntegerArithmeticOperator.Add => "+",
+                IntegerArithmeticOperator.Subtract => "-",
+                IntegerArithmeticOperator.Multiply => "*",
+                _ => throw new InvalidOperationException("Unknown integer arithmetic operation")
+            };
+
+            if (expression.Mode == IntegerArithmeticMode.Checked)
+            {
+                _source.Append("    private static Result<").Append(type).Append(", ArithmeticError> ")
+                    .Append(name).Append('(').Append(type).AppendLine(" left, " + type + " right)");
+                _source.AppendLine("    {");
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.Append("            return new Result<").Append(type).AppendLine(", ArithmeticError>.Ok(checked(left " + operation + " right));");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (global::System.OverflowException)");
+                _source.AppendLine("        {");
+                _source.AppendLine("            return new Result<" + type + ", ArithmeticError>.Err(new ArithmeticError.Overflow());");
+                _source.AppendLine("        }");
+                _source.AppendLine("    }");
+                _source.AppendLine();
+                return;
+            }
+
+            if (expression.Mode == IntegerArithmeticMode.Wrapping)
+            {
+                _source.Append("    private static ").Append(type).Append(' ').Append(name).Append('(')
+                    .Append(type).AppendLine(" left, " + type + " right) => unchecked(left " + operation + " right);");
+                _source.AppendLine();
+                return;
+            }
+
+            switch (expression.ValueType.Kind)
+            {
+                case LangTypeKind.I32:
+                    _source.Append("    private static int ").Append(name).AppendLine("(int left, int right) =>");
+                    _source.Append("        (int)global::System.Math.Clamp((long)left ").Append(operation).AppendLine(" right, int.MinValue, int.MaxValue);");
+                    break;
+                case LangTypeKind.U32:
+                    _source.Append("    private static uint ").Append(name).AppendLine("(uint left, uint right)");
+                    _source.AppendLine("    {");
+                    if (expression.Operation == IntegerArithmeticOperator.Subtract)
+                    {
+                        _source.AppendLine("        return left < right ? 0u : left - right;");
+                    }
+                    else
+                    {
+                        _source.Append("        var exact = (ulong)left ").Append(operation).AppendLine(" right;");
+                        _source.AppendLine("        return exact > uint.MaxValue ? uint.MaxValue : (uint)exact;");
+                    }
+                    _source.AppendLine("    }");
+                    break;
+                case LangTypeKind.I64:
+                case LangTypeKind.U64:
+                    EmitWideSaturatingArithmetic(name, expression, type, operation);
+                    return;
+                default:
+                    throw new InvalidOperationException("Integer arithmetic helper requires an integer type");
+            }
+
+            _source.AppendLine();
+        }
+
+        private void EmitWideSaturatingArithmetic(
+            string name,
+            TypedIntegerArithmeticExpr expression,
+            string type,
+            string operation)
+        {
+            _source.Append("    private static ").Append(type).Append(' ').Append(name).Append('(')
+                .Append(type).AppendLine(" left, " + type + " right)");
+            _source.AppendLine("    {");
+            if (expression.ValueType.Kind == LangTypeKind.U64 && expression.Operation == IntegerArithmeticOperator.Subtract)
+            {
+                _source.AppendLine("        return left < right ? 0UL : left - right;");
+            }
+            else
+            {
+                _source.AppendLine("        try");
+                _source.AppendLine("        {");
+                _source.Append("            return checked(left ").Append(operation).AppendLine(" right);");
+                _source.AppendLine("        }");
+                _source.AppendLine("        catch (global::System.OverflowException)");
+                _source.AppendLine("        {");
+                if (expression.ValueType.Kind == LangTypeKind.U64)
+                {
+                    _source.AppendLine("            return ulong.MaxValue;");
+                }
+                else
+                {
+                    var overflowResult = expression.Operation switch
+                    {
+                        IntegerArithmeticOperator.Add => "left < 0 ? long.MinValue : long.MaxValue",
+                        IntegerArithmeticOperator.Subtract => "left < 0 && right > 0 ? long.MinValue : long.MaxValue",
+                        IntegerArithmeticOperator.Multiply => "(left < 0) != (right < 0) ? long.MinValue : long.MaxValue",
+                        _ => throw new InvalidOperationException("Unknown integer arithmetic operation")
+                    };
+                    _source.Append("            return ").Append(overflowResult).AppendLine(";");
+                }
+                _source.AppendLine("        }");
+            }
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
         private void EmitArithmeticHelpers()
         {
             _source.AppendLine("    private static int CheckedAdd(int left, int right) => checked(left + right);");
@@ -2458,6 +2620,14 @@ internal static class Emitter
             _source.AppendLine("    private static uint CheckedMultiply(uint left, uint right) => checked(left * right);");
             _source.AppendLine("    private static ulong CheckedMultiply(ulong left, ulong right) => checked(left * right);");
             _source.AppendLine();
+
+            var emitted = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var expression in IntegerArithmeticOperations)
+            {
+                var name = ArithmeticHelperName(expression.Mode, expression.Operation, expression.ValueType);
+                if (emitted.Add(name))
+                    EmitIntegerArithmeticHelper(expression);
+            }
         }
 
         private void EmitTextLengthHelper()
@@ -4288,6 +4458,7 @@ internal static class Emitter
             LangTypeKind.U32 => "uint",
             LangTypeKind.U64 => "ulong",
             LangTypeKind.F64 => "double",
+            LangTypeKind.ArithmeticError => "ArithmeticError",
             LangTypeKind.Unit => "global::System.ValueTuple",
             LangTypeKind.Bool => "bool",
             LangTypeKind.Text => "string",
@@ -4400,6 +4571,8 @@ internal static class Emitter
 
         private bool NeedsBytesErrorType => UsesTypeKind(LangTypeKind.BytesError) || NeedsBytesType;
 
+        private bool NeedsArithmeticErrorType => UsesTypeKind(LangTypeKind.ArithmeticError);
+
         private bool NeedsHtmlType => UsesTypeKind(LangTypeKind.Html);
 
         private bool NeedsConfigSnapshot => program.ConfigFields.Count != 0 || UsesTypeKind(LangTypeKind.Config) ||
@@ -4480,6 +4653,12 @@ internal static class Emitter
         private bool UsesAsyncFunctions => EmittedFunctions.Any(function => function.IsAsync);
 
         private bool UsesResultPropagation => EmittedFunctions.Any(FunctionUsesResultPropagation);
+
+        private IEnumerable<TypedIntegerArithmeticExpr> IntegerArithmeticOperations => EmittedFunctions
+            .SelectMany(function => EnumerateStatements(function.Body))
+            .SelectMany(StatementExpressions)
+            .SelectMany(EnumerateExpressions)
+            .OfType<TypedIntegerArithmeticExpr>();
 
         private bool FunctionUsesResultPropagation(CheckedFunction function) =>
             EnumerateStatements(function.Body)
@@ -4704,6 +4883,10 @@ internal static class Emitter
                 case TypedBinaryExpr binary:
                     foreach (var nested in EnumerateExpressions(binary.Left)) yield return nested;
                     foreach (var nested in EnumerateExpressions(binary.Right)) yield return nested;
+                    break;
+                case TypedIntegerArithmeticExpr arithmetic:
+                    foreach (var nested in EnumerateExpressions(arithmetic.Receiver)) yield return nested;
+                    foreach (var nested in EnumerateExpressions(arithmetic.Right)) yield return nested;
                     break;
                 case TypedUnaryExpr unary:
                     foreach (var nested in EnumerateExpressions(unary.Operand)) yield return nested;
