@@ -551,5 +551,32 @@
     "file": "104-invalid-newtype-generic-declaration.lang",
     "status": "active",
     "expectedCodes": ["E_UNSUPPORTED"]
+  },
+  {
+    "file": "105-valid-immutable-bytes.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "106-invalid-immutable-bytes-basics.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_NAME_DUPLICATE",
+      "E_NAME_DUPLICATE",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_FIELD_UNKNOWN",
+      "E_FIELD_UNKNOWN",
+      "E_FIELD_UNKNOWN",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_NAME_UNRESOLVED",
+      "E_NAME_UNRESOLVED",
+      "E_TYPE_MISMATCH",
+      "E_UNSUPPORTED"
+    ]
   }
 ]

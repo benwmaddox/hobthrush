@@ -129,6 +129,9 @@ internal static class CheckedReportFacts
             TypedListLengthExpr length => [length.Target],
             TypedListGetExpr get => [get.Target, get.Index],
             TypedListAppendExpr append => [append.Target, append.Value],
+            TypedBytesLengthExpr length => [length.Target],
+            TypedBytesGetExpr get => [get.Target, get.Index],
+            TypedBytesAppendExpr append => [append.Target, append.Octet],
             TypedMapSetExpr set => [set.Target, set.Key, set.Value],
             TypedMapGetExpr get => [get.Target, get.Key],
             TypedMapKeysExpr keys => [keys.Target],
@@ -299,6 +302,17 @@ internal static class CheckedReportFacts
                 case TypedListAppendExpr append:
                     VisitExpression(append.Target, witnesses);
                     VisitExpression(append.Value, witnesses);
+                    break;
+                case TypedBytesLengthExpr length:
+                    VisitExpression(length.Target, witnesses);
+                    break;
+                case TypedBytesGetExpr get:
+                    VisitExpression(get.Target, witnesses);
+                    VisitExpression(get.Index, witnesses);
+                    break;
+                case TypedBytesAppendExpr append:
+                    VisitExpression(append.Target, witnesses);
+                    VisitExpression(append.Octet, witnesses);
                     break;
                 case TypedMapEmptyExpr:
                     break;

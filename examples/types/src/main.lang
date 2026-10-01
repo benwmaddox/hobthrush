@@ -40,7 +40,24 @@ pub fn failed() -> Result<Text, self::example::types::ParseError> effects {} {
     return Err(self::example::types::ParseError.Invalid);
 }
 
+fn preserves_maximum_octet() -> bool effects {} {
+    let first: Bytes = match Bytes.empty().append(255) {
+        Ok(bytes) => bytes,
+        Err(error) => Bytes.empty(),
+    };
+    let repeated: Bytes = match Bytes.empty().append(255) {
+        Ok(bytes) => bytes,
+        Err(error) => Bytes.empty(),
+    };
+    if first != repeated { return false; }
+    return match first.get(0) {
+        Some(octet) => octet == 255,
+        None => false,
+    };
+}
+
 pub fn main() -> Text effects {} {
+    if self::example::types::preserves_maximum_octet() == false { return "byte value failed"; }
     let is_enabled: bool = self::example::types::enabled();
     let response: self::example::types::Response = self::example::types::Response.Accepted("escaped quote: \"", is_enabled);
     let optional: Option<Text> = Some(self::example::types::display(response));

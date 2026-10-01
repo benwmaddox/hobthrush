@@ -1,0 +1,31 @@
+module fixture::invalid_immutable_bytes_basics;
+
+struct Bytes { value: i32 }
+
+fn invalid(value: Bytes) -> Bytes effects {} {
+    let wrong_arity: Bytes = Bytes.empty(1);
+    let wrong_append: Result<Bytes, BytesError> = value.append(true);
+    let wrong_get: Option<i32> = value.get("first");
+    let missing_append: Result<Bytes, BytesError> = value.append();
+    let called_length: i32 = value.length();
+    let unknown_member: i32 = value.to_text();
+    let unknown_field: i32 = value.octets;
+    let parameterized: Bytes<i32> = Bytes.empty();
+    let forged: BytesError = BytesError.InvalidOctet;
+    let forged_call: BytesError = BytesError.InvalidOctet();
+    let unknown_variant: BytesError = BytesError.Missing;
+    let unknown_constructor: BytesError = BytesError.Missing();
+    return value;
+}
+
+fn reserved_builtin_type_parameters<Bytes, BytesError>(value: Bytes, error: BytesError) -> i32 effects {} { return 0; }
+
+fn qualified_nominal_mismatch(value: self::fixture::invalid_immutable_bytes_basics::Bytes) -> bool effects {} {
+    return value == Bytes.empty();
+}
+
+fn local_name_shadow(Bytes: i32) -> i32 effects {} {
+    return Bytes.empty();
+}
+
+pub fn main() -> i32 effects {} { return 0; }
