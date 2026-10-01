@@ -1,0 +1,16 @@
+[
+  {
+    "type": "A",
+    "name": "hobthrush.com",
+    "content": "192.0.2.1",
+    "ttl": 1,
+    "proxied": true
+  },
+  {
+    "type": "A",
+    "name": "www.hobthrush.com",
+    "content": "192.0.2.1",
+    "ttl": 1,
+    "proxied": true
+  }
+]
