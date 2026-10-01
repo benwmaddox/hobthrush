@@ -905,6 +905,7 @@ internal static class AuditReport
             LangTypeKind.U32 => new { kind = "primitive", name = "u32" },
             LangTypeKind.U64 => new { kind = "primitive", name = "u64" },
             LangTypeKind.F64 => new { kind = "primitive", name = "f64" },
+            LangTypeKind.ArithmeticError => new { kind = "primitive", name = "ArithmeticError" },
             LangTypeKind.Unit => new { kind = "primitive", name = "Unit" },
             LangTypeKind.Bool => new { kind = "primitive", name = "bool" },
             LangTypeKind.Text => new { kind = "primitive", name = "Text" },

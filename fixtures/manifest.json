@@ -669,5 +669,25 @@
       "E_RESULT_PROPAGATION_CONTEXT",
       "E_RESULT_PROPAGATION_CONTEXT"
     ]
+  },
+  {
+    "file": "117-valid-integer-arithmetic-modes.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "118-invalid-integer-arithmetic-modes.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_NAME_DUPLICATE",
+      "E_NAME_DUPLICATE",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
   }
 ]
