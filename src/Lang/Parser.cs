@@ -116,7 +116,7 @@ internal static class Lexer
                 continue;
             }
 
-            if (".;:,(){}[]=+*/-<>".IndexOf(c) >= 0)
+            if (".;:,(){}[]=+*/-<>?".IndexOf(c) >= 0)
             {
                 tokens.Add(new Token(c.ToString(), c.ToString(), line, column, file));
                 i++;
@@ -1490,12 +1490,15 @@ internal sealed class Parser
         return arguments;
     }
 
-    private Expr ParseExpr(int minPrecedence = 0, bool allowStructConstruction = true)
+    private Expr ParseExpr(
+        int minPrecedence = 0,
+        bool allowStructConstruction = true,
+        bool allowRootQuestionPostfix = true)
     {
         EnterNesting(Current, "Expression nesting is too deep");
         try
         {
-            var left = ParsePrimary(allowStructConstruction);
+            var left = ParsePrimary(allowStructConstruction, allowRootQuestionPostfix);
             var leftDepth = ExpressionDepth(left);
             while (true)
             {
@@ -1525,23 +1528,23 @@ internal sealed class Parser
         }
     }
 
-    private Expr ParsePrimary(bool allowStructConstruction)
+    private Expr ParsePrimary(bool allowStructConstruction, bool allowRootQuestionPostfix)
     {
         var token = Current;
         if (Is("(") && LookAhead().Text == ")")
         {
             var at = Take();
             Take();
-            return ParsePostfix(RegisterExpression(new UnitExpr(at)));
+            return ParsePostfix(RegisterExpression(new UnitExpr(at)), allowRootQuestionPostfix);
         }
         if (Is("await"))
         {
             var at = Take();
-            var value = ParseExpr(6, allowStructConstruction);
+            var value = ParseExpr(6, allowStructConstruction, allowRootQuestionPostfix: false);
             var depth = ExpressionDepth(value) + 1;
             if (depth > MaximumNestingDepth)
                 Fail(at, "E_SYNTAX", "Expression nesting is too deep");
-            return ParsePostfix(RegisterExpression(new AwaitExpr(at, value), depth));
+            return ParsePostfix(RegisterExpression(new AwaitExpr(at, value), depth), allowRootQuestionPostfix);
         }
         if (Is("["))
         {
@@ -1563,12 +1566,12 @@ internal sealed class Parser
             }
             Expect("]");
             var depth = 1 + items.Select(ExpressionDepth).DefaultIfEmpty(0).Max();
-            return ParsePostfix(RegisterExpression(new ListExpr(at, items), depth));
+            return ParsePostfix(RegisterExpression(new ListExpr(at, items), depth), allowRootQuestionPostfix);
         }
         if (token.Kind == "number")
         {
             Take();
-            return ParsePostfix(RegisterExpression(ParseNumericLiteral(token, token)));
+            return ParsePostfix(RegisterExpression(ParseNumericLiteral(token, token)), allowRootQuestionPostfix);
         }
         if (Is("-"))
         {
@@ -1580,41 +1583,41 @@ internal sealed class Parser
                 if (literalKind is NumericLiteralKind.I32 or NumericLiteralKind.I64)
                 {
                     var negativeLiteral = ParseIntegerLiteral(magnitudeToken, minus, negative: true);
-                    return ParsePostfix(RegisterExpression(negativeLiteral));
+                    return ParsePostfix(RegisterExpression(negativeLiteral), allowRootQuestionPostfix);
                 }
 
                 var positiveLiteral = RegisterExpression(ParseNumericLiteral(magnitudeToken, magnitudeToken));
                 var unaryDepth = ExpressionDepth(positiveLiteral) + 1;
                 if (unaryDepth > MaximumNestingDepth)
                     Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
-                return ParsePostfix(RegisterExpression(new UnaryExpr(minus, "-", positiveLiteral), unaryDepth));
+                return ParsePostfix(RegisterExpression(new UnaryExpr(minus, "-", positiveLiteral), unaryDepth), allowRootQuestionPostfix);
             }
 
-            var operand = ParseExpr(6, allowStructConstruction);
+            var operand = ParseExpr(6, allowStructConstruction, allowRootQuestionPostfix);
             var depth = ExpressionDepth(operand) + 1;
             if (depth > MaximumNestingDepth)
                 Fail(minus, "E_SYNTAX", "Expression nesting is too deep");
             var negated = RegisterExpression(new UnaryExpr(minus, "-", operand), depth);
-            return ParsePostfix(negated);
+            return ParsePostfix(negated, allowRootQuestionPostfix);
         }
         if (token.Kind == "text")
         {
             Take();
-            return ParsePostfix(RegisterExpression(new TextExpr(token, DecodeText(token))));
+            return ParsePostfix(RegisterExpression(new TextExpr(token, DecodeText(token))), allowRootQuestionPostfix);
         }
         if (token.Kind == "id")
         {
             if (Is("true") || Is("false"))
             {
                 Take();
-                return ParsePostfix(RegisterExpression(new BoolExpr(token, token.Text == "true")));
+                return ParsePostfix(RegisterExpression(new BoolExpr(token, token.Text == "true")), allowRootQuestionPostfix);
             }
             if (Is("null"))
                 Fail(token, "E_TYPE_MISMATCH", "The null literal is not supported; use Option<T>");
             if (Is("match"))
-                return ParsePostfix(ParseMatch(Take()));
+                return ParsePostfix(ParseMatch(Take()), allowRootQuestionPostfix);
             if (Is("lambda"))
-                return ParsePostfix(ParseLambda(Take()));
+                return ParsePostfix(ParseLambda(Take()), allowRootQuestionPostfix);
             if (Is("if"))
                 Fail(token, "E_UNSUPPORTED", $"Expression '{token.Text}' is not implemented yet");
             if (!IsBareIdentifier(token))
@@ -1663,7 +1666,7 @@ internal sealed class Parser
             {
                 expression = RegisterExpression(new NameExpr(token, reference.Declaration));
             }
-            return ParsePostfix(expression);
+            return ParsePostfix(expression, allowRootQuestionPostfix);
         }
         if (Is("("))
         {
@@ -1671,7 +1674,7 @@ internal sealed class Parser
             // Parentheses make a struct construction unambiguous as a match scrutinee.
             var expression = ParseExpr();
             Expect(")");
-            return ParsePostfix(expression);
+            return ParsePostfix(expression, allowRootQuestionPostfix);
         }
 
         Fail(token, "E_SYNTAX", $"Expected expression, found '{token.Text}'");
@@ -1862,10 +1865,20 @@ internal sealed class Parser
             ExpressionDepth(body) + 1);
     }
 
-    private Expr ParsePostfix(Expr expression)
+    private Expr ParsePostfix(Expr expression, bool allowQuestionPostfix = true)
     {
         while (true)
         {
+            if (allowQuestionPostfix && Is("?"))
+            {
+                var question = Take();
+                var depth = ExpressionDepth(expression) + 1;
+                if (depth > MaximumNestingDepth)
+                    Fail(question, "E_SYNTAX", "Expression nesting is too deep");
+                expression = RegisterExpression(new ResultPropagateExpr(question, expression), depth);
+                continue;
+            }
+
             if (Is("("))
             {
                 if (expression is not LambdaExpr)

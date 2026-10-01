@@ -1,0 +1,31 @@
+module fixture::invalid_result_propagation;
+
+fn option_operand(value: Option<i32>) -> Result<i32, Text> effects {} {
+    let item: i32 = value?;
+    return Ok(item);
+}
+
+fn non_result_operand(value: i32) -> Result<i32, Text> effects {} {
+    let item: i32 = value?;
+    return Ok(item);
+}
+
+fn non_result_return(value: Result<i32, Text>) -> i32 effects {} {
+    let item: i32 = value?;
+    return item;
+}
+
+fn mismatched_error(value: Result<i32, bool>) -> Result<i32, Text> effects {} {
+    let item: i32 = value?;
+    return Ok(item);
+}
+
+fn lambda_context(value: Result<i32, Text>) -> Result<i32, Text> effects {} {
+    let item: i32 = (lambda(input: Result<i32, Text>) => input?)(value);
+    return Ok(item);
+}
+
+test "test context" {
+    let value: Result<i32, Text> = Ok(1);
+    assert value? == 1;
+}

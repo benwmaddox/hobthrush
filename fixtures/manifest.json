@@ -652,5 +652,22 @@
       "E_TYPE_MISMATCH",
       "E_NAME_UNRESOLVED"
     ]
+  },
+  {
+    "file": "115-valid-result-propagation.lang",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "116-invalid-result-propagation.lang",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_RESULT_PROPAGATION_CONTEXT",
+      "E_RESULT_PROPAGATION_CONTEXT"
+    ]
   }
 ]

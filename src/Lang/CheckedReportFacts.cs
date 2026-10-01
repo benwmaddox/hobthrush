@@ -142,6 +142,7 @@ internal static class CheckedReportFacts
             TypedTraitCallExpr call => call.Arguments,
             TypedIntrinsicCallExpr intrinsic => intrinsic.Arguments,
             TypedAwaitExpr awaited => [awaited.Value],
+            TypedResultPropagateExpr propagated => [propagated.Operand],
             TypedDatabaseCallExpr database => [database.Receiver, database.Parameters],
             TypedBuiltinConstructExpr builtin => builtin.Arguments,
             TypedUnionConstructExpr union => union.Arguments,
@@ -277,6 +278,9 @@ internal static class CheckedReportFacts
                     break;
                 case TypedAwaitExpr awaited:
                     VisitExpression(awaited.Value, witnesses);
+                    break;
+                case TypedResultPropagateExpr propagated:
+                    VisitExpression(propagated.Operand, witnesses);
                     break;
                 case TypedListExpr list:
                     foreach (var item in list.Items)
