@@ -60,6 +60,7 @@ internal static partial class IntegrationTests
             ("Text length counts Unicode scalars and trim removes Unicode whitespace", TestUnicodeTextOperations),
             ("lists infer generic items, append immutably, split exactly, and preserve iteration order", TestListRuntime),
             ("immutable maps preserve snapshots, generic operations, nested values, and ordinal keys in managed and NativeAOT runtimes", TestMapRuntime),
+            ("non-Text Map keys are ordered, persistent, structurally equal, and preserve API/audit shapes in managed and NativeAOT runtimes", TestNonTextMapKeys),
             ("list loops, immutable assignment, effects, and resource escapes have exact diagnostics", TestListDiagnostics),
             ("union payload matching executes", TestUnionMatchOutput),
             ("Option and Result values require exhaustive typed matches", TestOptionResult),
@@ -176,7 +177,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(126, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(127, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -12296,14 +12297,14 @@ internal static partial class IntegrationTests
             fixtureSources[$"src/module{fixtureIndex++:D3}.hob"] = await File.ReadAllTextAsync(fixturePath);
         }
 
-        AssertEqual(120, activeFixtureCount,
+        AssertEqual(124, activeFixtureCount,
             "The active formatter fixture corpus must stay aligned with the checked-in fixture manifest.");
         AssertEqual(11, syntaxDiagnosticFixtureCount,
             "Syntax-error fixture exclusions must stay aligned with the checked-in manifest.");
         AssertEqual(string.Join('\n', parserRejectedFixtureFiles.Order(StringComparer.Ordinal)),
             string.Join('\n', parserRejectedFixtureFilesSeen.Order(StringComparer.Ordinal)),
             "Only the four active fixtures rejected by Parser.Parse should be excluded from formatter coverage.");
-        AssertEqual(105, fixtureSources.Count,
+        AssertEqual(109, fixtureSources.Count,
             "Every other active fixture should be included, including semantic-error cases.");
         foreach (var fixtureFile in parserRejectedFixtureFiles)
         {
@@ -12577,7 +12578,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(120, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(124, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -12586,7 +12587,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.hob ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("120 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("124 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -12764,9 +12765,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b120\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b124\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 120 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 124 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

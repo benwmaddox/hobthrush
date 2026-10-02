@@ -1,0 +1,12 @@
+module fixture::invalid_map_phantom_resource_keys;
+
+pub struct Phantom<T> { value: i32 }
+pub struct Select<T, U> { value: T }
+
+fn phantom(values: Map<self::fixture::invalid_map_phantom_resource_keys::Phantom<FsRead>, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn unusedSecondParameter(values: Map<self::fixture::invalid_map_phantom_resource_keys::Select<i32, FsRead>, i32>) -> i32 effects {} {
+    return values.length;
+}

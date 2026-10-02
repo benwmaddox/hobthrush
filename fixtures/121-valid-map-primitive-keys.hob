@@ -1,0 +1,177 @@
+module fixture::map_primitive_keys;
+
+fn boolAt(keys: List<bool>, index: i32, expected: bool) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn i32At(keys: List<i32>, index: i32, expected: i32) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn i64At(keys: List<i64>, index: i32, expected: i64) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn u32At(keys: List<u32>, index: i32, expected: u32) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn u64At(keys: List<u64>, index: i32, expected: u64) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn unitAt(keys: List<Unit>, index: i32) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == (),
+        None => false,
+    };
+}
+
+fn hasText(values: Map<i32, Text>, key: i32, expected: Text) -> bool effects {} {
+    return match values.get(key) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn store<T>(values: Map<i32, T>, key: i32, value: T) -> Map<i32, T> effects {} {
+    return values.set(key, value);
+}
+
+pub fn main() -> i32 effects {} {
+    let boolEmpty: Map<bool, Text> = Map.empty();
+    let boolMap: Map<bool, Text> = boolEmpty.set(true, "true").set(false, "false");
+    let boolKeys: List<bool> = boolMap.keys();
+    if boolKeys.length != 2 { return 1; }
+    if self::fixture::map_primitive_keys::boolAt(boolKeys, 0, false) == false { return 2; }
+    if self::fixture::map_primitive_keys::boolAt(boolKeys, 1, true) == false { return 3; }
+    let boolSame: Map<bool, Text> = boolEmpty.set(false, "false").set(true, "true");
+    if boolMap != boolSame { return 4; }
+
+    let i32Empty: Map<i32, Text> = Map.empty();
+    let i32Map: Map<i32, Text> = i32Empty
+        .set(10, "ten")
+        .set(2, "two")
+        .set(0, "zero")
+        .set(-10, "negative ten")
+        .set(2147483647, "maximum")
+        .set(-2147483648, "minimum");
+    let i32Keys: List<i32> = i32Map.keys();
+    if i32Keys.length != 6 { return 5; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 0, -2147483648) == false { return 6; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 1, -10) == false { return 7; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 2, 0) == false { return 8; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 3, 2) == false { return 9; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 4, 10) == false { return 10; }
+    if self::fixture::map_primitive_keys::i32At(i32Keys, 5, 2147483647) == false { return 11; }
+    let i32Same: Map<i32, Text> = i32Empty
+        .set(2147483647, "maximum")
+        .set(10, "ten")
+        .set(2, "two")
+        .set(0, "zero")
+        .set(-10, "negative ten")
+        .set(-2147483648, "minimum");
+    if i32Map != i32Same { return 12; }
+    let i32Updated: Map<i32, Text> = i32Map.set(2, "updated");
+    if self::fixture::map_primitive_keys::hasText(i32Map, 2, "two") == false { return 13; }
+    if self::fixture::map_primitive_keys::hasText(i32Updated, 2, "updated") == false { return 14; }
+    if i32Map.length != 6 { return 15; }
+    if i32Updated.length != 6 { return 16; }
+
+    let i64Empty: Map<i64, Text> = Map.empty();
+    let i64Map: Map<i64, Text> = i64Empty
+        .set(10i64, "ten")
+        .set(2i64, "two")
+        .set(0i64, "zero")
+        .set(-10i64, "negative ten")
+        .set(9223372036854775807i64, "maximum")
+        .set(-9223372036854775808i64, "minimum");
+    let i64Keys: List<i64> = i64Map.keys();
+    if i64Keys.length != 6 { return 17; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 0, -9223372036854775808i64) == false { return 18; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 1, -10i64) == false { return 19; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 2, 0i64) == false { return 20; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 3, 2i64) == false { return 21; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 4, 10i64) == false { return 22; }
+    if self::fixture::map_primitive_keys::i64At(i64Keys, 5, 9223372036854775807i64) == false { return 23; }
+    let i64Same: Map<i64, Text> = i64Empty
+        .set(-9223372036854775808i64, "minimum")
+        .set(-10i64, "negative ten")
+        .set(0i64, "zero")
+        .set(2i64, "two")
+        .set(10i64, "ten")
+        .set(9223372036854775807i64, "maximum");
+    if i64Map != i64Same { return 24; }
+
+    let u32Empty: Map<u32, Text> = Map.empty();
+    let u32Map: Map<u32, Text> = u32Empty
+        .set(10u32, "ten")
+        .set(2u32, "two")
+        .set(0u32, "zero")
+        .set(4294967295u32, "maximum");
+    let u32Keys: List<u32> = u32Map.keys();
+    if u32Keys.length != 4 { return 25; }
+    if self::fixture::map_primitive_keys::u32At(u32Keys, 0, 0u32) == false { return 26; }
+    if self::fixture::map_primitive_keys::u32At(u32Keys, 1, 2u32) == false { return 27; }
+    if self::fixture::map_primitive_keys::u32At(u32Keys, 2, 10u32) == false { return 28; }
+    if self::fixture::map_primitive_keys::u32At(u32Keys, 3, 4294967295u32) == false { return 29; }
+    let u32Same: Map<u32, Text> = u32Empty
+        .set(4294967295u32, "maximum")
+        .set(10u32, "ten")
+        .set(2u32, "two")
+        .set(0u32, "zero");
+    if u32Map != u32Same { return 30; }
+
+    let u64Empty: Map<u64, Text> = Map.empty();
+    let u64Map: Map<u64, Text> = u64Empty
+        .set(10u64, "ten")
+        .set(2u64, "two")
+        .set(0u64, "zero")
+        .set(18446744073709551615u64, "maximum");
+    let u64Keys: List<u64> = u64Map.keys();
+    if u64Keys.length != 4 { return 31; }
+    if self::fixture::map_primitive_keys::u64At(u64Keys, 0, 0u64) == false { return 32; }
+    if self::fixture::map_primitive_keys::u64At(u64Keys, 1, 2u64) == false { return 33; }
+    if self::fixture::map_primitive_keys::u64At(u64Keys, 2, 10u64) == false { return 34; }
+    if self::fixture::map_primitive_keys::u64At(u64Keys, 3, 18446744073709551615u64) == false { return 35; }
+    let u64Same: Map<u64, Text> = u64Empty
+        .set(18446744073709551615u64, "maximum")
+        .set(10u64, "ten")
+        .set(2u64, "two")
+        .set(0u64, "zero");
+    if u64Map != u64Same { return 36; }
+
+    let unitEmpty: Map<Unit, i32> = Map.empty();
+    let unitFirst: Map<Unit, i32> = unitEmpty.set((), 1);
+    let unitReplaced: Map<Unit, i32> = unitFirst.set((), 2);
+    let unitKeys: List<Unit> = unitReplaced.keys();
+    if unitFirst.length != 1 { return 37; }
+    if unitReplaced.length != 1 { return 38; }
+    if unitKeys.length != 1 { return 39; }
+    if self::fixture::map_primitive_keys::unitAt(unitKeys, 0) == false { return 40; }
+    if match unitFirst.get(()) { Some(value) => value == 1, None => false, } == false { return 41; }
+    if match unitReplaced.get(()) { Some(value) => value == 2, None => false, } == false { return 42; }
+    let unitSame: Map<Unit, i32> = unitEmpty.set((), 2);
+    if unitReplaced != unitSame { return 43; }
+
+    let genericEmpty: Map<i32, Text> = Map.empty();
+    let genericMap: Map<i32, Text> = self::fixture::map_primitive_keys::store::<Text>(genericEmpty, 7, "explicit");
+    if genericMap.length != 1 { return 44; }
+    if self::fixture::map_primitive_keys::hasText(genericMap, 7, "explicit") == false { return 45; }
+    return 1000;
+}

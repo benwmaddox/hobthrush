@@ -1,0 +1,16 @@
+module fixture::invalid_map_key_types;
+
+pub struct StructKey { value: i32 }
+pub union UnionKey { Value(i32), Empty }
+pub newtype NewtypeKey = i32;
+
+fn floating(values: Map<f64, Text>) -> i32 effects {} { return values.length; }
+fn bytes(values: Map<Bytes, Text>) -> i32 effects {} { return values.length; }
+fn structure(values: Map<self::fixture::invalid_map_key_types::StructKey, Text>) -> i32 effects {} { return values.length; }
+fn union(values: Map<self::fixture::invalid_map_key_types::UnionKey, Text>) -> i32 effects {} { return values.length; }
+fn newtype(values: Map<self::fixture::invalid_map_key_types::NewtypeKey, Text>) -> i32 effects {} { return values.length; }
+fn option(values: Map<Option<i32>, Text>) -> i32 effects {} { return values.length; }
+fn list(values: Map<List<i32>, Text>) -> i32 effects {} { return values.length; }
+fn result(values: Map<Result<i32, Text>, Text>) -> i32 effects {} { return values.length; }
+fn map(values: Map<Map<Text, i32>, Text>) -> i32 effects {} { return values.length; }
+fn generic<K>(values: Map<K, Text>) -> i32 effects {} { return values.length; }

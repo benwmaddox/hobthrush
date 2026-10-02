@@ -713,5 +713,47 @@
       "E_TYPE_MISMATCH",
       "E_EFFECT_EXCEEDED"
     ]
+  },
+  {
+    "file": "121-valid-map-primitive-keys.hob",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "122-invalid-map-key-types.hob",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
+  },
+  {
+    "file": "123-invalid-map-resource-keys.hob",
+    "status": "active",
+    "expectedCodes": [
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE"
+    ]
+  },
+  {
+    "file": "124-invalid-map-phantom-resource-keys.hob",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH"
+    ]
   }
 ]
