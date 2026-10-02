@@ -410,7 +410,7 @@ internal static class SourceFormatter
 
             var previousIndex = FindPreviousTokenIndex(items, index - 1);
             if (previousIndex < 0 || items[previousIndex].Token is not { } previous ||
-                !IsWordLike(previous) && previous.Text != ">")
+                !IsWordLike(previous) && previous.Text is not (">" or "::"))
                 continue;
 
             var nesting = 1;

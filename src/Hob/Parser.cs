@@ -523,6 +523,27 @@ internal sealed class Parser
         return new SourceDeclarationRefSyntax(root, path[..^1], path[^1], at);
     }
 
+    private SourceDeclarationRefSyntax ParseCallDeclarationRef()
+    {
+        var at = ExpectBareIdentifier();
+        if (!Is("::") || LookAhead().Text == "<")
+            return new SourceDeclarationRefSyntax(null, Array.Empty<string>(), at.Text, at);
+
+        var root = at.Text;
+        Take();
+        var path = new List<string> { ExpectMemberIdentifier().Text };
+        while (Is("::") && LookAhead().Text != "<")
+        {
+            Take();
+            path.Add(ExpectMemberIdentifier().Text);
+        }
+
+        if (path.Count < 2)
+            Fail(at, "E_SYNTAX", "A qualified declaration reference must include a module and declaration");
+
+        return new SourceDeclarationRefSyntax(root, path[..^1], path[^1], at);
+    }
+
     private void Fail(Token token, string code, string message)
     {
         _diagnostics.Add(new Diagnostic(
@@ -1666,9 +1687,17 @@ internal sealed class Parser
             if (!IsBareIdentifier(token))
                 Fail(token, "E_SYNTAX", $"Keyword '{token.Text}' is not an expression");
 
-            var reference = ParseSourceDeclarationRef();
+            var reference = ParseCallDeclarationRef();
             Expr expression;
-            if (reference.IsQualified && IsTypeArgumentListFollowedByUnionVariant())
+            if (Is("::") && LookAhead().Text == "<")
+            {
+                Take();
+                var explicitTypeArguments = ParseTypeArguments();
+                var arguments = ParseArguments();
+                expression = RegisterExpression(new CallExpr(token, reference, explicitTypeArguments, arguments),
+                    1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
+            }
+            else if (reference.IsQualified && IsTypeArgumentListFollowedByUnionVariant())
             {
                 expression = ParseQualifiedTypeMemberCall(reference, ParseTypeArguments());
             }
@@ -1688,7 +1717,7 @@ internal sealed class Parser
             else if (reference.IsQualified && Is("("))
             {
                 var arguments = ParseArguments();
-                expression = RegisterExpression(new CallExpr(token, reference, arguments),
+                expression = RegisterExpression(new CallExpr(token, reference, [], arguments),
                     1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
             }
             else if (reference.IsQualified)
@@ -1702,7 +1731,7 @@ internal sealed class Parser
             else if (Is("("))
             {
                 var arguments = ParseArguments();
-                expression = RegisterExpression(new CallExpr(token, reference, arguments),
+                expression = RegisterExpression(new CallExpr(token, reference, [], arguments),
                     1 + arguments.Select(ExpressionDepth).DefaultIfEmpty(0).Max());
             }
             else

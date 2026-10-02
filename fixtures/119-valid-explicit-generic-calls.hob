@@ -1,0 +1,70 @@
+module fixture::explicit_generic_calls;
+
+pub struct Box<T> { value: T }
+
+pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+
+fn measure_i32(value: i32) -> i32 effects {} {
+    return value * 10;
+}
+
+pub impl self::fixture::explicit_generic_calls::Measure for i32 {
+    measure = self::fixture::explicit_generic_calls::measure_i32;
+}
+
+fn identity<T>(value: T) -> T effects {} {
+    return value;
+}
+
+fn forward<T>(value: T) -> T effects {} {
+    return identity::<T>(value);
+}
+
+fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
+    return match value {
+        Some(item) => Ok(item),
+        None => Err(error),
+    };
+}
+
+fn result_tag<T, E>(value: Result<T, E>) -> i32 effects {} {
+    return match value {
+        Ok(item) => 1,
+        Err(error) => 2,
+    };
+}
+
+fn measure_bound<T: self::fixture::explicit_generic_calls::Measure>(value: T) -> i32 effects {} {
+    return self::fixture::explicit_generic_calls::Measure.measure(value);
+}
+
+fn measure_forward<T: self::fixture::explicit_generic_calls::Measure>(value: T) -> i32 effects {} {
+    return measure_bound::<T>(value);
+}
+
+async fn async_identity<T>(value: T) -> T effects {} {
+    return value;
+}
+
+async fn async_forward<T>(value: T) -> T effects {} {
+    return await async_identity::<T>(value);
+}
+
+pub fn main() -> i32 effects {} {
+    let qualified: i32 = self::fixture::explicit_generic_calls::identity::<i32>(1);
+    let forwarded: i32 = forward::<i32>(2);
+    let ready: Result<Text, Text> = require::<Text, Text>(Some("ready"), "fallback");
+    let absent: Result<i32, Text> = require::<i32, Text>(None, "missing");
+    let direct_ok: i32 = result_tag::<i32, Text>(Ok(3));
+    let direct_err: i32 = result_tag::<i32, Text>(Err("failed"));
+    let boxes: List<self::fixture::explicit_generic_calls::Box<i32>> =
+        identity::<List<self::fixture::explicit_generic_calls::Box<i32>>>([
+            self::fixture::explicit_generic_calls::Box<i32> { value: 4 },
+        ]);
+    let bound: i32 = measure_forward::<i32>(5);
+    if identity::<i32>(1) < identity::<i32>(2) {
+        return qualified + forwarded + result_tag::<Text, Text>(ready) + result_tag::<i32, Text>(absent)
+            + direct_ok + direct_err + boxes.length + bound;
+    }
+    return 0;
+}

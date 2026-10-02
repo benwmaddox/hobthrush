@@ -4432,6 +4432,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return function;
     }
 
+    private FunctionSymbol? ResolveExplicitLocalFunctionReference(SourceDeclarationRefSyntax reference)
+    {
+        if (CurrentModule.DeclaredFunctions.TryGetValue(reference.Declaration, out var function))
+            return function;
+
+        Add(
+            "E_NAME_UNRESOLVED",
+            $"Module '{CurrentModule.Program.Module}' does not declare function '{reference.Declaration}'",
+            reference.At);
+        return null;
+    }
+
     private UnionSymbol? ResolveUnionReference(SourceDeclarationRefSyntax reference)
     {
         if (!TryResolveTargetModule(reference, out var target)) return null;
@@ -5445,16 +5457,25 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         var reference = expression.Reference;
         var name = reference.Declaration;
+        if (!reference.IsQualified && expression.ExplicitTypeArguments.Count != 0 &&
+            name is ("Some" or "Ok" or "Err" or "None"))
+            return CheckExplicitBuiltinCall(expression, locals, depth);
+
         if (!reference.IsQualified && name is "Some" or "Ok" or "Err")
             return CheckBuiltinCall(expression, expected, locals, depth);
 
-        var function = ResolveFunctionReference(reference);
+        var function = !reference.IsQualified && expression.ExplicitTypeArguments.Count != 0
+            ? ResolveExplicitLocalFunctionReference(reference)
+            : ResolveFunctionReference(reference);
         if (function is not null)
         {
             if (function.Declaration.IsAsync && !isAwaitOperand)
                 Add("E_ASYNC_CALL_UNAWAITED", $"Async function '{name}' must be called with 'await'", expression.At);
             else if (!function.Declaration.IsAsync && isAwaitOperand)
                 Add("E_AWAIT_SYNC", $"Function '{name}' is synchronous and cannot be awaited", expression.At);
+
+            if (expression.ExplicitTypeArguments.Count != 0)
+                return CheckExplicitGenericCall(expression, function, locals, depth);
 
             var isGeneric = function.TypeParameters.Count != 0;
             if (expression.Arguments.Count != function.Parameters.Count)
@@ -5540,10 +5561,144 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 expression.At);
         }
 
+        foreach (var typeArgument in expression.ExplicitTypeArguments)
+            _ = ResolveType(typeArgument, 0, _currentFunction?.TypeParametersByName);
         foreach (var argument in expression.Arguments)
             _ = CheckExpr(argument, null, locals, depth);
         return new TypedErrorExpr(expression.At);
     }
+
+    private TypedExpr CheckExplicitBuiltinCall(
+        CallExpr expression,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        foreach (var typeArgument in expression.ExplicitTypeArguments)
+            _ = ResolveType(typeArgument, 0, _currentFunction?.TypeParametersByName);
+
+        var name = expression.Reference.Declaration;
+        Add(
+            "E_TYPE_MISMATCH",
+            $"Built-in constructor '{name}' does not accept explicit type arguments",
+            expression.At);
+        var expectedValueCount = name == "None" ? 0 : 1;
+        if (expression.Arguments.Count != expectedValueCount)
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Constructor '{name}' expects {expectedValueCount} argument, got {expression.Arguments.Count}",
+                expression.At);
+        foreach (var argument in expression.Arguments)
+            _ = CheckExpr(argument, null, locals, depth);
+        return new TypedErrorExpr(expression.At);
+    }
+
+    private TypedExpr CheckExplicitGenericCall(
+        CallExpr expression,
+        FunctionSymbol function,
+        Dictionary<string, LocalSymbol> locals,
+        int depth)
+    {
+        var name = expression.Reference.Declaration;
+        var typeArguments = expression.ExplicitTypeArguments
+            .Select(typeArgument => ResolveType(typeArgument, 0, _currentFunction?.TypeParametersByName))
+            .ToArray();
+        var hasCorrectTypeArity = typeArguments.Length == function.TypeParameters.Count;
+        if (!hasCorrectTypeArity)
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Function '{name}' expects {function.TypeParameters.Count} type arguments, got {typeArguments.Length}",
+                expression.At);
+
+        if (!hasCorrectTypeArity || typeArguments.Any(ContainsError))
+        {
+            // An incomplete or unresolved vector must not provide partial context to constructors.
+            if (expression.Arguments.Count != function.Parameters.Count)
+                Add(
+                    "E_TYPE_MISMATCH",
+                    $"Function '{name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}",
+                    expression.At);
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            return new TypedErrorExpr(expression.At);
+        }
+
+        var substitutions = new Dictionary<HobType, HobType>();
+        for (var index = 0; index < typeArguments.Length; index++)
+            substitutions.Add(function.TypeParameters[index], typeArguments[index]);
+
+        var parameterTypes = function.Parameters
+            .Select(parameter => SubstituteType(parameter.Type, substitutions))
+            .ToArray();
+        var instantiatedReturnType = SubstituteType(function.ReturnType, substitutions);
+        var hasCorrectValueArity = expression.Arguments.Count == function.Parameters.Count;
+        if (!hasCorrectValueArity)
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Function '{name}' expects {function.Parameters.Count} arguments, got {expression.Arguments.Count}",
+                expression.At);
+
+        var diagnosticsBeforeArguments = diagnostics.Count;
+        var arguments = new List<TypedExpr>(expression.Arguments.Count);
+        for (var index = 0; index < expression.Arguments.Count; index++)
+        {
+            var expectedArgument = index < parameterTypes.Length && !parameterTypes[index].IsError
+                ? parameterTypes[index]
+                : null;
+            arguments.Add(CheckExpr(expression.Arguments[index], expectedArgument, locals, depth));
+        }
+
+        var traitWitnesses = new List<TypedTraitWitness>();
+        var boundsValid = true;
+        for (var parameterOrdinal = 0; parameterOrdinal < function.TypeParameterBounds.Count; parameterOrdinal++)
+        {
+            if (parameterOrdinal >= typeArguments.Length || ContainsError(typeArguments[parameterOrdinal]))
+            {
+                boundsValid = false;
+                continue;
+            }
+            foreach (var bound in function.TypeParameterBounds[parameterOrdinal])
+            {
+                var trait = _traits[bound.TraitId];
+                var witness = ResolveTraitWitness(trait, typeArguments[parameterOrdinal], expression.At);
+                if (witness is null)
+                    boundsValid = false;
+                else
+                    traitWitnesses.Add(witness);
+            }
+        }
+
+        var signatureTypesValid = !function.ReturnType.IsError &&
+            function.Parameters.All(parameter => !parameter.Type.IsError);
+        var argumentsValid = diagnostics.Count == diagnosticsBeforeArguments &&
+            arguments.All(argument => !ContainsError(argument.Type));
+
+        foreach (var parameterType in parameterTypes)
+            ValidateResourceListType(parameterType, expression.At);
+        ValidateResourceListType(instantiatedReturnType, expression.At);
+        for (var index = 0; index < arguments.Count; index++)
+            ValidateResourceListType(arguments[index].Type, expression.Arguments[index].At);
+
+        var resourceTypesValid = parameterTypes.All(IsResourceContainerValid) &&
+            IsResourceContainerValid(instantiatedReturnType) &&
+            arguments.All(argument => IsResourceContainerValid(argument.Type));
+        if (hasCorrectValueArity && signatureTypesValid && argumentsValid && boundsValid && resourceTypesValid)
+            _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
+
+        var returnType = hasCorrectValueArity && signatureTypesValid && argumentsValid && boundsValid && resourceTypesValid
+            ? instantiatedReturnType
+            : HobType.Error;
+        return new TypedCallExpr(
+            returnType,
+            function.Id,
+            function.Declaration.IsAsync,
+            ReadOnly(typeArguments),
+            ReadOnly(traitWitnesses),
+            ReadOnly(arguments),
+            expression.At);
+    }
+
+    private bool IsResourceContainerValid(HobType type) =>
+        !ContainsIllegalResourceList(type) && !ContainsIllegalResourceMap(type);
 
     private TypedExpr CheckIntegerArithmeticMemberCall(
         MemberCallExpr expression,
