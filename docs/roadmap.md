@@ -33,6 +33,7 @@ The design direction gives AI systems control of detailed project work: evaluate
 - [x] Resolve local path dependencies on library packages, qualify direct dependency references by alias, and preserve package-specific module identity.
 - [x] Create portable deterministic package locks and reject missing, malformed, or stale locks before package checks and builds.
 - [x] Add `hob new`/`hob add` and exact-commit Git library dependencies through the external source provider; lock v3 records stable identities and normal package commands work offline from the verified cache.
+- [x] Add offline `hob fmt FILE_OR_PACKAGE [--check]` for supported `.hob` syntax, with root-package source selection, comment/string preservation, deterministic UTF-8/LF output, and parse-before-write behavior.
 - [x] Add scoped `if`/`else`, comparison operators with defined precedence, branch-local scopes, guaranteed-return checking, and `E_UNREACHABLE`.
 - [x] Add `Text.length` using Unicode scalar counts and `Text.trim()` using Unicode whitespace trimming.
 - [x] Add generic functions with type inference from independently typed arguments.

@@ -160,6 +160,7 @@ internal static partial class IntegrationTests
             ("maintained scan CLI awaits FsRead and handles typed file and normalization results", TestScanCliExample),
             ("Text validation package builds and qualified generic calls specialize correctly", TestTextValidationExample),
             ("language tests run the text validation suite with exact output", TestManagedLanguageTests),
+            ("hob fmt is deterministic and check mode preserves source bytes", TestSourceFormatter),
             ("language tests report failures and continue, including empty and multi-module suites", TestManagedLanguageTestOutcomes),
             ("language tests validate assertions, dependency selection, and locks", TestManagedLanguageTestPackageRules),
             ("agent-facing docs track active fixtures, emitted diagnostics, grammar, and commands", TestSpecificationDriftOracle),
@@ -174,7 +175,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(124, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(125, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -12056,6 +12057,287 @@ internal static partial class IntegrationTests
             "Audit function facts must include the private implementation binding selected by the concrete witness.");
     }
 
+    private static async Task TestSourceFormatter(Harness harness)
+    {
+        static string[] SnapshotTree(string root)
+        {
+            var paths = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+                .Prepend(root)
+                .ToArray();
+            return paths
+                .OrderBy(path => path == root
+                    ? "."
+                    : Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'), StringComparer.Ordinal)
+                .Select(path =>
+                {
+                    var relative = path == root
+                        ? "."
+                        : Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+                    var timestamp = File.GetLastWriteTimeUtc(path).Ticks;
+                    if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
+                        return $"D|{relative}|{timestamp}";
+
+                    var hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+                    return $"F|{relative}|{timestamp}|{hash}";
+                })
+                .ToArray();
+        }
+
+        static void AssertTreeUnchanged(string[] before, string[] after, string context) =>
+            AssertEqual(string.Join('\n', before), string.Join('\n', after), context);
+
+        var repositoryRoot = FindRepositoryRoot()
+            ?? throw new InvalidOperationException("Could not locate the Hobthrush repository root.");
+        var formatterFixtureRoot = Path.Combine(repositoryRoot, "tests", "Hob.IntegrationTests", "Fixtures", "SourceFormatter");
+        var goldenInput = await File.ReadAllTextAsync(Path.Combine(formatterFixtureRoot, "unstyled.hob"));
+        var goldenExpected = await File.ReadAllBytesAsync(Path.Combine(formatterFixtureRoot, "expected.hob"));
+        var goldenDirectory = Path.Combine(harness.TemporaryRoot, "formatter-golden");
+        Directory.CreateDirectory(goldenDirectory);
+        var goldenPath = await harness.WriteSourceAsync(goldenDirectory, "main.hob", goldenInput);
+        var goldenFormat = await harness.InvokeFileAsync("formatter-golden", goldenPath, "fmt");
+        AssertEqual(0, goldenFormat.ExitCode, Describe(goldenFormat));
+        var formattedGoldenBytes = await File.ReadAllBytesAsync(goldenPath);
+        AssertTrue(goldenExpected.SequenceEqual(formattedGoldenBytes),
+            "The source formatter must match the canonical golden output byte for byte.");
+
+        var goldenTime = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(goldenPath, goldenTime);
+        Directory.SetLastWriteTimeUtc(goldenDirectory, goldenTime);
+        var goldenSnapshot = SnapshotTree(goldenDirectory);
+        var cleanFileCheck = await harness.InvokeFileAsync("formatter-golden-check", goldenPath, "fmt", "--check");
+        AssertEqual(0, cleanFileCheck.ExitCode, Describe(cleanFileCheck));
+        AssertTreeUnchanged(goldenSnapshot, SnapshotTree(goldenDirectory),
+            "A clean file check must preserve bytes, timestamps, and directory contents.");
+
+        var crlfPath = Path.Combine(goldenDirectory, "crlf.hob");
+        var unrelatedPath = Path.Combine(goldenDirectory, "unrelated.txt");
+        var crlfSource = "\uFEFF" + goldenInput.Replace("\n", "\r\n", StringComparison.Ordinal);
+        await File.WriteAllBytesAsync(crlfPath, Encoding.UTF8.GetBytes(crlfSource));
+        await File.WriteAllTextAsync(unrelatedPath, "leave this file alone\n");
+        File.SetLastWriteTimeUtc(crlfPath, goldenTime);
+        var dirtySnapshot = SnapshotTree(goldenDirectory);
+        var dirtyFileCheck = await harness.InvokeFileAsync("formatter-crlf-dirty-check", crlfPath, "fmt", "--check");
+        AssertEqual(1, dirtyFileCheck.ExitCode, Describe(dirtyFileCheck));
+        AssertTrue(dirtyFileCheck.StandardError.Contains("Would reformat:", StringComparison.Ordinal),
+            "A dirty file check must identify the file that needs formatting.");
+        AssertTreeUnchanged(dirtySnapshot, SnapshotTree(goldenDirectory),
+            "A dirty file check must preserve source bytes, timestamps, and directory contents.");
+
+        var crlfFormat = await harness.InvokeFileAsync("formatter-crlf-format", crlfPath, "fmt");
+        AssertEqual(0, crlfFormat.ExitCode, Describe(crlfFormat));
+        var formattedCrlfBytes = await File.ReadAllBytesAsync(crlfPath);
+        AssertTrue(goldenExpected.SequenceEqual(formattedCrlfBytes),
+            "Formatting CRLF UTF-8 with a BOM must write canonical UTF-8 without a BOM and LF endings.");
+        AssertEqual("leave this file alone\n", await File.ReadAllTextAsync(unrelatedPath),
+            "File mode must not touch adjacent files.");
+
+        var invalidUtf8Path = Path.Combine(goldenDirectory, "invalid-utf8.hob");
+        var invalidUtf8 = new byte[] { 0xC3, 0x28 };
+        await File.WriteAllBytesAsync(invalidUtf8Path, invalidUtf8);
+        var invalidEncoding = await harness.InvokeFileAsync("formatter-invalid-utf8", invalidUtf8Path, "fmt");
+        AssertEqual(1, invalidEncoding.ExitCode, Describe(invalidEncoding));
+        AssertTrue(invalidEncoding.StandardError.Contains("not valid UTF-8", StringComparison.Ordinal),
+            "Invalid UTF-8 must have a stable source diagnostic.");
+        var invalidUtf8After = await File.ReadAllBytesAsync(invalidUtf8Path);
+        AssertTrue(invalidUtf8.SequenceEqual(invalidUtf8After),
+            "Invalid UTF-8 input must remain byte-identical.");
+
+        var packageManifest = LibraryPackageManifest("formatter-package")
+            + "\n[managed_adapter]\nbridge_id = \"hob.sha256-text.v1\"\n"
+            + "target_framework = \"net10.0\"\n"
+            + "assembly_path = \"missing/Formatter.Adapter.dll\"\n"
+            + $"assembly_sha256 = \"{new string('a', 64)}\"\n"
+            + "\n[dependencies]\nlocal = \"../local-dependency\"\nmissing = \"../missing-dependency\"\n";
+        const string sourceA = "module a; pub fn value() -> i32 effects {} { return 1; }";
+        const string sourceZ = "module z; pub fn value() -> i32 effects {} { return 2; }";
+        var packageRoot = await harness.WritePackageAsync(
+            "formatter-package",
+            packageManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/z.hob"] = sourceZ,
+                ["src/a.hob"] = sourceA
+            });
+        var packageParent = Path.GetDirectoryName(packageRoot)
+            ?? throw new InvalidOperationException("The formatter test package has no parent directory.");
+        var dependencyRoot = Path.Combine(packageParent, "local-dependency");
+        var missingDependencyRoot = Path.Combine(packageParent, "missing-dependency");
+        Directory.CreateDirectory(Path.Combine(dependencyRoot, "src"));
+        await File.WriteAllTextAsync(Path.Combine(dependencyRoot, "hob.toml"), LibraryPackageManifest("formatter-dependency"));
+        var dependencySource = Path.Combine(dependencyRoot, "src", "dependency.hob");
+        const string dependencyText = "module dependency; pub fn value() -> i32 effects {} { return 3; }";
+        await File.WriteAllTextAsync(dependencySource, dependencyText);
+        var lockPath = Path.Combine(packageRoot, "hob.lock");
+        await File.WriteAllTextAsync(lockPath, "lock sentinel\n");
+        var unrelatedPackagePath = Path.Combine(packageRoot, "obj", "generated.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(unrelatedPackagePath)!);
+        await File.WriteAllTextAsync(unrelatedPackagePath, "generated sentinel\n");
+
+        var packageSnapshot = SnapshotTree(packageRoot);
+        var dependencySnapshot = SnapshotTree(dependencyRoot);
+        var packageDirtyCheck = await harness.InvokeCompilerCommandAsync("fmt", packageRoot, "--check");
+        AssertEqual(1, packageDirtyCheck.ExitCode, Describe(packageDirtyCheck));
+        var orderedA = packageDirtyCheck.StandardError.IndexOf(Path.Combine(packageRoot, "src", "a.hob"), StringComparison.Ordinal);
+        var orderedZ = packageDirtyCheck.StandardError.IndexOf(Path.Combine(packageRoot, "src", "z.hob"), StringComparison.Ordinal);
+        AssertTrue(orderedA >= 0 && orderedZ > orderedA,
+            "Package check output must follow ordinal source-path order.");
+        AssertTreeUnchanged(packageSnapshot, SnapshotTree(packageRoot),
+            "A dirty package check must preserve source bytes, timestamps, and directory contents.");
+        AssertTreeUnchanged(dependencySnapshot, SnapshotTree(dependencyRoot),
+            "Formatting the root package must not inspect or modify dependency source files.");
+
+        var packageFormat = await harness.InvokeCompilerCommandAsync("fmt", packageRoot);
+        AssertEqual(0, packageFormat.ExitCode, Describe(packageFormat));
+        AssertEqual("module a;\n\npub fn value() -> i32 effects {} {\n    return 1;\n}\n",
+            await File.ReadAllTextAsync(Path.Combine(packageRoot, "src", "a.hob")),
+            "Package mode must format root package sources.");
+        AssertEqual(dependencyText, await File.ReadAllTextAsync(dependencySource),
+            "Package mode must leave a path dependency's source unchanged.");
+        AssertEqual(packageManifest, await File.ReadAllTextAsync(Path.Combine(packageRoot, "hob.toml")),
+            "Package mode must not format the manifest.");
+        AssertEqual("lock sentinel\n", await File.ReadAllTextAsync(lockPath),
+            "Package mode must not format the lockfile.");
+        AssertEqual("generated sentinel\n", await File.ReadAllTextAsync(unrelatedPackagePath),
+            "Package mode must not change unrelated generated files.");
+        AssertTreeUnchanged(dependencySnapshot, SnapshotTree(dependencyRoot),
+            "Formatting must leave all dependency files and timestamps unchanged.");
+        AssertTrue(!Directory.Exists(missingDependencyRoot),
+            "Formatting must not fetch or create a missing path dependency.");
+        var cleanPackageSnapshot = SnapshotTree(packageRoot);
+        var cleanPackageCheck = await harness.InvokeCompilerCommandAsync("fmt", packageRoot, "--check");
+        AssertEqual(0, cleanPackageCheck.ExitCode, Describe(cleanPackageCheck));
+        AssertTreeUnchanged(cleanPackageSnapshot, SnapshotTree(packageRoot),
+            "A clean package check must preserve file hashes, timestamps, and directory contents.");
+
+        var processPackage = await harness.WritePackageAsync(
+            "formatter-process-package",
+            """
+            name = "formatter-process-package"
+            version = "0.1.0"
+            kind = "cli"
+            source_root = "src"
+            entry_module = "app"
+            process_windows_path = "bin/missing-runner.exe"
+            process_windows_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            [capabilities]
+            process.spawn = "allow"
+            """,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/main.hob"] = "module app; pub fn main()->i32 effects {}{return 42;}"
+            });
+        var processFormat = await harness.InvokeCompilerCommandAsync("fmt", processPackage);
+        AssertEqual(0, processFormat.ExitCode, Describe(processFormat));
+        AssertEqual(
+            "module app;\n\npub fn main() -> i32 effects {} {\n    return 42;\n}\n",
+            await File.ReadAllTextAsync(Path.Combine(processPackage, "src", "main.hob")),
+            "Formatting must not inspect a configured but unavailable process executable.");
+
+        var malformedPackage = await harness.WritePackageAsync(
+            "formatter-malformed-package",
+            LibraryPackageManifest("formatter-malformed"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/a.hob"] = sourceA,
+                ["src/z.hob"] = "module z; fn broken( -> i32 effects {} { return 1; }"
+            });
+        var malformedSnapshot = SnapshotTree(malformedPackage);
+        var malformedFormat = await harness.InvokeCompilerCommandAsync("fmt", malformedPackage);
+        AssertEqual(1, malformedFormat.ExitCode, Describe(malformedFormat));
+        AssertTrue(malformedFormat.StandardError.Contains("E_SYNTAX", StringComparison.Ordinal),
+            "Malformed package source must report the ordinary parser diagnostic.");
+        AssertTreeUnchanged(malformedSnapshot, SnapshotTree(malformedPackage),
+            "A malformed module must prevent every source in the package from being rewritten.");
+
+        using var fixtureManifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(repositoryRoot, "fixtures", "manifest.json")));
+        var syntaxErrors = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "E_SYNTAX", "E_UNSUPPORTED", "E_NUMERIC_LITERAL_RANGE", "E_NUMERIC_LITERAL_TOO_LONG",
+            "E_COMMAND_DECL", "E_ROUTE_DECL", "E_TRAIT_DECL"
+        };
+        var parserRejectedFixtureFiles = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "09-literal-overflow.hob",
+            "20-null-rejected.hob",
+            "85-generic-union-pattern-type-arguments.hob",
+            "108-invalid-wide-integer-literal-range.hob"
+        };
+        var fixtureSources = new Dictionary<string, string>(StringComparer.Ordinal);
+        var fixtureIndex = 0;
+        var activeFixtureCount = 0;
+        var syntaxDiagnosticFixtureCount = 0;
+        var parserRejectedFixtureFilesSeen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var fixture in fixtureManifest.RootElement.EnumerateArray())
+        {
+            if (fixture.GetProperty("status").GetString() != "active")
+                continue;
+            activeFixtureCount++;
+
+            var codes = new List<string>();
+            if (fixture.TryGetProperty("expectedCode", out var expectedCode) && expectedCode.ValueKind == JsonValueKind.String)
+                codes.Add(expectedCode.GetString()!);
+            if (fixture.TryGetProperty("expectedCodes", out var expectedCodes) && expectedCodes.ValueKind == JsonValueKind.Array)
+                codes.AddRange(expectedCodes.EnumerateArray().Select(code => code.GetString()!));
+            var fixtureFile = fixture.GetProperty("file").GetString()!;
+            if (codes.Any(syntaxErrors.Contains))
+            {
+                syntaxDiagnosticFixtureCount++;
+                continue;
+            }
+            if (parserRejectedFixtureFiles.Contains(fixtureFile))
+            {
+                parserRejectedFixtureFilesSeen.Add(fixtureFile);
+                continue;
+            }
+
+            var fixturePath = Path.Combine(repositoryRoot, "fixtures", fixtureFile);
+            fixtureSources[$"src/module{fixtureIndex++:D3}.hob"] = await File.ReadAllTextAsync(fixturePath);
+        }
+
+        AssertEqual(118, activeFixtureCount,
+            "The active formatter fixture corpus must stay aligned with the checked-in fixture manifest.");
+        AssertEqual(11, syntaxDiagnosticFixtureCount,
+            "Syntax-error fixture exclusions must stay aligned with the checked-in manifest.");
+        AssertEqual(string.Join('\n', parserRejectedFixtureFiles.Order(StringComparer.Ordinal)),
+            string.Join('\n', parserRejectedFixtureFilesSeen.Order(StringComparer.Ordinal)),
+            "Only the four active fixtures rejected by Parser.Parse should be excluded from formatter coverage.");
+        AssertEqual(103, fixtureSources.Count,
+            "Every other active fixture should be included, including semantic-error cases.");
+        foreach (var fixtureFile in parserRejectedFixtureFiles)
+        {
+            var rejectedSource = Path.Combine(repositoryRoot, "fixtures", fixtureFile);
+            var rejectedFormat = await harness.InvokeFileAsync(
+                $"formatter-parser-rejected-{Path.GetFileNameWithoutExtension(fixtureFile)}",
+                rejectedSource,
+                "fmt",
+                "--check");
+            AssertEqual(1, rejectedFormat.ExitCode, Describe(rejectedFormat));
+            AssertTrue(rejectedFormat.StandardError.Contains("E_TYPE_MISMATCH", StringComparison.Ordinal),
+                $"{fixtureFile} should retain Parser.Parse's E_TYPE_MISMATCH diagnostic.");
+        }
+        var fixturePackage = await harness.WritePackageAsync(
+            "formatter-active-fixtures",
+            LibraryPackageManifest("formatter-active-fixtures"),
+            fixtureSources);
+        var fixtureFormat = await harness.InvokeCompilerCommandAsync("fmt", fixturePackage);
+        AssertEqual(0, fixtureFormat.ExitCode, Describe(fixtureFormat));
+        var formattedFixtureSnapshot = SnapshotTree(fixturePackage);
+        var fixtureCheck = await harness.InvokeCompilerCommandAsync("fmt", fixturePackage, "--check");
+        AssertEqual(0, fixtureCheck.ExitCode, Describe(fixtureCheck));
+        AssertTreeUnchanged(formattedFixtureSnapshot, SnapshotTree(fixturePackage),
+            "Formatting all parser-valid active fixtures must be idempotent and check-only.");
+
+        var usage = await harness.InvokeCompilerCommandAsync("fmt");
+        AssertEqual(2, usage.ExitCode, Describe(usage));
+        AssertEqual("Usage: hob fmt FILE_OR_PACKAGE [--check]" + Environment.NewLine,
+            usage.StandardError, "The formatter must report its command-specific usage contract.");
+        var checkWithoutTarget = await harness.InvokeCompilerCommandAsync("fmt", "--check");
+        AssertEqual(2, checkWithoutTarget.ExitCode, Describe(checkWithoutTarget));
+        AssertEqual(usage.StandardError, checkWithoutTarget.StandardError,
+            "Check mode without a target must report command usage.");
+    }
+
     private static async Task TestManagedLanguageTests(Harness harness)
     {
         var packageRoot = Path.Combine(harness.RepositoryRoot, "examples", "text-validation");
@@ -12415,6 +12697,7 @@ internal static partial class IntegrationTests
             "new lib|cli|web NAME",
             "add SOURCE",
             "add PACKAGE_DIRECTORY SOURCE",
+            "fmt FILE_OR_PACKAGE [--check]",
             "check FILE_OR_PACKAGE [--json]",
             "build FILE_OR_PACKAGE [--aot --rid RID]",
             "run FILE_OR_PACKAGE [-- APP_ARGS]",
@@ -12471,7 +12754,7 @@ internal static partial class IntegrationTests
         AssertTrue(grammar.Contains("hob add SOURCE", StringComparison.Ordinal),
             "docs/grammar.md must document adding a dependency from the current package directory.");
 
-        foreach (var unsupportedCommand in new[] { "fmt" })
+        foreach (var unsupportedCommand in new[] { "unknown-command" })
         {
             var unsupported = await harness.InvokeCompilerCommandAsync(unsupportedCommand);
             AssertEqual(2, unsupported.ExitCode, Describe(unsupported));

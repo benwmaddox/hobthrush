@@ -1,0 +1,100 @@
+// Preserve the comment before the module.
+module formatter::golden; // module comment
+
+// Keep comments around declarations.
+pub union Choice<T> {
+    Empty,
+    Value(T),
+}
+
+pub struct Pair {
+    left: i32,
+    right: Text,
+}
+
+pub struct fn {
+    value: i32,
+}
+
+pub struct effects {
+    left: i32,
+    right: i32,
+}
+
+pub newtype UserId = i32;
+
+pub trait Named {
+    fn name(value: Self) -> Text effects {};
+}
+
+impl self::formatter::golden::Named for Pair {
+    name = self::formatter::golden::format_pair;
+}
+
+pub fn format_pair(value: Pair) -> Text effects {} {
+    return value.right;
+}
+
+pub fn round_trip_effects(value: effects) -> effects effects {} {
+    return effects {
+        left: value.left,
+        right: value.right
+    };
+}
+
+fn identity<T>(value: T) -> T effects {} {
+    return value;
+}
+
+command greet {
+    help "say \"hello\"";
+    argument name: Text help "name";
+    option style: Text = "plain" help "style";
+    flag quiet help "silence";
+    handler: self::formatter::golden::format_pair;
+    error: self::formatter::golden::format_pair;
+}
+
+test "comments survive" {
+    let value: Text = "a\n\"b\"";
+    assert value == "a\n\"b\"";
+}
+
+route GET "/items/{id}" {
+    path id: i32;
+    query q: Option<Text>;
+    handler: self::formatter::golden::format_pair;
+    response found: 200 json i32;
+}
+
+pub fn main() -> i32 effects {} {
+    // The nested comment stays inside its branch.
+    var total: i32 = -1;
+    let nested: Result<Option<i32>, Text> = self::formatter::golden::identity(None);
+    total = total + 2 * 3;
+    if -total < 0 {
+        total = total + 0;
+    }
+    if total < 10 {
+        for item in [1, 2] {
+            total = total + item;
+        }
+    } // branch comment
+    // This comment stays between the closing brace and else.
+    else {
+        return match self::formatter::golden::Choice.Value(total) {
+            Value(value) => value,
+            Empty => 0,
+        };
+    }
+    return (lambda(x: i32) => x + 1)(total);
+}
+
+pub async fn fetch(client: HttpClient) -> Result<Text, HttpError> effects {
+    net.client, // effect comment stays with its source line
+} {
+    let response: Result<HttpResponse, HttpError> = await client.get_text_async("https://example.test");
+    return response?.body;
+}
+
+// The final comment is preserved at end of file.

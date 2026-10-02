@@ -279,6 +279,10 @@ The implemented startup-configuration slice is root-package-only; library packag
 
 ## 6. Compiler architecture and machine interface
 
+### Source formatting
+
+`hob fmt FILE_OR_PACKAGE` formats supported `.hob` syntax without type-checking, building a package, or resolving dependencies. File mode selects only that file; package mode selects only the root package's source modules in ordinal relative-path order. Dependency sources, manifests, lockfiles, generated artifacts, and unrelated files are outside the selection. The formatter preserves comments and their order, exact string-literal spellings, token order, and program semantics; it writes UTF-8 without a BOM, LF line endings, and one final newline. A UTF-8 BOM on input is accepted. `--check` returns zero only when every selected source is already canonical and performs no writes. The command reads and formats every selected source before writing; a syntax or encoding error leaves the whole selection unchanged. A later filesystem write error is reported, but writes across multiple files are not rolled back as one transaction.
+
 Required pipeline:
 
 ```text
