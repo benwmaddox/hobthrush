@@ -1525,7 +1525,7 @@ internal static class Emitter
             TypedMapEmptyExpr map => EmitMapEmpty(map),
             TypedMapSetExpr map => "(" + EmitExpr(map.Target) + ").SetItem(" + EmitExpr(map.Key) + ", " + EmitExpr(map.Value) + ")",
             TypedMapGetExpr map => "MapGet(" + EmitExpr(map.Target) + ", " + EmitExpr(map.Key) + ")",
-            TypedMapKeysExpr map => "global::System.Collections.Immutable.ImmutableArray.CreateRange<string>((" + EmitExpr(map.Target) + ").Keys)",
+            TypedMapKeysExpr map => "global::System.Collections.Immutable.ImmutableArray.CreateRange<" + EmitType(map.Type.Arguments[0]) + ">((" + EmitExpr(map.Target) + ").Keys)",
             TypedMapLengthExpr map => "(" + EmitExpr(map.Target) + ").Count",
             TypedLocalExpr local => "Local_" + local.LocalId.ToString(CultureInfo.InvariantCulture),
             TypedLambdaInvokeExpr lambda => EmitLambdaInvoke(lambda),
@@ -1611,10 +1611,12 @@ internal static class Emitter
         {
             var keyType = EmitType(expression.Type.Arguments[0]);
             var valueType = EmitType(expression.Type.Arguments[1]);
-            if (keyType != "string")
-                throw new InvalidOperationException("Checked map keys must lower to Text");
-            return "global::System.Collections.Immutable.ImmutableSortedDictionary<string, " + valueType +
-                ">.Empty.WithComparers(global::System.StringComparer.Ordinal)";
+            if (!HobType.IsSupportedMapKey(expression.Type.Arguments[0]))
+                throw new InvalidOperationException("Checked map key type is outside the supported concrete key domain");
+            var empty = "global::System.Collections.Immutable.ImmutableSortedDictionary<" + keyType + ", " + valueType + ">.Empty";
+            return expression.Type.Arguments[0].IsText
+                ? empty + ".WithComparers(global::System.StringComparer.Ordinal)"
+                : empty;
         }
 
         private string EmitDatabaseCall(TypedDatabaseCallExpr call)
@@ -1907,7 +1909,7 @@ internal static class Emitter
             _source.AppendLine("        return true;");
             _source.AppendLine("    }");
             _source.AppendLine();
-            _source.AppendLine("    private static bool MapStructuralEquals<T>(global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> left, global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> right, global::System.Func<T, T, bool> equals)");
+            _source.AppendLine("    private static bool MapStructuralEquals<TKey, TValue>(global::System.Collections.Immutable.ImmutableSortedDictionary<TKey, TValue> left, global::System.Collections.Immutable.ImmutableSortedDictionary<TKey, TValue> right, global::System.Func<TValue, TValue, bool> equals) where TKey : notnull");
             _source.AppendLine("    {");
             _source.AppendLine("        if (left.Count != right.Count) return false;");
             _source.AppendLine("        foreach (var entry in left)");
@@ -2206,7 +2208,7 @@ internal static class Emitter
                         pending.Push(current.Arguments[0]);
                         break;
                     case HobTypeKind.Map:
-                        if (current.Arguments.Count != 2 || !current.Arguments[0].IsText) return false;
+                        if (current.Arguments.Count != 2 || !HobType.IsSupportedMapKey(current.Arguments[0])) return false;
                         pending.Push(current.Arguments[1]);
                         break;
                     case HobTypeKind.Result:
@@ -2654,10 +2656,10 @@ internal static class Emitter
 
         private void EmitMapGetHelper()
         {
-            _source.AppendLine("    private static Option<T> MapGet<T>(global::System.Collections.Immutable.ImmutableSortedDictionary<string, T> values, string key)");
+            _source.AppendLine("    private static Option<TValue> MapGet<TKey, TValue>(global::System.Collections.Immutable.ImmutableSortedDictionary<TKey, TValue> values, TKey key) where TKey : notnull");
             _source.AppendLine("    {");
-            _source.AppendLine("        if (values.TryGetValue(key, out var value)) return new Option<T>.Some(value);");
-            _source.AppendLine("        return new Option<T>.None();");
+            _source.AppendLine("        if (values.TryGetValue(key, out var value)) return new Option<TValue>.Some(value);");
+            _source.AppendLine("        return new Option<TValue>.None();");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -4496,10 +4498,10 @@ internal static class Emitter
 
         private string EmitMapType(HobType type)
         {
-            if (type.Arguments.Count != 2 || type.Arguments[0].Kind != HobTypeKind.Text)
-                throw new InvalidOperationException("Checked Map types must have Text keys and one value type");
-            return "global::System.Collections.Immutable.ImmutableSortedDictionary<string, " +
-                EmitType(type.Arguments[1]) + ">";
+            if (type.Arguments.Count != 2 || !HobType.IsSupportedMapKey(type.Arguments[0]))
+                throw new InvalidOperationException("Checked Map types must have a supported concrete key type and one value type");
+            return "global::System.Collections.Immutable.ImmutableSortedDictionary<" +
+                EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">";
         }
 
         private string EmitStructType(HobType type)

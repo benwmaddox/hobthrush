@@ -113,6 +113,16 @@ internal sealed class HobType : IEquatable<HobType>
     public bool IsTransaction => Kind == HobTypeKind.Transaction;
     public bool IsList => Kind == HobTypeKind.List;
     public bool IsMap => Kind == HobTypeKind.Map;
+
+    internal static bool IsSupportedMapKey(HobType type) => type.Kind is
+        HobTypeKind.Text or
+        HobTypeKind.Bool or
+        HobTypeKind.I32 or
+        HobTypeKind.I64 or
+        HobTypeKind.U32 or
+        HobTypeKind.U64 or
+        HobTypeKind.Unit;
+
     public bool IsDbError => Kind == HobTypeKind.DbError;
     internal int UnionId { get; }
     internal int StructId { get; }
@@ -522,7 +532,7 @@ internal sealed record TypedMapSetExpr(
     TypedExpr Value,
     Token At) : TypedExpr(Type, At);
 internal sealed record TypedMapGetExpr(HobType Type, TypedExpr Target, TypedExpr Key, Token At) : TypedExpr(Type, At);
-internal sealed record TypedMapKeysExpr(TypedExpr Target, Token At) : TypedExpr(HobType.List(HobType.Text), At);
+internal sealed record TypedMapKeysExpr(HobType Type, TypedExpr Target, Token At) : TypedExpr(Type, At);
 internal sealed record TypedMapLengthExpr(TypedExpr Target, Token At) : TypedExpr(HobType.I32, At);
 internal sealed record TypedCallExpr(
     HobType Type,
@@ -918,10 +928,15 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly HashSet<int> _activeTransactionLocals = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceMapDiagnosticLocations = [];
+    private readonly HashSet<(string File, int Line, int Column)> _mapKeyDiagnosticLocations = [];
+    private readonly HashSet<(string File, int Line, int Column)> _pendingMapKeyLocations = [];
+    private readonly List<(HobType KeyType, Token At)> _pendingMapKeyValidations = [];
     private readonly HashSet<(HobTypeKind Kind, int Id)> _invalidNominalRecursion = [];
     private HashSet<int>? _activeLambdaCaptureLocalIds;
     private bool[] _resourceReachableDeclarations = [];
     private bool[] _illegalListReachableDeclarations = [];
+    private bool[] _illegalMapKeyReachableDeclarations = [];
+    private bool[] _illegalMapValueReachableDeclarations = [];
     private bool[] _illegalMapReachableDeclarations = [];
     private readonly Dictionary<ModuleIdentity, ModuleSymbols> _modulesByIdentity = new();
     private readonly Dictionary<string, string> _packageDisplayLabels = new(StringComparer.Ordinal);
@@ -936,6 +951,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool _rootIsCliPackage;
     private bool _rootIsWebPackage;
     private bool _resolvingNewtypeRepresentation;
+    private bool _resourceGraphSummariesBuilt;
 
     public CheckResult CheckSingle(ParsedProgram program) =>
         CheckPackage(
@@ -1022,6 +1038,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         BuildResourceGraphSummaries();
+        _resourceGraphSummariesBuilt = true;
+        ValidatePendingMapKeys();
         ValidateNewtypeResourceRepresentations();
         foreach (var module in orderedModules)
             RegisterTraitImplementations(module);
@@ -3561,9 +3579,43 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             _resourceListDiagnosticLocations.Add((at.File, at.Line, at.Column)))
             Add("E_RESOURCE_ESCAPE", "Lists cannot contain resource handles, directly or through nested types", at);
 
-        if (ContainsIllegalResourceMap(type) &&
+        if (ContainsIllegalResourceMapValues(type) &&
             _resourceMapDiagnosticLocations.Add((at.File, at.Line, at.Column)))
             Add("E_RESOURCE_ESCAPE", "Maps cannot contain resource handles in values, directly or through nested types", at);
+    }
+
+    private void ValidatePendingMapKeys()
+    {
+        foreach (var (keyType, at) in _pendingMapKeyValidations)
+            _ = ValidateMapKeyType(keyType, at);
+        _pendingMapKeyValidations.Clear();
+        _pendingMapKeyLocations.Clear();
+    }
+
+    private bool ValidateMapKeyType(HobType keyType, Token at)
+    {
+        if (!_mapKeyDiagnosticLocations.Add((at.File, at.Line, at.Column)))
+            return !ContainsResourceHandle(keyType, _resourceReachableDeclarations) && HobType.IsSupportedMapKey(keyType);
+
+        if (ContainsResourceHandle(keyType, _resourceReachableDeclarations))
+        {
+            Add(
+                "E_RESOURCE_ESCAPE",
+                "Map keys cannot contain resource handles, directly or through stored fields",
+                at);
+            return false;
+        }
+
+        if (!HobType.IsSupportedMapKey(keyType))
+        {
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Map keys must have type Text, bool, i32, i64, u32, u64, or Unit; found '{keyType.DisplayName}'",
+                at);
+            return false;
+        }
+
+        return true;
     }
 
     private void BuildResourceGraphSummaries()
@@ -3579,6 +3631,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         var listElementTypes = Enumerable.Range(0, declarationCount)
             .Select(_ => new List<HobType>())
             .ToArray();
+        var mapKeyTypes = Enumerable.Range(0, declarationCount)
+            .Select(_ => new List<HobType>())
+            .ToArray();
         var mapValueTypes = Enumerable.Range(0, declarationCount)
             .Select(_ => new List<HobType>())
             .ToArray();
@@ -3591,6 +3646,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     dependents,
                     directlyContainsResource,
                     listElementTypes,
+                    mapKeyTypes,
                     mapValueTypes);
 
         foreach (var newtype in _newtypes)
@@ -3600,6 +3656,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 dependents,
                 directlyContainsResource,
                 listElementTypes,
+                mapKeyTypes,
                 mapValueTypes);
 
         foreach (var union in _unions)
@@ -3611,6 +3668,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                         dependents,
                         directlyContainsResource,
                         listElementTypes,
+                        mapKeyTypes,
                         mapValueTypes);
 
         for (var source = 0; source < dependents.Length; source++)
@@ -3635,19 +3693,35 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             directlyContainsIllegalList,
             reverseDependents);
 
-        var directlyContainsIllegalMap = new bool[declarationCount];
+        var directlyContainsIllegalMapKey = new bool[declarationCount];
+        for (var declaration = 0; declaration < declarationCount; declaration++)
+        foreach (var keyType in mapKeyTypes[declaration])
+        {
+            if (!ContainsResourceHandle(keyType, _resourceReachableDeclarations))
+                continue;
+            directlyContainsIllegalMapKey[declaration] = true;
+            break;
+        }
+
+        var directlyContainsIllegalMapValue = new bool[declarationCount];
         for (var declaration = 0; declaration < declarationCount; declaration++)
         foreach (var valueType in mapValueTypes[declaration])
         {
             if (!ContainsResourceHandle(valueType, _resourceReachableDeclarations))
                 continue;
-            directlyContainsIllegalMap[declaration] = true;
+            directlyContainsIllegalMapValue[declaration] = true;
             break;
         }
 
-        _illegalMapReachableDeclarations = ComputeReverseReachability(
-            directlyContainsIllegalMap,
+        _illegalMapKeyReachableDeclarations = ComputeReverseReachability(
+            directlyContainsIllegalMapKey,
             reverseDependents);
+        _illegalMapValueReachableDeclarations = ComputeReverseReachability(
+            directlyContainsIllegalMapValue,
+            reverseDependents);
+        _illegalMapReachableDeclarations = _illegalMapKeyReachableDeclarations
+            .Zip(_illegalMapValueReachableDeclarations, (key, value) => key || value)
+            .ToArray();
     }
 
     private void ValidateNewtypeResourceRepresentations()
@@ -3670,6 +3744,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         HashSet<int>[] dependents,
         bool[] directlyContainsResource,
         List<HobType>[] listElementTypes,
+        List<HobType>[] mapKeyTypes,
         List<HobType>[] mapValueTypes)
     {
         var pending = new Stack<HobType>();
@@ -3684,6 +3759,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             if (type.IsList)
                 listElementTypes[sourceDeclaration].Add(type.Arguments[0]);
+            if (type.IsMap)
+                mapKeyTypes[sourceDeclaration].Add(type.Arguments[0]);
             if (type.IsMap)
                 mapValueTypes[sourceDeclaration].Add(type.Arguments[1]);
 
@@ -3768,20 +3845,31 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         return false;
     }
 
-    private bool ContainsIllegalResourceMap(HobType type)
+    private bool ContainsIllegalResourceMap(HobType type) => ContainsIllegalResourceMap(type, includeKeys: true);
+
+    private bool ContainsIllegalResourceMapValues(HobType type) => ContainsIllegalResourceMap(type, includeKeys: false);
+
+    private bool ContainsIllegalResourceMap(HobType type, bool includeKeys)
     {
         var pending = new Stack<HobType>();
         var visited = new HashSet<HobType>();
+        var illegalMapReachableDeclarations = includeKeys
+            ? _illegalMapReachableDeclarations
+            : _illegalMapValueReachableDeclarations;
         pending.Push(type);
         while (pending.TryPop(out var current))
         {
-            if (current.IsMap && ContainsResourceHandle(current.Arguments[1], _resourceReachableDeclarations))
-                return true;
+            if (current.IsMap && current.Arguments.Count == 2)
+            {
+                if (ContainsResourceHandle(current.Arguments[1], _resourceReachableDeclarations) ||
+                    (includeKeys && ContainsResourceHandle(current.Arguments[0], _resourceReachableDeclarations)))
+                    return true;
+            }
 
             if (current.Kind == HobTypeKind.Struct)
             {
                 if (_invalidNominalRecursion.Contains((HobTypeKind.Struct, current.StructId))) continue;
-                if (_illegalMapReachableDeclarations[NominalDeclarationIndex(current)]) return true;
+                if (illegalMapReachableDeclarations[NominalDeclarationIndex(current)]) return true;
                 if (!visited.Add(current)) continue;
                 var structure = _structs[current.StructId];
                 foreach (var field in structure.Fields)
@@ -3793,7 +3881,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var declaration = NominalDeclarationIndex(current);
                 if (_invalidNominalRecursion.Contains((HobTypeKind.Union, current.UnionId))) continue;
-                if (_illegalMapReachableDeclarations[declaration]) return true;
+                if (illegalMapReachableDeclarations[declaration]) return true;
                 if (!visited.Add(current)) continue;
                 var union = _unions[current.UnionId];
                 foreach (var field in union.Variants.SelectMany(variant => variant.Fields))
@@ -3805,7 +3893,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var declaration = NominalDeclarationIndex(current);
                 if (_invalidNominalRecursion.Contains((HobTypeKind.Newtype, current.NewtypeId))) continue;
-                if (_illegalMapReachableDeclarations[declaration]) return true;
+                if (illegalMapReachableDeclarations[declaration]) return true;
                 if (!visited.Add(current)) continue;
                 pending.Push(_newtypes[current.NewtypeId].Representation);
                 continue;
@@ -5406,7 +5494,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     pending.Push(current.Arguments[0]);
                     break;
                 case HobTypeKind.Map:
-                    if (current.Arguments.Count != 2 || !current.Arguments[0].IsText) return false;
+                    if (current.Arguments.Count != 2 || !HobType.IsSupportedMapKey(current.Arguments[0])) return false;
                     pending.Push(current.Arguments[1]);
                     break;
                 case HobTypeKind.Result:
@@ -5530,16 +5618,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                         traitWitnesses.Add(witness);
                 }
             }
-            var signatureTypesValid = !function.ReturnType.IsError && function.Parameters.All(parameter => !parameter.Type.IsError);
-            if (hasCorrectArity && signatureTypesValid && diagnostics.Count == diagnosticsBeforeArguments)
-                _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
-
             var instantiatedReturnType = isGeneric
                 ? SubstituteType(function.ReturnType, inferredTypeArguments)
                 : function.ReturnType;
+            var signatureTypesValid = !ContainsError(function.ReturnType) &&
+                function.Parameters.All(parameter => !ContainsError(parameter.Type));
+            var mapKeysValid = !ContainsInvalidMapKey(function.ReturnType) &&
+                function.Parameters.All(parameter => !ContainsInvalidMapKey(parameter.Type)) &&
+                !ContainsInvalidMapKey(instantiatedReturnType) &&
+                typeArguments.All(typeArgument => !ContainsError(typeArgument) && !ContainsInvalidMapKey(typeArgument)) &&
+                arguments.All(argument => !ContainsError(argument.Type) && !ContainsInvalidMapKey(argument.Type));
+            if (hasCorrectArity && signatureTypesValid && mapKeysValid && diagnostics.Count == diagnosticsBeforeArguments)
+                _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
+
             var returnType = instantiatedReturnType;
-            if (isGeneric && (!hasCorrectArity || diagnostics.Count != diagnosticsBeforeArguments ||
-                              typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type)) || !boundsValid))
+            if (!mapKeysValid ||
+                (isGeneric && (!hasCorrectArity || diagnostics.Count != diagnosticsBeforeArguments ||
+                               typeArguments.Any(ContainsError) || arguments.Any(argument => ContainsError(argument.Type)) || !boundsValid)))
                 returnType = HobType.Error;
 
             if (isGeneric && typeArguments.All(typeArgument => !ContainsError(typeArgument)))
@@ -5609,7 +5704,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 $"Function '{name}' expects {function.TypeParameters.Count} type arguments, got {typeArguments.Length}",
                 expression.At);
 
-        if (!hasCorrectTypeArity || typeArguments.Any(ContainsError))
+        if (!hasCorrectTypeArity || typeArguments.Any(type => ContainsError(type) || ContainsInvalidMapKey(type)))
         {
             // An incomplete or unresolved vector must not provide partial context to constructors.
             if (expression.Arguments.Count != function.Parameters.Count)
@@ -5667,8 +5762,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             }
         }
 
-        var signatureTypesValid = !function.ReturnType.IsError &&
-            function.Parameters.All(parameter => !parameter.Type.IsError);
+        var signatureTypesValid = !ContainsError(function.ReturnType) &&
+            !ContainsInvalidMapKey(function.ReturnType) &&
+            function.Parameters.All(parameter => !ContainsError(parameter.Type) && !ContainsInvalidMapKey(parameter.Type));
         var argumentsValid = diagnostics.Count == diagnosticsBeforeArguments &&
             arguments.All(argument => !ContainsError(argument.Type));
 
@@ -5698,7 +5794,63 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     }
 
     private bool IsResourceContainerValid(HobType type) =>
-        !ContainsIllegalResourceList(type) && !ContainsIllegalResourceMap(type);
+        !ContainsError(type) &&
+        !ContainsInvalidMapKey(type) &&
+        !ContainsIllegalResourceList(type) &&
+        !ContainsIllegalResourceMap(type);
+
+    private bool ContainsInvalidMapKey(HobType type)
+    {
+        var pending = new Stack<HobType>();
+        var visited = new HashSet<HobType>();
+        pending.Push(type);
+        while (pending.TryPop(out var current))
+        {
+            if (current.IsError)
+                return true;
+
+            if (current.IsMap)
+            {
+                if (current.Arguments.Count != 2 ||
+                    !HobType.IsSupportedMapKey(current.Arguments[0]) ||
+                    ContainsResourceHandle(current.Arguments[0], _resourceReachableDeclarations))
+                    return true;
+            }
+
+            if (current.Kind == HobTypeKind.Struct)
+            {
+                if (_invalidNominalRecursion.Contains((HobTypeKind.Struct, current.StructId))) continue;
+                if (!visited.Add(current)) continue;
+                var structure = _structs[current.StructId];
+                foreach (var field in structure.Fields)
+                    pending.Push(InstantiateStructFieldType(structure, current, field.Type));
+                continue;
+            }
+
+            if (current.Kind == HobTypeKind.Union)
+            {
+                if (_invalidNominalRecursion.Contains((HobTypeKind.Union, current.UnionId))) continue;
+                if (!visited.Add(current)) continue;
+                var union = _unions[current.UnionId];
+                foreach (var field in union.Variants.SelectMany(variant => variant.Fields))
+                    pending.Push(InstantiateUnionFieldType(union, current, field.Type));
+                continue;
+            }
+
+            if (current.Kind == HobTypeKind.Newtype)
+            {
+                if (_invalidNominalRecursion.Contains((HobTypeKind.Newtype, current.NewtypeId))) continue;
+                if (!visited.Add(current)) continue;
+                pending.Push(_newtypes[current.NewtypeId].Representation);
+                continue;
+            }
+
+            foreach (var argument in current.Arguments)
+                pending.Push(argument);
+        }
+
+        return false;
+    }
 
     private TypedExpr CheckIntegerArithmeticMemberCall(
         MemberCallExpr expression,
@@ -6403,16 +6555,18 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
         if (expected is null)
         {
-            Add("E_TYPE_MISMATCH", "Map.empty() requires an expected type of Map<Text, V>", expression.At);
+            Add("E_TYPE_MISMATCH", "Map.empty() requires an expected type of Map<K, V>", expression.At);
             return new TypedErrorExpr(expression.At);
         }
         if (expected.IsError || ContainsError(expected))
             return new TypedErrorExpr(expression.At);
         if (!expected.IsMap)
         {
-            Add("E_TYPE_MISMATCH", $"Map.empty() requires an expected type of Map<Text, V>, found '{expected.DisplayName}'", expression.At);
+            Add("E_TYPE_MISMATCH", $"Map.empty() requires an expected type of Map<K, V>, found '{expected.DisplayName}'", expression.At);
             return new TypedErrorExpr(expression.At);
         }
+        if (ContainsInvalidMapKey(expected))
+            return new TypedErrorExpr(expression.At);
 
         return new TypedMapEmptyExpr(expected, expression.At);
     }
@@ -6447,10 +6601,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
+        if (receiver.Type.Arguments.Count != 2 || ContainsInvalidMapKey(receiver.Type))
+            return new TypedErrorExpr(expression.At);
+
         HobType[]? expectedTypes = expression.Member switch
         {
-            "set" => new[] { HobType.Text, receiver.Type.Arguments[1] },
-            "get" => [HobType.Text],
+            "set" => new[] { receiver.Type.Arguments[0], receiver.Type.Arguments[1] },
+            "get" => [receiver.Type.Arguments[0]],
             "keys" => Array.Empty<HobType>(),
             _ => null
         };
@@ -6489,7 +6646,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             "set" => new TypedMapSetExpr(receiver.Type, receiver, arguments[0], arguments[1], expression.At),
             "get" => new TypedMapGetExpr(HobType.Option(receiver.Type.Arguments[1]), receiver, arguments[0], expression.At),
-            "keys" => new TypedMapKeysExpr(receiver, expression.At),
+            "keys" => new TypedMapKeysExpr(HobType.List(receiver.Type.Arguments[0]), receiver, expression.At),
             _ => throw new InvalidOperationException("Unknown map member")
         };
     }
@@ -7633,11 +7790,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 var mapValueType = ResolveType(syntax.Args[1], depth + 1, typeParameters);
                 if (mapKeyType.IsError || mapValueType.IsError)
                     return HobType.Error;
-                if (!mapKeyType.IsText)
+                if (_resourceGraphSummariesBuilt)
                 {
-                    Add("E_TYPE_MISMATCH", $"Map keys must have type Text, found '{mapKeyType.DisplayName}'", syntax.Args[0].At);
-                    return HobType.Error;
+                    if (!ValidateMapKeyType(mapKeyType, syntax.Args[0].At))
+                        return HobType.Error;
                 }
+                else if (_pendingMapKeyLocations.Add((syntax.Args[0].At.File, syntax.Args[0].At.Line, syntax.Args[0].At.Column)))
+                {
+                    _pendingMapKeyValidations.Add((mapKeyType, syntax.Args[0].At));
+                }
+
                 return HobType.Map(mapKeyType, mapValueType);
             case "Result":
                 if (syntax.Args.Count != 2)
