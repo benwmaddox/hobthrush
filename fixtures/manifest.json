@@ -689,5 +689,29 @@
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH"
     ]
+  },
+  {
+    "file": "119-valid-explicit-generic-calls.hob",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "120-invalid-explicit-generic-calls.hob",
+    "status": "active",
+    "expectedCodes": [
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_NAME_UNRESOLVED",
+      "E_TYPE_MISMATCH",
+      "E_TRAIT_IMPL_MISSING",
+      "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
+      "E_EFFECT_EXCEEDED"
+    ]
   }
 ]

@@ -241,7 +241,11 @@ internal sealed record LambdaExpr(Token At, string ParameterName, Token Paramete
 internal sealed record LambdaInvokeExpr(Token At, LambdaExpr Lambda, Expr Argument) : Expr(At);
 internal sealed record BinaryExpr(Token At, string Op, Expr Left, Expr Right) : Expr(At);
 internal sealed record DeclarationRefExpr(Token At, SourceDeclarationRefSyntax Reference) : Expr(At);
-internal sealed record CallExpr(Token At, SourceDeclarationRefSyntax Reference, IReadOnlyList<Expr> Arguments) : Expr(At);
+internal sealed record CallExpr(
+    Token At,
+    SourceDeclarationRefSyntax Reference,
+    IReadOnlyList<TypeSyntax> ExplicitTypeArguments,
+    IReadOnlyList<Expr> Arguments) : Expr(At);
 internal sealed record MemberCallExpr(
     Token At,
     Expr Target,

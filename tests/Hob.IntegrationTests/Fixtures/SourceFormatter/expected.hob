@@ -46,6 +46,15 @@ fn identity<T>(value: T) -> T effects {} {
     return value;
 }
 
+fn compare_calls(value: i32) -> bool effects {} {
+    return identity::<i32>(value) < self::formatter::golden::identity::<i32>(value + 1);
+}
+
+fn nested_generic() -> i32 effects {} {
+    let values: List<i32> = identity::<List<i32>>([1, 2]);
+    return values.length;
+}
+
 command greet {
     help "say \"hello\"";
     argument name: Text help "name";

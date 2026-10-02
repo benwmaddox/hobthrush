@@ -1,0 +1,75 @@
+module fixture::invalid_explicit_generic_calls;
+
+pub trait Measure { fn measure(value: Self) -> i32 effects {}; }
+
+fn identity<T>(value: T) -> T effects {} {
+    return value;
+}
+
+fn require<T, E>(value: Option<T>, error: E) -> Result<T, E> effects {} {
+    return match value {
+        Some(item) => Ok(item),
+        None => Err(error),
+    };
+}
+
+fn plain(value: i32) -> i32 effects {} {
+    return value;
+}
+
+fn measure_bound<T: self::fixture::invalid_explicit_generic_calls::Measure>(value: T) -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::Measure.measure(value);
+}
+
+fn read_for<T>(value: T, path: Text, fs: FsRead) -> T effects { fs.read } {
+    let ignored: Result<Text, FsError> = fs.read_text(path);
+    return value;
+}
+
+pub fn wrong_type_arity() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::identity::<i32, Text>(1);
+}
+
+pub fn wrong_value_arity() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::identity::<i32, Text>();
+}
+
+pub fn wrong_value_arity_for_valid_type_vector() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::identity::<i32>();
+}
+
+pub fn too_few_type_arguments() -> i32 effects {} {
+    let result: Result<i32, Text> = self::fixture::invalid_explicit_generic_calls::require::<i32>(Some(1), "missing");
+    return 0;
+}
+
+pub fn nongeneric_type_arguments() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::plain::<i32>(1);
+}
+
+pub fn unknown_type_argument() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::identity::<Missing>(1);
+}
+
+pub fn substituted_argument_mismatch() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::identity::<Text>(1);
+}
+
+pub fn missing_trait_implementation() -> i32 effects {} {
+    return self::fixture::invalid_explicit_generic_calls::measure_bound::<Text>("not implemented");
+}
+
+pub fn builtin_type_arguments() -> i32 effects {} {
+    let option: Option<Text> = Some::<Text>("not an ordinary generic function");
+    return 0;
+}
+
+pub fn builtin_none_type_arguments() -> i32 effects {} {
+    let option: Option<Text> = None::<Text>();
+    return 0;
+}
+
+pub fn transitive_effect(fs: FsRead) -> i32 effects {} {
+    let path: Text = "explicit-generic-call-input";
+    return self::fixture::invalid_explicit_generic_calls::read_for::<i32>(1, path, fs);
+}
