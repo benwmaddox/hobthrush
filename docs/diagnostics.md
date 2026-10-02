@@ -53,6 +53,8 @@ The `Unit` value is written `()` and needs no new diagnostic code. `return;` rem
 | E_MATCH_ARM_DUPLICATE | A match arm is duplicated or follows a wildcard | Implemented |
 | E_UNREACHABLE | A statement follows a statement or `if` whose every path returns | Implemented |
 | E_ENTRYPOINT | `hob run` has neither a supported zero-argument `main` nor a typed command entry, or a CLI package's entry module is absent or has neither supported entry form | Implemented |
+| E_FMT_TARGET | `hob fmt` target is neither a `.hob` source file nor a package directory | Implemented |
+| E_FORMAT | Canonical formatting would change the source token sequence or produce source that does not parse | Implemented |
 | E_IO | Source, fixture, or generated build files could not be read or written | Implemented |
 | E_PROCESS | The .NET build or run process could not be started or waited on | Implemented |
 | E_PROCESS_EXECUTABLE | A configured process pin is missing for the current host or its file is absent, outside the root, non-regular, a symlink/reparse point, has a mismatched hash, or lacks the current Linux execute bit; unsupported process hosts also fail | Implemented |

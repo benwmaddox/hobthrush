@@ -30,6 +30,9 @@ internal static class Driver
         if (args.Length == 1 && args[0] == "test")
             return TestFixtures();
 
+        if (args.Length != 0 && args[0] == "fmt")
+            return FormatSources(args);
+
         if (args.Length != 0 && args[0] == "new")
         {
             if (args.Length != 3 || args[1] is not ("lib" or "cli" or "web"))
@@ -214,6 +217,131 @@ internal static class Driver
             hasApplicationSeparator: hasApplicationSeparator,
             applicationArguments: applicationArguments);
     }
+
+    private static int FormatSources(string[] args)
+    {
+        if (args.Length is < 2 or > 3 ||
+            args.Length == 2 && args[1] == "--check" ||
+            args.Length == 3 && args[2] != "--check")
+        {
+            Console.Error.WriteLine("Usage: hob fmt FILE_OR_PACKAGE [--check]");
+            return 2;
+        }
+
+        var checkOnly = args.Length == 3;
+        string target;
+        try
+        {
+            target = Path.GetFullPath(args[1]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics([AtStart("E_IO", $"Invalid source target: {error.Message}", args[1])], json: false);
+            return 1;
+        }
+
+        var diagnostics = new List<Diagnostic>();
+        IReadOnlyList<string> files;
+        if (Directory.Exists(target))
+        {
+            var loaded = PackageLoader.LoadSourcesForFormatting(target);
+            diagnostics.AddRange(loaded.Diagnostics);
+            files = loaded.Sources
+                .Select(source => source.File)
+                .OrderBy(file => NormalizeSourcePath(Path.GetRelativePath(target, file)), StringComparer.Ordinal)
+                .ToArray();
+        }
+        else if (File.Exists(target) && string.Equals(Path.GetExtension(target), ".hob", StringComparison.OrdinalIgnoreCase))
+            files = [target];
+        else if (File.Exists(target))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_FMT_TARGET", "Format target must be a .hob source file or package directory", target)
+            ],
+            json: false);
+            return 1;
+        }
+        else
+        {
+            PrintDiagnostics([AtStart("E_IO", "Format target does not exist", target)], json: false);
+            return 1;
+        }
+
+        var staged = new List<(string File, byte[] Original, byte[] Formatted)>();
+        foreach (var file in files)
+        {
+            byte[] original;
+            try
+            {
+                original = File.ReadAllBytes(file);
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(AtStart("E_IO", $"Could not read source file: {error.Message}", file));
+                continue;
+            }
+
+            var preambleLength = original.Length >= 3 &&
+                original[0] == 0xEF && original[1] == 0xBB && original[2] == 0xBF
+                    ? 3
+                    : 0;
+            string source;
+            try
+            {
+                source = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true)
+                    .GetString(original, preambleLength, original.Length - preambleLength);
+            }
+            catch (DecoderFallbackException error)
+            {
+                diagnostics.Add(AtStart("E_IO", $"Source file is not valid UTF-8: {error.Message}", file));
+                continue;
+            }
+
+            var formatted = SourceFormatter.Format(source, file);
+            diagnostics.AddRange(formatted.Diagnostics);
+            if (formatted.Text is not null)
+                staged.Add((file, original, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(formatted.Text)));
+        }
+
+        if (diagnostics.Count != 0)
+        {
+            PrintDiagnostics(diagnostics, json: false);
+            return 1;
+        }
+
+        var dirty = staged.Where(file => !file.Original.AsSpan().SequenceEqual(file.Formatted)).ToArray();
+        if (checkOnly)
+        {
+            foreach (var file in dirty)
+                Console.Error.WriteLine($"Would reformat: {file.File}");
+            return dirty.Length == 0 ? 0 : 1;
+        }
+
+        foreach (var file in dirty)
+        {
+            try
+            {
+                File.WriteAllBytes(file.File, file.Formatted);
+            }
+            catch (Exception error) when (IsFileError(error))
+            {
+                diagnostics.Add(AtStart("E_IO", $"Could not write formatted source: {error.Message}", file.File));
+                break;
+            }
+        }
+
+        if (diagnostics.Count != 0)
+        {
+            PrintDiagnostics(diagnostics, json: false);
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static string NormalizeSourcePath(string path) =>
+        path.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
 
     private static int RunLock(string[] args)
     {
@@ -1548,7 +1676,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob fmt FILE_OR_PACKAGE [--check] | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
 
     private static int ReportProjectWorkflow(ProjectWorkflowResult result)
     {

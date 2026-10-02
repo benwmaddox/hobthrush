@@ -59,6 +59,7 @@ internal sealed record WebDatabaseOptions(
     string SchemaText);
 
 internal sealed record PackageLoadResult(LoadedPackage? Package, List<Diagnostic> Diagnostics);
+internal sealed record PackageSourceLoadResult(IReadOnlyList<PackageSource> Sources, List<Diagnostic> Diagnostics);
 
 internal sealed record ResolvedPackage(
     string Id,
@@ -144,6 +145,117 @@ internal static class PackageLoader
         "await", "false", "if", "match", "null", "self", "true", "with"
     };
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    public static PackageSourceLoadResult LoadSourcesForFormatting(string packageDirectory)
+    {
+        var diagnostics = new List<Diagnostic>();
+        string root;
+        try
+        {
+            root = Path.GetFullPath(packageDirectory);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_IO", $"Invalid package directory: {error.Message}", packageDirectory));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        var manifestFile = Path.Combine(root, "hob.toml");
+        if (Directory.Exists(root) && HasReparsePointOnPath(root))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "Package directories cannot be reached through a symbolic link or reparse point",
+                manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        if (!File.Exists(manifestFile))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "Package directory must contain a root hob.toml manifest",
+                manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        if (HasReparsePoint(manifestFile))
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", "The root hob.toml manifest cannot be a symbolic link", manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        string manifestText;
+        try
+        {
+            manifestText = File.ReadAllText(manifestFile, StrictUtf8);
+        }
+        catch (DecoderFallbackException error)
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", $"Manifest is not valid UTF-8: {error.Message}", manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_IO", $"Could not read package manifest: {error.Message}", manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        var parsedManifest = ParseManifest(manifestText, manifestFile, diagnostics);
+        ValidateManifest(
+            parsedManifest.Values,
+            parsedManifest.Capabilities,
+            parsedManifest.ConfigSectionSeen,
+            parsedManifest.ManagedAdapterSectionSeen,
+            parsedManifest.ManagedAdapterValues,
+            manifestFile,
+            diagnostics);
+        if (diagnostics.Count != 0)
+            return new PackageSourceLoadResult([], diagnostics);
+
+        string sourceDirectory;
+        try
+        {
+            sourceDirectory = Path.GetFullPath(Path.Combine(
+                root,
+                parsedManifest.Values["source_root"].Replace('/', Path.DirectorySeparatorChar)));
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            diagnostics.Add(AtStart("E_MANIFEST", $"Invalid source_root path: {error.Message}", manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        if (!IsWithin(root, sourceDirectory) || string.Equals(root, sourceDirectory, PathComparison))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "source_root must name a normalized directory inside the package root",
+                manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        if (!Directory.Exists(sourceDirectory))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                $"source_root directory '{parsedManifest.Values["source_root"]}' does not exist",
+                manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        if (HasReparsePointWithin(root, sourceDirectory))
+        {
+            diagnostics.Add(AtStart(
+                "E_MANIFEST",
+                "source_root cannot contain a symbolic link or reparse point",
+                manifestFile));
+            return new PackageSourceLoadResult([], diagnostics);
+        }
+
+        var sources = DiscoverSources(root, sourceDirectory, manifestFile, diagnostics);
+        return new PackageSourceLoadResult(sources, diagnostics);
+    }
 
     public static PackageLoadResult Load(string packageDirectory)
     {

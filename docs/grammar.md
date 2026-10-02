@@ -190,6 +190,7 @@ Package commands use a package directory rather than a source-file path:
 hob check PACKAGE_DIRECTORY [--json]
 hob build PACKAGE_DIRECTORY
 hob run PACKAGE_DIRECTORY
+hob fmt PACKAGE_DIRECTORY [--check]
 hob test FILE_OR_PACKAGE
 hob lock PACKAGE_DIRECTORY
 hob audit PACKAGE_DIRECTORY --json
@@ -345,6 +346,12 @@ The opaque `ProcessRunner` capability is injected only into root CLI command han
 The host copies the selected pinned executable beside the generated CLI artifact as `<manifest assembly name>.process-runner` on Linux or `<manifest assembly name>.process-runner.exe` on Windows. This deterministic assembly-qualified suffix avoids colliding with the generated apphost when the application assembly itself is named `process-runner`. It preserves the selected Linux execute bit and verifies identity again immediately before spawn. It invokes the absolute copied path with shell execution disabled and arguments supplied through `ArgumentList`. The child has an empty environment and fixed working directory at the artifact directory; source cannot select an executable, shell, `PATH`, environment, or working directory. Windows launch incompatibility returns `StartFailed` without shell fallback. Limits are 128 arguments, 16 KiB combined strict-UTF-8 argument bytes, 1 MiB strict-UTF-8 stdin, 1 MiB per raw stdout/stderr stream, strict-UTF-8 output decoding, and a fixed 10-second overall timeout. Host cancellation propagates after best-effort process-tree termination and a reap bounded to two seconds.
 
 Inspect API schema v11 and audit schema v9 expose configured pins in `process_executables` immediately after `http_origin`, ordered Windows then Linux. Each record is `{ os, path, sha256 }`; `path` is relative, and full paths are not reported. Audit inputs include every declared process executable. Command schema v4 may list `process.spawn`; inspect-effects remains v1 and build-receipt is v3. Pins, grants, copied identity checks, and bounded invocation do not create OS containment: the selected binary retains full OS authority. There is no web process capability, streaming, dynamic executable selection, binary I/O, caller-selected timeout, detached-work API, CPU/memory sandbox, or guarantee that detached descendants are killed.
+
+## Source formatting
+
+`hob fmt FILE_OR_PACKAGE` formats source syntax without type-checking or building. A file target must be one `.hob` file; a directory target must contain a root `hob.toml`. Package mode processes only the root package's `.hob` source files, ordered by ordinal relative path. It never formats dependency sources, manifests, lockfiles, generated artifacts, or other files and does not resolve or download dependencies. All selected source files are read, parsed, and formatted before normal mode starts writing; malformed or invalid UTF-8 source reports ordinary source diagnostics and leaves all selected files unchanged. A filesystem write error is reported, but writes across multiple files are not rolled back together.
+
+Canonical output uses UTF-8 without a BOM, LF line endings, and exactly one final newline. UTF-8 BOM input is accepted and removed by formatting. Comments remain in their original order and attachment to source lines, and string literals retain their exact token spelling and contents. `hob fmt FILE_OR_PACKAGE --check` returns 0 only when every selected source is canonical; dirty files are named on stderr and return 1. Check mode does not modify files, timestamps, or directory contents. Invalid command usage prints `Usage: hob fmt FILE_OR_PACKAGE [--check]` and returns 2; target, encoding, and syntax errors return 1. Successful formatting returns 0 and prints no status text.
 
 ## Build and run entrypoints
 
