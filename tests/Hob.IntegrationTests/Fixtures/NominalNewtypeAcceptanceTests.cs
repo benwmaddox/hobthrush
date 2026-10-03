@@ -1001,8 +1001,8 @@ internal static partial class IntegrationTests
             {
                 var rootElement = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(rootElement);
-                AssertEqual(11, rootElement.GetProperty("schema_version").GetInt32(),
-                    "Newtype API output must use current inspect schema 11.");
+                AssertEqual(12, rootElement.GetProperty("schema_version").GetInt32(),
+                    "Newtype API output must use current inspect schema 12.");
                 AssertNewtypeApiFacts(rootElement);
                 AssertApiPortable(api.StandardOutput, rootElement, harness.TemporaryRoot);
             }
@@ -1010,8 +1010,8 @@ internal static partial class IntegrationTests
             {
                 var rootElement = auditDocument.RootElement;
                 AssertAuditPropertyOrder(rootElement);
-                AssertEqual(9, rootElement.GetProperty("schema_version").GetInt32(),
-                    "Newtype audit output must use current audit schema 9.");
+                AssertEqual(10, rootElement.GetProperty("schema_version").GetInt32(),
+                    "Newtype audit output must use current audit schema 10.");
                 AssertNewtypeAuditFacts(rootElement);
                 AssertAuditPortable(audit.StandardOutput, root, harness.TemporaryRoot);
             }

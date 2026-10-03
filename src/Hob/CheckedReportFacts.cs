@@ -162,7 +162,7 @@ internal static class CheckedReportFacts
 
     public static string[] RequiredCapabilities(IEnumerable<string> effects) => effects
         .Where(effect => effect is "fs.read" or "fs.write" or "db.read" or "db.write" or "net.client" or
-            "env.read" or "secret.reveal" or "log.write" or "process.spawn")
+            "env.read" or "clock.read" or "secret.reveal" or "log.write" or "process.spawn")
         .Distinct(StringComparer.Ordinal)
         .OrderBy(effect => effect, StringComparer.Ordinal)
         .ToArray();
@@ -182,6 +182,7 @@ internal static class CheckedReportFacts
     {
         "sha256.text.hash_utf8" => Array.Empty<string>(),
         "FsRead.read_text" or "FsRead.read_text_async" => ["fs.read"],
+        "Clock.unix_time_ms" => ["clock.read"],
         "FsWrite.write_text" or "FsWrite.write_text_async" => ["fs.write"],
         "DbRead.query_one" => ["db.read"],
         "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => ["db.write"],
@@ -389,6 +390,8 @@ internal static class CheckedReportFacts
                         operationNames.Add("Secrets.reveal_text");
                     else if (intrinsic.Intrinsic == BuiltinIntrinsic.LoggerInfo)
                         operationNames.Add("Logger.info");
+                    else if (intrinsic.Intrinsic == BuiltinIntrinsic.ClockUnixTimeMilliseconds)
+                        operationNames.Add("Clock.unix_time_ms");
                     foreach (var argument in intrinsic.Arguments)
                         VisitExpression(argument, witnesses);
                     break;

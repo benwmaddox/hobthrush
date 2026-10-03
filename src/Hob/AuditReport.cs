@@ -67,7 +67,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 9;
+    private const int SchemaVersion = 10;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -918,6 +918,7 @@ internal static class AuditReport
             HobTypeKind.Config => new { kind = "primitive", name = "Config" },
             HobTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
             HobTypeKind.Logger => new { kind = "primitive", name = "Logger" },
+            HobTypeKind.Clock => new { kind = "primitive", name = "Clock" },
             HobTypeKind.ProcessRunner => new { kind = "primitive", name = "ProcessRunner" },
             HobTypeKind.SecretText => new
             {

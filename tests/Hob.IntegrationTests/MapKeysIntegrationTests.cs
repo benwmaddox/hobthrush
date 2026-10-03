@@ -64,8 +64,8 @@ internal static partial class IntegrationTests
         AssertEqual(0, apiRun.ExitCode, Describe(apiRun));
         using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
         var api = apiDocument.RootElement;
-        AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
-            "Concrete Map keys must retain inspect API schema v11.");
+        AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
+            "Concrete Map keys must retain inspect API schema v12.");
 
         var apiMapShapes = api.GetProperty("traits").EnumerateArray()
             .Single(trait => trait.GetProperty("source_ids").EnumerateArray()
@@ -103,8 +103,8 @@ internal static partial class IntegrationTests
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
         var audit = auditDocument.RootElement;
-        AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
-            "Concrete Map keys must retain audit schema v9.");
+        AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
+            "Concrete Map keys must retain audit schema v10.");
         var auditShapes = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
             .Single(trait => trait.GetProperty("module").GetString() == "app::main"
                 && trait.GetProperty("name").GetString() == "MapShapes");

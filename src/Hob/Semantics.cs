@@ -29,6 +29,7 @@ internal enum HobTypeKind
     Config,
     Secrets,
     Logger,
+    Clock,
     ProcessRunner,
     SecretText,
     FsError,
@@ -101,6 +102,7 @@ internal sealed class HobType : IEquatable<HobType>
     public bool IsConfig => Kind == HobTypeKind.Config;
     public bool IsSecrets => Kind == HobTypeKind.Secrets;
     public bool IsLogger => Kind == HobTypeKind.Logger;
+    public bool IsClock => Kind == HobTypeKind.Clock;
     public bool IsProcessRunner => Kind == HobTypeKind.ProcessRunner;
     public bool IsProcessOutput => Kind == HobTypeKind.ProcessOutput;
     public bool IsProcessError => Kind == HobTypeKind.ProcessError;
@@ -151,6 +153,7 @@ internal sealed class HobType : IEquatable<HobType>
     internal static HobType Config { get; } = new(HobTypeKind.Config, "Config");
     internal static HobType Secrets { get; } = new(HobTypeKind.Secrets, "Secrets");
     internal static HobType Logger { get; } = new(HobTypeKind.Logger, "Logger");
+    internal static HobType Clock { get; } = new(HobTypeKind.Clock, "Clock");
     internal static HobType ProcessRunner { get; } = new(HobTypeKind.ProcessRunner, "ProcessRunner");
     internal static HobType SecretText { get; } = new(HobTypeKind.SecretText, "Secret<Text>", arguments: [Text]);
     internal static HobType FsError { get; } = new(HobTypeKind.FsError, "FsError");
@@ -400,7 +403,7 @@ internal sealed record CheckedRouteBinding(
     bool IsOptional,
     int HandlerParameterIndex,
     Token At);
-internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, ProcessRunner }
+internal enum CheckedCapabilityKind { FsRead, FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, Clock, ProcessRunner }
 internal sealed record CheckedCapabilityParameter(
     CheckedCapabilityKind Kind,
     int HandlerParameterIndex,
@@ -564,6 +567,7 @@ internal enum BuiltinIntrinsic
     ConfigGetSecretText,
     SecretsRevealText,
     LoggerInfo,
+    ClockUnixTimeMilliseconds,
     ProcessRunTextAsync,
     HtmlText,
     HtmlHeading,
@@ -1686,15 +1690,21 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     var hasProcessRunner = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.ProcessRunner);
                     var hasConfig = commandCapabilities.Any(capability => capability.Kind is
                         CheckedCapabilityKind.Config or CheckedCapabilityKind.Secrets or CheckedCapabilityKind.Logger);
-                    var expectation = hasProcessRunner
-                        ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, Logger, and ProcessRunner in that order, and return Result<Text, E> for a concrete error type"
-                        : hasConfig
-                            ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, HttpClient, Config, Secrets, and Logger in that order, and return Result<Text, E> for a concrete error type"
-                        : hasHttpClient
-                            ? "Command handler must take the generated args type, optionally followed by FsRead, FsWrite, and HttpClient in that order, and return Result<Text, E> for a concrete error type"
-                            : hasFsWrite
-                                ? "Command handler must take the generated args type, optionally followed by FsRead then FsWrite, and return Result<Text, E> for a concrete error type"
-                                : "Command handler must take the generated args type, optionally followed by FsRead, and return Result<Text, E> for a concrete error type";
+                    var hasClock = commandCapabilities.Any(capability => capability.Kind == CheckedCapabilityKind.Clock);
+                    var capabilityOrder = hasClock
+                        ? hasProcessRunner
+                            ? "FsRead, FsWrite, HttpClient, Config, Secrets, Logger, Clock, and ProcessRunner"
+                            : "FsRead, FsWrite, HttpClient, Config, Secrets, Logger, and Clock"
+                        : hasProcessRunner
+                            ? "FsRead, FsWrite, HttpClient, Config, Secrets, Logger, and ProcessRunner"
+                            : hasConfig
+                                ? "FsRead, FsWrite, HttpClient, Config, Secrets, and Logger"
+                                : hasHttpClient
+                                    ? "FsRead, FsWrite, and HttpClient"
+                                    : hasFsWrite
+                                        ? "FsRead then FsWrite"
+                                        : "FsRead";
+                    var expectation = $"Command handler must take the generated args type, optionally followed by {capabilityOrder} in that order, and return Result<Text, E> for a concrete error type";
                     Add("E_COMMAND_HANDLER", expectation, command.HandlerSyntax.Reference.At);
                 }
             }
@@ -1962,7 +1972,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     var capabilityScanStart = route.Method == "POST" ? 1 : 0;
                     var hasFsWrite = handler.Parameters.Skip(capabilityScanStart).Any(parameter => parameter.Type.IsFsWrite);
                     var hasHttpClient = handler.Parameters.Skip(capabilityScanStart).Any(parameter => parameter.Type.IsHttpClient);
-                    var capabilityOrder = HasConfigCapability(handler, capabilityScanStart)
+                    var hasClock = handler.Parameters.Skip(capabilityScanStart).Any(parameter => parameter.Type.IsClock);
+                    var capabilityOrder = hasClock
+                        ? "FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, and Clock"
+                        : HasConfigCapability(handler, capabilityScanStart)
                         ? "FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, and Logger"
                         : hasHttpClient
                             ? hasFsWrite ? "FsWrite, DbRead, DbWrite, and HttpClient" : "DbRead, DbWrite, and HttpClient"
@@ -2262,15 +2275,19 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.Config => 4,
                 CheckedCapabilityKind.Secrets => 5,
                 CheckedCapabilityKind.Logger => 6,
+                CheckedCapabilityKind.Clock => 7,
                 _ => -1
             };
 
             if (kind is null || order < 0)
             {
                 var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
+                var hasClock = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsClock);
                 Add(
                     "E_ROUTE_HANDLER",
-                    HasConfigCapability(handler, firstCapabilityParameter)
+                    hasClock
+                        ? "Route handlers may receive only FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, and Clock capability parameters after the request body"
+                        : HasConfigCapability(handler, firstCapabilityParameter)
                         ? "Route handlers may receive only FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, and Logger capability parameters after the request body"
                         : hasHttpClient
                             ? "Route handlers may receive only FsWrite, DbRead, DbWrite, and HttpClient capability parameters after the request body"
@@ -2289,7 +2306,10 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 var hasHttpClient = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsHttpClient);
                 var hasFsWrite = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsFsWrite);
-                var orderMessage = HasConfigCapability(handler, firstCapabilityParameter)
+                var hasClock = handler.Parameters.Skip(firstCapabilityParameter).Any(item => item.Type.IsClock);
+                var orderMessage = hasClock
+                    ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger, Clock order"
+                    : HasConfigCapability(handler, firstCapabilityParameter)
                     ? "Route handler capability parameters must appear in FsWrite, DbRead, DbWrite, HttpClient, Config, Secrets, Logger order"
                     : hasHttpClient
                         ? hasFsWrite
@@ -2335,7 +2355,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 CheckedCapabilityKind.Config => 3,
                 CheckedCapabilityKind.Secrets => 4,
                 CheckedCapabilityKind.Logger => 5,
-                CheckedCapabilityKind.ProcessRunner => 6,
+                CheckedCapabilityKind.Clock => 6,
+                CheckedCapabilityKind.ProcessRunner => 7,
                 _ => -1
             };
             if (kind is null || order < 0)
@@ -2371,6 +2392,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         HobTypeKind.Config => CheckedCapabilityKind.Config,
         HobTypeKind.Secrets => CheckedCapabilityKind.Secrets,
         HobTypeKind.Logger => CheckedCapabilityKind.Logger,
+        HobTypeKind.Clock => CheckedCapabilityKind.Clock,
         HobTypeKind.ProcessRunner => CheckedCapabilityKind.ProcessRunner,
         _ => null
     };
@@ -2385,6 +2407,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         CheckedCapabilityKind.Config => "env.read",
         CheckedCapabilityKind.Secrets => "secret.reveal",
         CheckedCapabilityKind.Logger => "log.write",
+        CheckedCapabilityKind.Clock => "clock.read",
         CheckedCapabilityKind.ProcessRunner => "process.spawn",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
@@ -3185,7 +3208,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsReservedTypeName(string name) =>
         name is "i32" or "i64" or "u32" or "u64" or "f64" or "bool" or "Text" or "Html" or "FilePath" or "Option" or "Result" or
-            "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "ProcessRunner" or "Secret" or
+            "FsRead" or "FsWrite" or "Config" or "Secrets" or "Logger" or "Clock" or "ProcessRunner" or "Secret" or
             "FsError" or "ProcessOutput" or "ProcessError" or "DbRead" or "DbWrite" or "Transaction" or "DbError" or
             "ArithmeticError";
 
@@ -6049,6 +6072,13 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return new TypedErrorExpr(expression.At);
             }
 
+            if (targetName.Name == "clock" && expression.Member == "unix_time_ms")
+            {
+                CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+                Add("E_CAPABILITY_MISSING", "Intrinsic 'clock.unix_time_ms' requires a local or parameter of type 'Clock'", expression.At);
+                return new TypedErrorExpr(expression.At);
+            }
+
             if (targetName.Name == "http" && expression.Member == "get_text_async")
             {
                 foreach (var argument in expression.Arguments)
@@ -6288,6 +6318,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
             var value = CheckExpr(expression.Arguments[0], receiver.Type.Arguments[0], locals, depth);
             return new TypedListAppendExpr(receiver.Type, receiver, value, expression.At);
+        }
+
+        if (receiver.Type.IsClock && expression.Member == "unix_time_ms")
+        {
+            var diagnosticsBeforeCall = diagnostics.Count;
+            var hasCorrectArity = expression.Arguments.Count == 0;
+            if (!hasCorrectArity)
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'Clock.unix_time_ms' expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+            CheckArgumentsWithoutExpectation(expression.Arguments, locals, depth);
+
+            if (hasCorrectArity && diagnostics.Count == diagnosticsBeforeCall)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall("clock.read", "Clock.unix_time_ms", expression.MemberAt));
+            return new TypedIntrinsicCallExpr(
+                HobType.I64,
+                BuiltinIntrinsic.ClockUnixTimeMilliseconds,
+                [receiver],
+                expression.At);
         }
 
         if (receiver.Type.IsFsRead && expression.Member == "read_text")
@@ -7470,7 +7517,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private static bool IsResourceHandle(HobType type) =>
         type.Kind is HobTypeKind.FsRead or HobTypeKind.FsWrite or HobTypeKind.Config or HobTypeKind.Secrets or
-            HobTypeKind.Logger or HobTypeKind.ProcessRunner or HobTypeKind.DbRead or HobTypeKind.DbWrite or
+            HobTypeKind.Logger or HobTypeKind.Clock or HobTypeKind.ProcessRunner or HobTypeKind.DbRead or HobTypeKind.DbWrite or
             HobTypeKind.HttpClient or HobTypeKind.Transaction;
 
     private bool TryGetDeclarationNode(HobType type, out int declaration)
@@ -7655,6 +7702,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     return NoTypeArguments(syntax, HobType.Secrets);
                 case "Logger":
                     return NoTypeArguments(syntax, HobType.Logger);
+                case "Clock":
+                    return NoTypeArguments(syntax, HobType.Clock);
                 case "ProcessRunner":
                     return NoTypeArguments(syntax, HobType.ProcessRunner);
                 case "Secret":
@@ -7716,6 +7765,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 return NoTypeArguments(syntax, HobType.FsRead);
             case "FsWrite":
                 return NoTypeArguments(syntax, HobType.FsWrite);
+            case "Clock":
+                return NoTypeArguments(syntax, HobType.Clock);
             case "Config":
                 return ResolveRootOnlyConfigType(syntax, HobType.Config);
             case "Secrets":

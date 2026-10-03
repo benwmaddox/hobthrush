@@ -869,8 +869,8 @@ internal static partial class IntegrationTests
             {
                 var api = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(api);
-                AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
-                    "ArithmeticError metadata must retain inspect API schema 11.");
+                AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
+                    "ArithmeticError metadata must retain inspect API schema 12.");
                 var checkedAdd = api.GetProperty("functions").EnumerateArray()
                     .Single(item => item.GetProperty("id").GetString() == "self::numeric::checked_add");
                 AssertArithmeticApiResultType(checkedAdd.GetProperty("return_type"), "i32", "API checked-add result");
@@ -894,8 +894,8 @@ internal static partial class IntegrationTests
             {
                 var audit = auditDocument.RootElement;
                 AssertAuditPropertyOrder(audit);
-                AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
-                    "ArithmeticError audit facts must retain schema 9.");
+                AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
+                    "ArithmeticError audit facts must retain schema 10.");
                 var trait = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
                     .Single(item => item.GetProperty("name").GetString() == "ArithmeticWitness");
                 var method = trait.GetProperty("methods").EnumerateArray()

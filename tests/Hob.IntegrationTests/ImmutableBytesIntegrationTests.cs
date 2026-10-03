@@ -521,8 +521,8 @@ internal static partial class IntegrationTests
             {
                 var api = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(api);
-                AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
-                    "Bytes primitive metadata must retain inspect API schema version 11.");
+                AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
+                    "Bytes primitive metadata must retain inspect API schema version 12.");
                 var append = api.GetProperty("functions").EnumerateArray()
                     .Single(item => item.GetProperty("id").GetString() == "self::app::bytes::append");
                 var parameterType = append.GetProperty("parameters")[0].GetProperty("type");
@@ -554,8 +554,8 @@ internal static partial class IntegrationTests
             {
                 var audit = auditDocument.RootElement;
                 AssertAuditPropertyOrder(audit);
-                AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
-                    "Bytes primitive metadata must retain audit schema version 9.");
+                AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
+                    "Bytes primitive metadata must retain audit schema version 10.");
                 var byteRoundTrip = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
                     .Single(item => item.GetProperty("name").GetString() == "ByteRoundTrip");
                 var copy = byteRoundTrip.GetProperty("methods").EnumerateArray()

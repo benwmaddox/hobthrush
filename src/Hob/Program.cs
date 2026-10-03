@@ -970,6 +970,7 @@ internal static class Driver
                         CheckedCapabilityKind.Config => "env.read",
                         CheckedCapabilityKind.Secrets => "secret.reveal",
                         CheckedCapabilityKind.Logger => "log.write",
+                        CheckedCapabilityKind.Clock => "clock.read",
                         CheckedCapabilityKind.ProcessRunner => "process.spawn",
                         _ => throw new InvalidOperationException("Unknown checked command capability")
                     })
@@ -1040,6 +1041,7 @@ internal static class Driver
                         CheckedCapabilityKind.Config => "env.read",
                         CheckedCapabilityKind.Secrets => "secret.reveal",
                         CheckedCapabilityKind.Logger => "log.write",
+                        CheckedCapabilityKind.Clock => "clock.read",
                         _ => throw new InvalidOperationException("Unknown checked route capability")
                     })
                     .Distinct(StringComparer.Ordinal)
@@ -1058,6 +1060,7 @@ internal static class Driver
                             CheckedCapabilityKind.Config => "env.read",
                             CheckedCapabilityKind.Secrets => "secret.reveal",
                             CheckedCapabilityKind.Logger => "log.write",
+                            CheckedCapabilityKind.Clock => "clock.read",
                             _ => throw new InvalidOperationException("Unknown checked route capability")
                         }
                     })
@@ -1069,7 +1072,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 11,
+            schema_version = 12,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -1126,6 +1129,7 @@ internal static class Driver
             HobTypeKind.Config => new { kind = "primitive", name = "Config" },
             HobTypeKind.Secrets => new { kind = "primitive", name = "Secrets" },
             HobTypeKind.Logger => new { kind = "primitive", name = "Logger" },
+            HobTypeKind.Clock => new { kind = "primitive", name = "Clock" },
             HobTypeKind.SecretText => new
             {
                 kind = "secret",

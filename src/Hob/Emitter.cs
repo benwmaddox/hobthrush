@@ -278,7 +278,7 @@ internal static class Emitter
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
         {
             writer.WriteStartObject();
-            writer.WriteNumber("schema_version", 4);
+            writer.WriteNumber("schema_version", 5);
             writer.WriteStartArray("commands");
             foreach (var command in program.Commands.OrderBy(command => command.Id))
             {
@@ -314,6 +314,7 @@ internal static class Emitter
         CheckedCapabilityKind.Config => "env.read",
         CheckedCapabilityKind.Secrets => "secret.reveal",
         CheckedCapabilityKind.Logger => "log.write",
+        CheckedCapabilityKind.Clock => "clock.read",
         CheckedCapabilityKind.ProcessRunner => "process.spawn",
         _ => throw new InvalidOperationException("Unknown checked capability")
     };
@@ -476,6 +477,7 @@ internal static class Emitter
             if (NeedsConfigType) EmitConfigType();
             if (NeedsSecretsType) EmitSecretsType();
             if (NeedsLoggerType) EmitLoggerType();
+            if (NeedsClockType) EmitClockType();
             if (NeedsFilePathType) EmitFilePathType();
             if (NeedsHtmlType || webHost) EmitHtmlType();
             if (NeedsFsReadType) EmitFsReadType();
@@ -784,6 +786,16 @@ internal static class Emitter
             _source.AppendLine("            LogErrorStream.Write(record);");
             _source.AppendLine("            LogErrorStream.Flush();");
             _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
+        }
+
+        private void EmitClockType()
+        {
+            _source.AppendLine("    public sealed class Clock");
+            _source.AppendLine("    {");
+            _source.AppendLine("        internal Clock() { }");
+            _source.AppendLine("        internal long UnixTimeMilliseconds() => global::System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();");
             _source.AppendLine("    }");
             _source.AppendLine();
         }
@@ -1764,6 +1776,10 @@ internal static class Emitter
                 EmitExpr(expression.Arguments[2]) + ")",
             BuiltinIntrinsic.LoggerInfo =>
                 throw new InvalidOperationException("Logger.info requires a receiver, event, and detail"),
+            BuiltinIntrinsic.ClockUnixTimeMilliseconds when expression.Arguments.Count == 1 =>
+                "(" + EmitExpr(expression.Arguments[0]) + ").UnixTimeMilliseconds()",
+            BuiltinIntrinsic.ClockUnixTimeMilliseconds =>
+                throw new InvalidOperationException("Clock.unix_time_ms requires a receiver"),
             BuiltinIntrinsic.HtmlText when expression.Arguments.Count == 1 =>
                 "HtmlText(" + EmitExpr(expression.Arguments[0]) + ")",
             BuiltinIntrinsic.HtmlHeading when expression.Arguments.Count == 1 =>
@@ -3832,6 +3848,7 @@ internal static class Emitter
                     CheckedCapabilityKind.Config => "new Config(configSnapshot)",
                     CheckedCapabilityKind.Secrets => "new Secrets()",
                     CheckedCapabilityKind.Logger => "new Logger(context.TraceIdentifier)",
+                    CheckedCapabilityKind.Clock => "new Clock()",
                     _ => throw new InvalidOperationException("Unsupported checked route capability")
                 };
             }
@@ -4224,6 +4241,7 @@ internal static class Emitter
                     CheckedCapabilityKind.Config => ", new Config(configSnapshot)",
                     CheckedCapabilityKind.Secrets => ", new Secrets()",
                     CheckedCapabilityKind.Logger => ", new Logger(null)",
+                    CheckedCapabilityKind.Clock => ", new Clock()",
                     CheckedCapabilityKind.ProcessRunner => ", " + ProcessRunnerConstructor,
                     _ => throw new InvalidOperationException("Unsupported checked command capability")
                 });
@@ -4481,6 +4499,7 @@ internal static class Emitter
             HobTypeKind.Config => "Config",
             HobTypeKind.Secrets => "Secrets",
             HobTypeKind.Logger => "Logger",
+            HobTypeKind.Clock => "Clock",
             HobTypeKind.SecretText => "SecretText",
             HobTypeKind.FsError => "FsError",
             HobTypeKind.DbRead => "DbRead",
@@ -4588,6 +4607,9 @@ internal static class Emitter
 
         private bool NeedsLoggerType => UsesTypeKind(HobTypeKind.Logger) ||
             HasCapabilityKind(CheckedCapabilityKind.Logger);
+
+        private bool NeedsClockType => UsesTypeKind(HobTypeKind.Clock) ||
+            HasCapabilityKind(CheckedCapabilityKind.Clock);
 
         private bool NeedsSecretTextType => program.ConfigFields.Any(configField => configField.Kind == ConfigFieldKind.SecretText) ||
             UsesTypeKind(HobTypeKind.SecretText) || NeedsSecretsType;
