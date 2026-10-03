@@ -239,8 +239,8 @@ internal static partial class IntegrationTests
                    adapterRoot,
                    harness.TemporaryRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed adapter builds must use receipt schema version 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed adapter builds must use receipt schema version 4.");
             AssertSha256AdapterProvenance(receipt.RootElement.GetProperty("managed_adapters"), "../adapter", validHash);
             AssertEqual(auditAdapters.GetRawText(), receipt.RootElement.GetProperty("managed_adapters").GetRawText(),
                 "The receipt must repeat the canonical audit adapter provenance.");

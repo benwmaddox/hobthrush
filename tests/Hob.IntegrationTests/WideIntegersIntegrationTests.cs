@@ -822,7 +822,7 @@ internal static partial class IntegrationTests
             Path.GetDirectoryName(library)!, "managed", null,
             [Path.GetRelativePath(Path.GetDirectoryName(library)!, library).Replace(Path.DirectorySeparatorChar, '/')],
             originalRoot);
-        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Wide integer builds must retain receipt schema version 3.");
+        AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Wide integer builds must retain receipt schema version 4.");
     }
 }

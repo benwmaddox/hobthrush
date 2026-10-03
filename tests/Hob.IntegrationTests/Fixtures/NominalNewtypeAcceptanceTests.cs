@@ -1048,8 +1048,8 @@ internal static partial class IntegrationTests
                    packageRoot,
                    harness.TemporaryRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Newtype builds must preserve receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Newtype builds must preserve receipt schema 4.");
             baselineReceiptHash = receipt.RootElement.GetProperty("audit_snapshot_sha256").GetString() ?? string.Empty;
         }
 
@@ -1110,8 +1110,8 @@ internal static partial class IntegrationTests
                    packageRoot,
                    harness.TemporaryRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "A body-edited newtype build must preserve receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "A body-edited newtype build must preserve receipt schema 4.");
             AssertTrue(baselineReceiptHash != receipt.RootElement.GetProperty("audit_snapshot_sha256").GetString(),
                 "The receipt audit snapshot hash must change after a source-body edit.");
         }

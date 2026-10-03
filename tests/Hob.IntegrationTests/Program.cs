@@ -119,6 +119,7 @@ internal static partial class IntegrationTests
             ("async FsWrite CLI publishes managed and NativeAOT command schemas and writes", TestAsyncFsWriteCliRuntime),
             ("managed FsWrite maps strict UTF-8 writes and filesystem errors", TestFsWriteManagedLibrary),
             ("managed build receipts bind checked inputs and artifact bytes", TestStandaloneBuildReceipt),
+            ("build receipts list successful compiler and build stages and omit failed builds", TestBuildReceiptPerformedChecks),
             ("CLI capability grants including FsWrite are validated and included in dependency lock freshness", TestCliCapabilityManifestAndLock),
             ("same-package CLI package checks, builds, and runs qualified public values", TestPackageCliRoundTrip),
             ("typed CLI commands generate deterministic schema and parse application arguments", TestTypedCliCommandRuntime),
@@ -181,7 +182,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(131, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(132, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -5724,8 +5725,8 @@ internal static partial class IntegrationTests
             CurrentHostAotRid(),
             [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async FsWrite NativeAOT builds must use build receipt schema version 3.");
+        AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async FsWrite NativeAOT builds must use build receipt schema version 4.");
 
         var nativeDestination = Path.Combine(destinationDirectory, "native.txt");
         const string nativeValue = "native async FsWrite λ 😀";
@@ -6124,10 +6125,135 @@ internal static partial class IntegrationTests
             [Path.GetRelativePath(changedOutputDirectory, changedArtifact).Replace(Path.DirectorySeparatorChar, '/')],
             sourceDirectory);
         var changedRoot = changedReceipt.RootElement;
+        AssertEqual(firstReceipt.RootElement.GetProperty("performed_checks").GetRawText(),
+            changedRoot.GetProperty("performed_checks").GetRawText(),
+            "Repeated standalone builds should report the same ordered completed-check IDs.");
         AssertTrue(firstInputHash != changedRoot.GetProperty("inputs")[0].GetProperty("sha256").GetString(),
             "Changing standalone source content must change the checked input hash.");
         AssertTrue(firstAuditHash != changedRoot.GetProperty("audit_snapshot_sha256").GetString(),
             "Changing standalone source content must change the audit snapshot hash.");
+    }
+
+    private static async Task TestBuildReceiptPerformedChecks(Harness harness)
+    {
+        const string mainSource = "module app::main; pub fn main() -> i32 effects {} { return 41; }\n";
+        var dependencyFreePackage = await harness.WritePackageAsync(
+            "build-receipt-checks-no-lock",
+            CliPackageManifest(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = mainSource
+            });
+        var dependencyFreeBuild = await harness.InvokePackageDirectoryAsync(
+            "build-receipt-checks-no-lock-build", dependencyFreePackage, "build");
+        AssertEqual(0, dependencyFreeBuild.ExitCode, Describe(dependencyFreeBuild));
+        var dependencyFreeArtifact = ParseBuiltArtifact(dependencyFreeBuild, "Built executable: ");
+        var dependencyFreeOutput = Path.GetDirectoryName(dependencyFreeArtifact)!;
+        using (var receipt = await AssertBuildReceiptAsync(
+                   dependencyFreeOutput,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(dependencyFreeOutput, dependencyFreeArtifact).Replace(Path.DirectorySeparatorChar, '/')],
+                   dependencyFreePackage))
+        {
+            AssertJsonStringArray(receipt.RootElement.GetProperty("performed_checks"),
+                [
+                    "compiler.package_graph_resolve",
+                    "compiler.package_sources_parse",
+                    "compiler.semantic_check",
+                    "generated.managed_build"
+                ]);
+        }
+
+        var packageRoot = await harness.WritePackageGraphAsync(
+            "build-receipt-checks-required-lock",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest().Replace("name = \"harness-package\"", "name = \"receipt-root\"", StringComparison.Ordinal)
+                        + "\n[dependencies]\nsupport = \"../support\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.hob"] = mainSource
+                    }),
+                ["support"] = new PackageFixture(
+                    LibraryPackageManifest("receipt-support"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/support.hob"] = "module support; pub fn marker() -> i32 effects {} { return 1; }\n"
+                    })
+            });
+        var lockResult = await harness.InvokePackageDirectoryAsync(
+            "build-receipt-checks-required-lock-create", packageRoot, "lock");
+        AssertLockCommandSucceeded(lockResult);
+
+        var successfulBuild = await harness.InvokePackageDirectoryAsync(
+            "build-receipt-checks-required-lock-build", packageRoot, "build");
+        AssertEqual(0, successfulBuild.ExitCode, Describe(successfulBuild));
+        var artifact = ParseBuiltArtifact(successfulBuild, "Built executable: ");
+        var outputDirectory = Path.GetDirectoryName(artifact)!;
+        using (var receipt = await AssertBuildReceiptAsync(
+                   outputDirectory,
+                   "managed",
+                   expectedRuntimeIdentifier: null,
+                   [Path.GetRelativePath(outputDirectory, artifact).Replace(Path.DirectorySeparatorChar, '/')],
+                   packageRoot))
+        {
+            AssertJsonStringArray(receipt.RootElement.GetProperty("performed_checks"),
+                [
+                    "compiler.package_graph_resolve",
+                    "compiler.package_lock_validate",
+                    "compiler.package_sources_parse",
+                    "compiler.semantic_check",
+                    "generated.managed_build"
+                ]);
+        }
+
+        var outputRoot = Path.Combine(packageRoot, "out");
+        var outputDirectoriesBeforeFailure = Directory.EnumerateDirectories(outputRoot, "*", SearchOption.TopDirectoryOnly)
+            .Select(path => Path.GetFileName(path) ?? string.Empty)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var receiptPathsBeforeFailure = Directory.EnumerateFiles(outputRoot, "build-receipt.json", SearchOption.AllDirectories)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        AssertEqual(1, receiptPathsBeforeFailure.Length,
+            "The successful package build should leave one receipt in its unique output directory.");
+        var receiptBytesBeforeFailure = receiptPathsBeforeFailure.ToDictionary(
+            path => path,
+            File.ReadAllBytes,
+            StringComparer.Ordinal);
+
+        var missingHost = Path.Combine(harness.TemporaryRoot, "missing-build-receipt-dotnet-host.exe");
+        var failedBuild = await harness.InvokePackageDirectoryWithEnvironmentAsync(
+            "build-receipt-checks-failed-build",
+            packageRoot,
+            "build",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["HOB_DOTNET"] = missingHost
+            });
+        AssertTrue(failedBuild.ExitCode != 0, Describe(failedBuild));
+        AssertTrue(failedBuild.StandardError.Contains("E_PROCESS", StringComparison.Ordinal),
+            $"A failed generated build should return the process diagnostic. {Describe(failedBuild)}");
+
+        var outputDirectoriesAfterFailure = Directory.EnumerateDirectories(outputRoot, "*", SearchOption.TopDirectoryOnly)
+            .Select(path => Path.GetFileName(path) ?? string.Empty)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        AssertTrue(outputDirectoriesBeforeFailure.SequenceEqual(outputDirectoriesAfterFailure, StringComparer.Ordinal),
+            "A failed build must not create a new output directory beside earlier successful output.");
+        var receiptPathsAfterFailure = Directory.EnumerateFiles(outputRoot, "build-receipt.json", SearchOption.AllDirectories)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        AssertTrue(receiptPathsBeforeFailure.SequenceEqual(receiptPathsAfterFailure, StringComparer.Ordinal),
+            "A failed build must not create a new successful receipt; a prior receipt may remain in its original output directory.");
+        foreach (var receiptPath in receiptPathsBeforeFailure)
+        {
+            var receiptBytesAfterFailure = await File.ReadAllBytesAsync(receiptPath);
+            AssertTrue(receiptBytesBeforeFailure[receiptPath].AsSpan().SequenceEqual(receiptBytesAfterFailure),
+                "A failed build must leave prior successful receipt bytes unchanged.");
+        }
     }
 
     private static async Task TestPackageCliRoundTrip(Harness harness)
@@ -6414,8 +6540,8 @@ internal static partial class IntegrationTests
             expectedRuntimeIdentifier: null,
             [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
             packageRoot);
-        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Async managed CLI builds must use build receipt schema version 3.");
+        AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Async managed CLI builds must use build receipt schema version 4.");
 
         using (var schema = JsonDocument.Parse(await File.ReadAllBytesAsync(schemaPath)))
         {
@@ -6964,8 +7090,8 @@ internal static partial class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    firstRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Config fields should use build receipt schema version 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Config fields should use build receipt schema version 4.");
             AssertJsonStringArray(receipt.RootElement.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
         var commandSchema = await File.ReadAllTextAsync(schemaPath);
@@ -7239,8 +7365,8 @@ internal static partial class IntegrationTests
                    expectedRuntimeIdentifier: null,
                    [Path.GetRelativePath(managedOutputDirectory, managedExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed config CLI receipts should use schema version 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed config CLI receipts should use schema version 4.");
 
         const string secretCanary = "secret-canary-runtime-0a91e6";
         var defaultEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -7346,8 +7472,8 @@ internal static partial class IntegrationTests
                    CurrentHostAotRid(),
                    [Path.GetRelativePath(nativeOutputDirectory, nativeExecutable).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json"],
                    packageRoot))
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "NativeAOT config CLI receipts should use schema version 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT config CLI receipts should use schema version 4.");
 
         var nativeRun = await ExecuteNativeWithEnvironmentAsync(
             nativeExecutable,
@@ -7393,6 +7519,17 @@ internal static partial class IntegrationTests
             });
         var check = await harness.InvokePackageDirectoryAsync("config-web-runtime-check", packageRoot, "check", "--json");
         AssertEqual(0, check.ExitCode, Describe(check));
+
+        var build = await harness.InvokePackageDirectoryAsync("config-web-runtime-build", packageRoot, "build");
+        AssertEqual(0, build.ExitCode, Describe(build));
+        var executable = ParseBuiltArtifact(build, "Built executable: ");
+        var outputDirectory = Path.GetDirectoryName(executable)!;
+        using var receipt = await AssertBuildReceiptAsync(
+            outputDirectory,
+            "managed",
+            expectedRuntimeIdentifier: null,
+            [Path.GetRelativePath(outputDirectory, executable).Replace(Path.DirectorySeparatorChar, '/'), "openapi.json"],
+            packageRoot);
 
         var wrongOrderSource = Regex.Replace(
             source,
@@ -7940,7 +8077,7 @@ internal static partial class IntegrationTests
                    [Path.GetRelativePath(outputDirectory, managedArtifact).Replace(Path.DirectorySeparatorChar, '/'), "command-schema.json", processCopyName],
                    packageRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts use schema version 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(), "Process build receipts use schema version 4.");
             AssertTrue(receipt.RootElement.GetProperty("inputs").EnumerateArray().Any(input =>
                     input.GetProperty("kind").GetString() == "process_executable"
                     && input.GetProperty("sha256").GetString() == helperHash),
@@ -14361,6 +14498,13 @@ internal static partial class IntegrationTests
         AssertTrue(Path.GetFileName(outputDirectory).StartsWith("main-", StringComparison.Ordinal),
             $"Expected a unique main-<id> output directory, got <{outputDirectory}>.");
 
+        using var receipt = await AssertBuildReceiptAsync(
+            outputDirectory,
+            "native_aot",
+            CurrentHostAotRid(),
+            [Path.GetRelativePath(outputDirectory, executablePath).Replace(Path.DirectorySeparatorChar, '/')],
+            Path.GetDirectoryName(harness.LastSourcePath)!);
+
         var execution = await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30));
         AssertRunOutput("41" + Environment.NewLine, execution);
     }
@@ -14813,8 +14957,8 @@ internal static partial class IntegrationTests
         var document = JsonDocument.Parse(bytes);
         var root = document.RootElement;
         AssertJsonPropertyOrder(root,
-            "schema_version,build,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,managed_adapters,audit_snapshot_sha256,artifacts");
-        AssertEqual(3, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 3.");
+            "schema_version,build,performed_checks,package_graph,toolchain,inputs,manifest_grants,trusted_components,foreign_dependencies,managed_adapters,audit_snapshot_sha256,artifacts");
+        AssertEqual(4, root.GetProperty("schema_version").GetInt32(), "Build receipt schema version must be 4.");
         var build = root.GetProperty("build");
         AssertJsonPropertyOrder(build, "mode,framework,runtime_identifier");
         AssertEqual(expectedMode, build.GetProperty("mode").GetString(), "Unexpected build receipt mode.");
@@ -14826,7 +14970,29 @@ internal static partial class IntegrationTests
             AssertEqual(expectedRuntimeIdentifier, build.GetProperty("runtime_identifier").GetString(),
                 "NativeAOT receipts should identify the selected runtime.");
 
-        foreach (var package in root.GetProperty("package_graph").EnumerateArray())
+        var packageGraph = root.GetProperty("package_graph");
+        var expectedPerformedChecks = new List<string>();
+        if (packageGraph.GetArrayLength() == 0)
+        {
+            expectedPerformedChecks.Add("compiler.source_parse");
+        }
+        else
+        {
+            expectedPerformedChecks.Add("compiler.package_graph_resolve");
+            var packageLockWasRequired = packageGraph.EnumerateArray().Any(package =>
+                    package.GetProperty("dependencies").GetArrayLength() != 0)
+                || root.GetProperty("managed_adapters").GetArrayLength() != 0;
+            if (packageLockWasRequired)
+                expectedPerformedChecks.Add("compiler.package_lock_validate");
+            expectedPerformedChecks.Add("compiler.package_sources_parse");
+        }
+        expectedPerformedChecks.Add("compiler.semantic_check");
+        expectedPerformedChecks.Add(expectedMode == "managed"
+            ? "generated.managed_build"
+            : "generated.native_aot_publish");
+        AssertJsonStringArray(root.GetProperty("performed_checks"), expectedPerformedChecks.ToArray());
+
+        foreach (var package in packageGraph.EnumerateArray())
         {
             AssertJsonPropertyOrder(package, "identity,role,content_sha256,dependencies");
             AssertPackageIdentitySource(package.GetProperty("identity"));
