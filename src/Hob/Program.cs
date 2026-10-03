@@ -59,6 +59,9 @@ internal static class Driver
         if (args.Length != 0 && args[0] == "lock")
             return RunLock(args);
 
+        if (args.Length != 0 && args[0] == "config")
+            return RunConfig(args);
+
         if (args.Length != 0 && args[0] == "audit")
             return AuditPackage(args);
 
@@ -342,6 +345,122 @@ internal static class Driver
 
     private static string NormalizeSourcePath(string path) =>
         path.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+
+    private static int RunConfig(string[] args)
+    {
+        if (args.Length != 3 || args[1] != "example")
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
+        try
+        {
+            packageDirectory = Path.GetFullPath(args[2]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Invalid package directory: {error.Message}", args[2])
+            ],
+            json: false);
+            return 1;
+        }
+
+        var loaded = PackageLoader.Load(packageDirectory);
+        if (loaded.Diagnostics.Count != 0 || loaded.Package is null)
+        {
+            List<Diagnostic> diagnostics = loaded.Diagnostics.Count != 0
+                ? loaded.Diagnostics
+                : [AtStart("E_MANIFEST", "Could not load package manifest", Path.Combine(packageDirectory, "hob.toml"))];
+            PrintDiagnostics(diagnostics, json: false);
+            return 1;
+        }
+
+        var outputPath = Path.Combine(packageDirectory, ".env.example");
+        var bytes = CreateConfigExampleBytes(loaded.Package.Manifest.ConfigFields);
+        try
+        {
+            using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            output.Write(bytes);
+            output.Flush(flushToDisk: true);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Could not create configuration example: {error.Message}", outputPath)
+            ],
+            json: false);
+            return 1;
+        }
+
+        Console.WriteLine($"Wrote configuration example: {outputPath}");
+        return 0;
+    }
+
+    private static byte[] CreateConfigExampleBytes(IReadOnlyList<ConfigField> fields)
+    {
+        var builder = new StringBuilder();
+        builder.Append("# Generated from hob.toml [config].\n");
+        builder.Append("# Informational only; Hob does not load this file.\n\n");
+
+        foreach (var field in fields.OrderBy(field => field.Name, StringComparer.Ordinal))
+        {
+            var environmentName = "HOB_CONFIG_" + field.Name.ToUpperInvariant();
+            if (field.Kind == ConfigFieldKind.SecretText && field.Required && !field.HasDefault)
+            {
+                builder.Append("# ").Append(environmentName)
+                    .Append(" is secret; supply it through deployment configuration.\n");
+                continue;
+            }
+
+            if (field.Kind == ConfigFieldKind.Text && field.Required && !field.HasDefault)
+            {
+                builder.Append(environmentName).Append("=\"\"\n");
+                continue;
+            }
+
+            if (field.Kind == ConfigFieldKind.Text && !field.Required && field.HasDefault && field.DefaultValue is not null)
+            {
+                builder.Append(environmentName).Append("=\"")
+                    .Append(EscapeConfigExampleValue(field.DefaultValue))
+                    .Append("\"\n");
+                continue;
+            }
+
+            throw new InvalidOperationException("Checked config fields must be required or have a text default.");
+        }
+
+        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(builder.ToString());
+    }
+
+    private static string EscapeConfigExampleValue(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            switch (character)
+            {
+                case '\\':
+                    builder.Append("\\\\");
+                    break;
+                case '"':
+                    builder.Append("\\\"");
+                    break;
+                case '$':
+                    builder.Append("\\$");
+                    break;
+                default:
+                    builder.Append(character);
+                    break;
+            }
+        }
+
+        return builder.ToString();
+    }
 
     private static int RunLock(string[] args)
     {
@@ -1682,7 +1801,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob fmt FILE_OR_PACKAGE [--check] | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob fmt FILE_OR_PACKAGE [--check] | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob config example PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
 
     private static int ReportProjectWorkflow(ProjectWorkflowResult result)
     {

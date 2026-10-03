@@ -38,7 +38,7 @@ dotnet run --project src/Hob --configuration Release -- test examples/text-valid
 
 The first program prints a value; the last command runs the validation library's language tests.
 
-Use `hob new` to create a package, `hob add` to add dependencies, and `hob lock` to pin them. `hob fmt FILE_OR_PACKAGE` formats supported `.hob` source, and `hob fmt FILE_OR_PACKAGE --check` verifies canonical formatting without writing. `hob check`, `hob build`, `hob run`, and `hob test` check, build, run, and test your code. `hob inspect api`, `hob inspect effects`, and `hob audit` expose compiler-derived metadata. See the [command reference](docs/grammar.md) for arguments and limits.
+Use `hob new` to create a package, `hob add` to add dependencies, and `hob lock` to pin them. `hob config example PACKAGE_DIRECTORY` creates a deterministic, secret-free `.env.example` from the root package configuration schema. `hob fmt FILE_OR_PACKAGE` formats supported `.hob` source, and `hob fmt FILE_OR_PACKAGE --check` verifies canonical formatting without writing. `hob check`, `hob build`, `hob run`, and `hob test` check, build, run, and test your code. `hob inspect api`, `hob inspect effects`, and `hob audit` expose compiler-derived metadata. See the [command reference](docs/grammar.md) for arguments and limits.
 
 ## Explore
 
