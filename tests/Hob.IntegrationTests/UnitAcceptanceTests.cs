@@ -358,8 +358,8 @@ internal static partial class IntegrationTests
             {
                 var api = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(api);
-                AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-                    "Unit API facts must retain inspect API schema version 12.");
+                AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+                    "Unit API facts must retain inspect API schema version 13.");
                 var keep = api.GetProperty("functions").EnumerateArray()
                     .Single(item => item.GetProperty("id").GetString() == "self::unitmeta::keep");
                 AssertUnitPrimitiveType(keep.GetProperty("parameters")[0].GetProperty("type"), "API function parameter");
@@ -388,8 +388,8 @@ internal static partial class IntegrationTests
             {
                 var audit = auditDocument.RootElement;
                 AssertAuditPropertyOrder(audit);
-                AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-                    "Unit audit facts must retain audit schema version 10.");
+                AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+                    "Unit audit facts must retain audit schema version 11.");
                 var trait = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
                     .Single(item => item.GetProperty("name").GetString() == "UnitWitness");
                 var accepts = trait.GetProperty("methods").EnumerateArray()

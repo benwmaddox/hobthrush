@@ -67,7 +67,7 @@ internal sealed record AuditReportSnapshot(
 
 internal static class AuditReport
 {
-    private const int SchemaVersion = 10;
+    private const int SchemaVersion = 11;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -124,6 +124,8 @@ internal static class AuditReport
             manifest_grants = grants,
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
+            max_request_body_bytes = graph.Root.Package.Manifest.WebRequestOptions?.MaxRequestBodyBytes,
+            request_timeout_ms = graph.Root.Package.Manifest.WebRequestOptions?.RequestTimeoutMs,
             process_executables = ProcessExecutableMetadata(graph.Root.Package.Manifest.ProcessExecutables),
             trusted_claims = claims.Select(claim => new
             {

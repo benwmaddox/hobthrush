@@ -11,7 +11,8 @@ internal static class Emitter
         bool executable = true,
         WebDatabaseOptions? webDatabaseOptions = null,
         string? httpOrigin = null,
-        ProcessRunnerRuntimeOptions? processRunnerOptions = null)
+        ProcessRunnerRuntimeOptions? processRunnerOptions = null,
+        WebRequestOptions? webRequestOptions = null)
     {
         var entry = program.EntryFunctionId is int entryId
             ? program.Functions.FirstOrDefault(function =>
@@ -30,7 +31,8 @@ internal static class Emitter
             program,
             webDatabaseOptions: webDatabaseOptions,
             httpOrigin: httpOrigin,
-            processRunnerOptions: processRunnerOptions);
+            processRunnerOptions: processRunnerOptions,
+            webRequestOptions: webRequestOptions);
         return emitter.Emit(entry, executable, command: entryCommand, webHost: webHost);
     }
 
@@ -398,7 +400,8 @@ internal static class Emitter
         IReadOnlySet<int>? includedTestFunctionIds = null,
         WebDatabaseOptions? webDatabaseOptions = null,
         string? httpOrigin = null,
-        ProcessRunnerRuntimeOptions? processRunnerOptions = null)
+        ProcessRunnerRuntimeOptions? processRunnerOptions = null,
+        WebRequestOptions? webRequestOptions = null)
     {
         private readonly StringBuilder _source = new();
         private CheckedFunction? _emittingFunction;
@@ -415,6 +418,7 @@ internal static class Emitter
         private readonly WebDatabaseOptions? _webDatabaseOptions = webDatabaseOptions;
         private readonly string? _httpOrigin = httpOrigin;
         private readonly ProcessRunnerRuntimeOptions? _processRunnerOptions = processRunnerOptions;
+        private readonly WebRequestOptions? _webRequestOptions = webRequestOptions;
         private int _structuralEqualityTemporaryId;
 
         private IEnumerable<CheckedFunction> EmittedFunctions => program.Functions.Where(function =>
@@ -3361,7 +3365,11 @@ internal static class Emitter
 
         private void EmitWebHost()
         {
-            _source.AppendLine("    private const int MaxRequestBodyBytes = 1048576;");
+            var requestOptions = _webRequestOptions ?? new WebRequestOptions(1_048_576, 30_000);
+            _source.Append("    private const int MaxRequestBodyBytes = ")
+                .Append(requestOptions.MaxRequestBodyBytes.ToString(CultureInfo.InvariantCulture)).AppendLine(";");
+            _source.Append("    private const int RequestTimeoutMs = ")
+                .Append(requestOptions.RequestTimeoutMs.ToString(CultureInfo.InvariantCulture)).AppendLine(";");
             _source.AppendLine("    private const int MaxTransportRequestBodyBytes = MaxRequestBodyBytes + 65536;");
             _source.AppendLine("    public static async Task Main(string[] args)");
             _source.AppendLine("    {");
@@ -3520,24 +3528,27 @@ internal static class Emitter
         private void EmitRequestRuntime()
         {
             _source.AppendLine("    private sealed class RequestTooLargeException : Exception { }");
-            _source.AppendLine("    private static async Task<byte[]> ReadLimitedRequestBodyAsync(HttpRequest request)");
+            _source.AppendLine("    private static async Task<byte[]> ReadLimitedRequestBodyAsync(HttpRequest request, System.Threading.CancellationToken cancellationToken)");
             _source.AppendLine("    {");
-            _source.AppendLine("        var exceedsLimit = request.ContentLength is long contentLength && contentLength > MaxRequestBodyBytes;");
+            _source.AppendLine("        if (request.ContentLength is long contentLength && contentLength > MaxRequestBodyBytes) throw new RequestTooLargeException();");
             _source.AppendLine("        using var output = new MemoryStream();");
             _source.AppendLine("        var buffer = new byte[8192];");
             _source.AppendLine("        var total = 0;");
             _source.AppendLine("        while (true)");
             _source.AppendLine("        {");
-            _source.AppendLine("            var read = await request.Body.ReadAsync(buffer.AsMemory(), request.HttpContext.RequestAborted);");
+            _source.AppendLine("            var read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);");
             _source.AppendLine("            if (read == 0) break;");
-            _source.AppendLine("            var remainingBufferCapacity = Math.Max(0, MaxRequestBodyBytes - total);");
-            _source.AppendLine("            var buffered = Math.Min(read, remainingBufferCapacity);");
-            _source.AppendLine("            if (buffered != 0) output.Write(buffer, 0, buffered);");
             _source.AppendLine("            total += read;");
-            _source.AppendLine("            if (total > MaxRequestBodyBytes) exceedsLimit = true;");
+            _source.AppendLine("            if (total > MaxRequestBodyBytes) throw new RequestTooLargeException();");
+            _source.AppendLine("            output.Write(buffer, 0, read);");
             _source.AppendLine("        }");
-            _source.AppendLine("        if (exceedsLimit) throw new RequestTooLargeException();");
             _source.AppendLine("        return output.ToArray();");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static async Task WriteRequestTimeoutAsync(HttpContext context)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        if (context.RequestAborted.IsCancellationRequested || context.Response.HasStarted) return;");
+            _source.AppendLine("        try { await WriteErrorAsync(context, 504, \"{\\\"error\\\":\\\"request_timeout\\\"}\", includeRequestId: true); }");
+            _source.AppendLine("        catch (Exception) when (context.RequestAborted.IsCancellationRequested) { }");
             _source.AppendLine("    }");
             _source.AppendLine();
 
@@ -3650,6 +3661,9 @@ internal static class Emitter
             if (NeedsConfigSnapshot) _source.Append(", ConfigSnapshot configSnapshot");
             _source.AppendLine(")");
             _source.AppendLine("    {");
+            _source.AppendLine("        using var requestDeadline = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);");
+            _source.AppendLine("        requestDeadline.CancelAfter(System.TimeSpan.FromMilliseconds(RequestTimeoutMs));");
+            _source.AppendLine("        var requestToken = requestDeadline.Token;");
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             if (route.Method == "POST")
@@ -3657,14 +3671,14 @@ internal static class Emitter
                 var bodyType = route.BodyType ?? throw new InvalidOperationException("Checked POST route has no body type");
                 if (bodyType.Kind != HobTypeKind.Struct)
                     throw new InvalidOperationException("Checked POST route body is not a struct");
-                _source.AppendLine("            var requestBytes = await ReadLimitedRequestBodyAsync(context.Request);");
+                _source.AppendLine("            var requestBytes = await ReadLimitedRequestBodyAsync(context.Request, requestToken);");
                 _source.AppendLine("            using var requestJson = JsonDocument.Parse(requestBytes, new JsonDocumentOptions { MaxDepth = 64, CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false });");
                 _source.Append("            var requestValue = DecodeJsonStruct_").Append(bodyType.StructId.ToString(CultureInfo.InvariantCulture))
                     .AppendLine("(requestJson.RootElement);");
                 var arguments = new List<string> { "requestValue" };
                 arguments.AddRange(EmitRouteBindings(route));
-                arguments.AddRange(EmitRouteCapabilities(route));
-                if (route.HandlerIsAsync) arguments.Add("context.RequestAborted");
+                arguments.AddRange(EmitRouteCapabilities(route, "requestToken"));
+                if (route.HandlerIsAsync) arguments.Add("requestToken");
                 _source.Append("            var reply = ");
                 if (route.HandlerIsAsync) _source.Append("await ");
                 _source.Append("Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
@@ -3673,13 +3687,16 @@ internal static class Emitter
             else
             {
                 var arguments = EmitRouteBindings(route);
-                arguments.AddRange(EmitRouteCapabilities(route));
-                if (route.HandlerIsAsync) arguments.Add("context.RequestAborted");
+                arguments.AddRange(EmitRouteCapabilities(route, "requestToken"));
+                if (route.HandlerIsAsync) arguments.Add("requestToken");
                 _source.Append("            var reply = ");
                 if (route.HandlerIsAsync) _source.Append("await ");
                 _source.Append("Function_").Append(handler.Id.ToString(CultureInfo.InvariantCulture))
                     .Append('(').Append(string.Join(", ", arguments)).AppendLine(");");
             }
+
+            _source.AppendLine("            requestDeadline.CancelAfter(System.Threading.Timeout.InfiniteTimeSpan);");
+            _source.AppendLine("            requestToken.ThrowIfCancellationRequested();");
 
             _source.AppendLine("            switch (reply)");
             _source.AppendLine("            {");
@@ -3723,25 +3740,37 @@ internal static class Emitter
             _source.AppendLine("                    return;");
             _source.AppendLine("            }");
             _source.AppendLine("        }");
-            _source.AppendLine("        catch (RequestTooLargeException)");
+            _source.AppendLine("        catch (RequestTooLargeException) when (!context.RequestAborted.IsCancellationRequested && !requestDeadline.IsCancellationRequested)");
             _source.AppendLine("        {");
             _source.AppendLine("            await WriteErrorAsync(context, 413, \"{\\\"error\\\":\\\"payload_too_large\\\"}\");");
             _source.AppendLine("        }");
-            _source.AppendLine("        catch (BadHttpRequestException error) when (error.StatusCode == 413)");
+            _source.AppendLine("        catch (BadHttpRequestException error) when (error.StatusCode == 413 && !context.RequestAborted.IsCancellationRequested && !requestDeadline.IsCancellationRequested)");
             _source.AppendLine("        {");
             _source.AppendLine("            await WriteErrorAsync(context, 413, \"{\\\"error\\\":\\\"payload_too_large\\\"}\");");
             _source.AppendLine("        }");
-            _source.AppendLine("        catch (JsonException)");
+            _source.AppendLine("        catch (JsonException) when (!context.RequestAborted.IsCancellationRequested && !requestDeadline.IsCancellationRequested)");
             _source.AppendLine("        {");
             _source.AppendLine("            await WriteErrorAsync(context, 400, \"{\\\"error\\\":\\\"invalid_request\\\"}\");");
             _source.AppendLine("        }");
-            _source.AppendLine("        catch (BadHttpRequestException)");
+            _source.AppendLine("        catch (BadHttpRequestException) when (!context.RequestAborted.IsCancellationRequested && !requestDeadline.IsCancellationRequested)");
             _source.AppendLine("        {");
             _source.AppendLine("            await WriteErrorAsync(context, 400, \"{\\\"error\\\":\\\"invalid_request\\\"}\");");
             _source.AppendLine("        }");
             _source.AppendLine("        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)");
             _source.AppendLine("        {");
             _source.AppendLine("            return;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (Exception) when (context.RequestAborted.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            return;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (OperationCanceledException) when (requestDeadline.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteRequestTimeoutAsync(context);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (Exception) when (requestDeadline.IsCancellationRequested)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            await WriteRequestTimeoutAsync(context);");
             _source.AppendLine("        }");
             _source.AppendLine("        catch (Exception error)");
             _source.AppendLine("        {");
@@ -3829,7 +3858,7 @@ internal static class Emitter
             _ => throw new InvalidOperationException("Unsupported checked route parameter type")
         };
 
-        private IEnumerable<string> EmitRouteCapabilities(CheckedRoute route)
+        private IEnumerable<string> EmitRouteCapabilities(CheckedRoute route, string cancellationToken)
         {
             foreach (var capability in route.Capabilities.OrderBy(capability => capability.HandlerParameterIndex))
             {
@@ -3840,11 +3869,11 @@ internal static class Emitter
                 yield return capability.Kind switch
                 {
                     CheckedCapabilityKind.FsWrite => route.HandlerIsAsync
-                        ? "new FsWrite(context.RequestAborted)"
+                        ? "new FsWrite(" + cancellationToken + ")"
                         : "new FsWrite()",
-                    CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, context.RequestAborted)",
-                    CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, context.RequestAborted)",
-                    CheckedCapabilityKind.HttpClient => "new HttpClientCapability(" + HttpOriginLiteral + ", context.RequestAborted)",
+                    CheckedCapabilityKind.DbRead => "new DbRead(DatabaseReadConnectionString, " + cancellationToken + ")",
+                    CheckedCapabilityKind.DbWrite => "new DbWrite(DatabaseWriteConnectionString, " + cancellationToken + ")",
+                    CheckedCapabilityKind.HttpClient => "new HttpClientCapability(" + HttpOriginLiteral + ", " + cancellationToken + ")",
                     CheckedCapabilityKind.Config => "new Config(configSnapshot)",
                     CheckedCapabilityKind.Secrets => "new Secrets()",
                     CheckedCapabilityKind.Logger => "new Logger(context.TraceIdentifier)",
