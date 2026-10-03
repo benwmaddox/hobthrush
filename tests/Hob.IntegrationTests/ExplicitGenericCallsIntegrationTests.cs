@@ -149,8 +149,8 @@ internal static partial class IntegrationTests
         AssertEqual(0, apiRun.ExitCode, Describe(apiRun));
         using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
         var api = apiDocument.RootElement;
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-            "Explicit generic calls must retain inspect API schema v12.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+            "Explicit generic calls must retain inspect API schema v13.");
         var apiFunctions = api.GetProperty("functions").EnumerateArray().ToArray();
         var explicitApi = apiFunctions.Single(function => function.GetProperty("id").GetString() == "self::app::main::explicit_call");
         var inferredApi = apiFunctions.Single(function => function.GetProperty("id").GetString() == "self::app::main::inferred_call");
@@ -168,8 +168,8 @@ internal static partial class IntegrationTests
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
         var audit = auditDocument.RootElement;
-        AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-            "Explicit generic calls must retain audit schema v10.");
+        AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+            "Explicit generic calls must retain audit schema v11.");
         var auditFunctions = audit.GetProperty("compiler").GetProperty("functions").EnumerateArray().ToArray();
         var explicitAudit = auditFunctions.Single(function => function.GetProperty("module").GetString() == "app::main"
             && function.GetProperty("name").GetString() == "explicit_call");

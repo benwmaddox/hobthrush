@@ -122,8 +122,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-                "Clock metadata must use inspect API schema version 12.");
+            AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+                "Clock metadata must use inspect API schema version 13.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["clock.read", "log.write", "process.spawn"]);
 
             var sample = api.GetProperty("functions").EnumerateArray()
@@ -185,8 +185,8 @@ internal static partial class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-                "Clock audit metadata must use schema version 10.");
+            AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+                "Clock audit metadata must use schema version 11.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["clock.read", "log.write", "process.spawn"]);
             AssertTrue(audit.GetProperty("trusted_claims").EnumerateArray().Any(item =>
                     item.GetProperty("operation").GetString() == "Clock.unix_time_ms" &&
@@ -443,8 +443,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-                "Web Clock metadata must use inspect API schema version 12.");
+            AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+                "Web Clock metadata must use inspect API schema version 13.");
             var route = api.GetProperty("routes").EnumerateArray().Single();
             AssertJsonStringArray(route.GetProperty("required_capabilities"), ["clock.read", "log.write"]);
             var parameters = route.GetProperty("capability_parameters").EnumerateArray().ToArray();

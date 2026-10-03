@@ -176,8 +176,8 @@ internal static partial class IntegrationTests
         using var auditDocument = JsonDocument.Parse(audit.StandardOutput);
         var auditRoot = auditDocument.RootElement;
         AssertAuditPropertyOrder(auditRoot);
-        AssertEqual(10, auditRoot.GetProperty("schema_version").GetInt32(),
-            "Managed adapter audit reports must use schema version 10.");
+        AssertEqual(11, auditRoot.GetProperty("schema_version").GetInt32(),
+            "Managed adapter audit reports must use schema version 11.");
         var auditAdapters = auditRoot.GetProperty("managed_adapters");
         AssertSha256AdapterProvenance(auditAdapters, "../adapter", validHash);
         AssertAuditPortable(audit.StandardOutput, packageRoot, harness.TemporaryRoot);

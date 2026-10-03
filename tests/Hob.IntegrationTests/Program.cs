@@ -156,6 +156,7 @@ internal static partial class IntegrationTests
             ("package NativeAOT arguments are validated", TestPackageAotCommandValidation),
             ("maintained package example runs with exact output", TestMaintainedPackageExample),
             ("maintained web package serves typed routes with bounded request handling", TestMaintainedWebExample),
+            ("configurable web request limits and request deadlines", TestConfigurableWebRequestLimits),
             ("SQLite transactions commit once and roll back on scope exit and early return", TestSqliteTransactions),
             ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
             ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
@@ -178,7 +179,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(128, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(129, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -1397,7 +1398,7 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(12, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 12.");
+            AssertEqual(13, api.GetProperty("schema_version").GetInt32(), "Generic-union inspect API must use schema version 13.");
             var union = api.GetProperty("unions").EnumerateArray().Single();
             AssertJsonPropertyOrder(union, "id,source_ids,package,type_parameters,variants");
             AssertEqual("T", union.GetProperty("type_parameters")[0].GetProperty("name").GetString(),
@@ -1421,8 +1422,8 @@ internal static partial class IntegrationTests
         var auditRun = await harness.InvokeCompilerCommandAsync("audit", dependencyRoot, "--json");
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
-        AssertEqual(10, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-            "The current audit contract with trait facts must use version 8.");
+        AssertEqual(11, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+            "The current audit contract with trait facts must use version 11.");
     }
 
     private static async Task TestStaticTraits(Harness harness)
@@ -1501,8 +1502,8 @@ internal static partial class IntegrationTests
         using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
         var api = apiDocument.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-            "Trait metadata should use current inspect API schema version 12.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+            "Trait metadata should use current inspect API schema version 13.");
         var measureTraitId = "hob.trait.v1.root::app::main::Measure";
         var apiTraits = api.GetProperty("traits").EnumerateArray().ToArray();
         AssertEqual(1, apiTraits.Length, "The API should expose the one public source trait.");
@@ -1561,8 +1562,8 @@ internal static partial class IntegrationTests
         using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
         var audit = auditDocument.RootElement;
         AssertAuditPropertyOrder(audit);
-        AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-            "Trait compiler facts should use current audit schema version 10.");
+        AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+            "Trait compiler facts should use current audit schema version 11.");
         var compilerFacts = audit.GetProperty("compiler");
         AssertEqual(2, compilerFacts.GetProperty("traits").GetArrayLength(),
             "Audit should retain public and private trait declarations.");
@@ -3182,7 +3183,7 @@ internal static partial class IntegrationTests
         using var json = JsonDocument.Parse(first.StandardOutput);
         var api = json.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 12.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 13.");
         AssertEqual("self", api.GetProperty("package").GetProperty("alias").GetString(),
             "The root package must have a source-facing self alias.");
         var dependencies = api.GetProperty("dependencies").EnumerateArray().ToArray();
@@ -3399,7 +3400,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(result.StandardOutput);
         var api = document.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 12.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 13.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["db.read", "db.write", "net.listen"]);
         AssertEqual(JsonValueKind.Null, api.GetProperty("http_origin").ValueKind,
             "A package without HTTP client access should project a null HTTP origin.");
@@ -3556,7 +3557,7 @@ internal static partial class IntegrationTests
         using var document = JsonDocument.Parse(first.StandardOutput);
         var report = document.RootElement;
         AssertAuditPropertyOrder(report);
-        AssertEqual(10, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 10.");
+        AssertEqual(11, report.GetProperty("schema_version").GetInt32(), "Audit schema version must be 11.");
         AssertEqual(0, report.GetProperty("managed_adapters").GetArrayLength(),
             "Ordinary packages must report an empty managed adapter provenance array.");
         var packages = report.GetProperty("packages").EnumerateArray().ToArray();
@@ -3697,7 +3698,7 @@ internal static partial class IntegrationTests
             AssertEqual(expected, string.Join(",", element.EnumerateObject().Select(property => property.Name)),
                 "Audit JSON property order is part of the deterministic report contract.");
 
-        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,process_executables,trusted_claims,foreign_dependencies,managed_adapters");
+        Order(root, "schema_version,packages,compiler,manifest_grants,config,http_origin,max_request_body_bytes,request_timeout_ms,process_executables,trusted_claims,foreign_dependencies,managed_adapters");
         foreach (var pin in root.GetProperty("process_executables").EnumerateArray())
             Order(pin, "os,path,sha256");
         foreach (var field in root.GetProperty("config").EnumerateArray())
@@ -3947,7 +3948,7 @@ internal static partial class IntegrationTests
     {
         var allowedOrders = new HashSet<string>(StringComparer.Ordinal)
         {
-            "schema_version,package,dependencies,manifest_grants,config,http_origin,process_executables,functions,structs,newtypes,unions,traits,trait_impls,commands,routes",
+            "schema_version,package,dependencies,manifest_grants,config,http_origin,max_request_body_bytes,request_timeout_ms,process_executables,functions,structs,newtypes,unions,traits,trait_impls,commands,routes",
             "os,path,sha256",
             "name,source_type,required,has_default",
             "alias,name,version",
@@ -4566,8 +4567,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-                "The HTTP web route API should use schema version 12.");
+            AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+                "The HTTP web route API should use schema version 13.");
             AssertEqual("https://api.example.test", api.GetProperty("http_origin").GetString(),
                 "The web API should expose its configured HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client", "net.listen"]);
@@ -4632,8 +4633,8 @@ internal static partial class IntegrationTests
         {
             var api = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(api);
-            AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-                "Inspect-api with an HTTP capability should use schema version 12.");
+            AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+                "Inspect-api with an HTTP capability should use schema version 13.");
             AssertEqual(server.Origin, api.GetProperty("http_origin").GetString(),
                 "Inspect-api should retain the root HTTP origin.");
             AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
@@ -4684,8 +4685,8 @@ internal static partial class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-                "Audit reports with an HTTP capability should use schema version 10.");
+            AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+                "Audit reports with an HTTP capability should use schema version 11.");
             AssertEqual(server.Origin, audit.GetProperty("http_origin").GetString(),
                 "Audit should retain the root HTTP origin.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
@@ -6469,7 +6470,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(12, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 12.");
+            AssertEqual(13, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 13.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
             AssertApiPortable(api.StandardOutput, root, harness.TemporaryRoot);
@@ -6482,7 +6483,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 10.");
+            AssertEqual(11, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 11.");
             AssertConfigFieldProjection(root.GetProperty("config"));
             AssertJsonStringArray(root.GetProperty("manifest_grants"), ["env.read", "log.write", "secret.reveal"]);
         }
@@ -7233,7 +7234,7 @@ internal static partial class IntegrationTests
         {
             var root = apiDocument.RootElement;
             AssertInspectApiPropertyOrder(root);
-            AssertEqual(12, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 12 with pinned process metadata.");
+            AssertEqual(13, root.GetProperty("schema_version").GetInt32(), "Inspect-api schema version must be 13 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "API process pins must be ordered Windows then Linux.");
@@ -7271,7 +7272,7 @@ internal static partial class IntegrationTests
         {
             var root = auditDocument.RootElement;
             AssertAuditPropertyOrder(root);
-            AssertEqual(10, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 10 with pinned process metadata.");
+            AssertEqual(11, root.GetProperty("schema_version").GetInt32(), "Audit schema version must be 11 with pinned process metadata.");
             var pins = root.GetProperty("process_executables").EnumerateArray().ToArray();
             AssertEqual("windows,linux", string.Join(",", pins.Select(pin => pin.GetProperty("os").GetString())),
                 "Audit process pins must use deterministic OS ordering.");
@@ -8925,8 +8926,8 @@ internal static partial class IntegrationTests
             AssertEqual(0, audit.ExitCode, Describe(audit));
             using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
             {
-                AssertEqual(10, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                    "Audit reports with source identities must use schema version 10.");
+                AssertEqual(11, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                    "Audit reports with source identities must use schema version 11.");
                 var identity = auditDocument.RootElement.GetProperty("packages").EnumerateArray()
                     .Single(package => package.GetProperty("role").GetString() == "direct")
                     .GetProperty("identity");
@@ -10354,6 +10355,20 @@ internal static partial class IntegrationTests
                 }
             }
 
+            async fn rollback_on_deadline(db: DbWrite, client: HttpClient) -> self::app::main::SimpleReply effects { db.write, net.client } {
+                with db.begin() as tx {
+                    let written: Result<i32, DbError> = tx.execute(
+                        "INSERT INTO record (id, value) VALUES ($id, $value)",
+                        self::app::main::WriteParameters { id: 8, value: "deadline" }
+                    );
+                    let response: Result<HttpResponse, HttpError> = await client.get_text_async("/hold-deadline");
+                    return match response {
+                        Ok(value) => self::app::main::SimpleReply.Failure,
+                        Err(error) => self::app::main::SimpleReply.Failure
+                    };
+                }
+            }
+
             fn commit_after_unwound_scope(db: DbWrite) -> self::app::main::SimpleReply effects { db.write } {
                 with db.begin() as tx {
                     let written: Result<i32, DbError> = tx.execute(
@@ -10427,6 +10442,12 @@ internal static partial class IntegrationTests
                 response Failure: 500;
             }
 
+            route GET "/deadline" {
+                handler: self::app::main::rollback_on_deadline;
+                response Done: 200;
+                response Failure: 500;
+            }
+
             route GET "/commit-after-unwind" {
                 handler: self::app::main::commit_after_unwound_scope;
                 response Done: 200;
@@ -10437,6 +10458,7 @@ internal static partial class IntegrationTests
             + "version = \"0.1.0\"\nkind = \"web\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
             + "sqlite_path = \"data/transactions.sqlite3\"\nsqlite_schema = \"db/schema.sql\"\n"
             + $"http_origin = \"{cancellationServer.Origin}\"\n"
+            + "request_timeout_ms = 2500\n"
             + "[capabilities]\nnet.listen = \"allow\"\ndb.read = \"allow\"\ndb.write = \"allow\"\nnet.client = \"allow\"\n";
         var packageRoot = await harness.WritePackageAsync(
             "sqlite-transaction-runtime",
@@ -10588,11 +10610,24 @@ internal static partial class IntegrationTests
                     "Canceling the request must abort the awaited HTTP adapter while its transaction is open; the upstream held the request until that abort was observed.");
             }
 
+            using (var deadline = await client.GetAsync("/deadline").WaitAsync(TimeSpan.FromSeconds(5)))
+            {
+                AssertEqual(HttpStatusCode.GatewayTimeout, deadline.StatusCode,
+                    "An inbound deadline that cancels awaited work inside a transaction must return 504.");
+                AssertEqual("{\"error\":\"request_timeout\"}", await deadline.Content.ReadAsStringAsync(),
+                    "A deadline inside a transaction should use the stable request-timeout JSON body.");
+                AssertTrue(deadline.Headers.Contains("X-Request-Id"),
+                    "A transaction deadline response should preserve its request identifier.");
+            }
+            await cancellationServer.WaitForClientDisconnectAsync("/hold-deadline").WaitAsync(TimeSpan.FromSeconds(5));
+            AssertEqual(1, await ReadTransactionCountAsync(client),
+                "A deadline must roll back the write in its open transaction before sending 504.");
+
             using (var recovered = await client.GetAsync("/commit-after-unwind"))
                 AssertEqual(HttpStatusCode.OK, recovered.StatusCode,
-                    "A subsequent transaction should commit after cancellation has unwound the prior scope.");
+                    "A subsequent transaction should commit after cancellation and deadline have unwound prior scopes.");
             AssertEqual(2, await ReadTransactionCountAsync(client),
-                "Cancellation must roll back its pending write and release the SQLite transaction for later work.");
+                "Cancellation and deadline must each roll back their writes and release SQLite for a later commit.");
 
             assertionsCompleted = true;
         }
@@ -11143,7 +11178,7 @@ internal static partial class IntegrationTests
                         _requestSignals.GetOrAdd(request.Target, static _ => NewCompletion<RawHttpRequest>())
                             .TrySetResult(request);
 
-                        if (request.Target is "/hold-cancel" or "/hold-cancel-managed" or "/hold-cancel-native")
+                        if (request.Target is "/hold-cancel" or "/hold-cancel-managed" or "/hold-cancel-native" or "/hold-deadline")
                         {
                             await ObserveClientDisconnectAsync(request.Target, stream, _stopping.Token);
                             return;
@@ -11840,10 +11875,10 @@ internal static partial class IntegrationTests
         var audit = auditDocument.RootElement;
         AssertInspectApiPropertyOrder(api);
         AssertAuditPropertyOrder(audit);
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-            "The maintained generic library uses inspect API schema 12.");
-        AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-            "The maintained generic library uses audit schema 10.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses inspect API schema 13.");
+        AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+            "The maintained generic library uses audit schema 11.");
 
         bool HasSourceId(JsonElement declaration, string sourceId) =>
             declaration.TryGetProperty("source_ids", out var sourceIds)

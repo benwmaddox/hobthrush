@@ -13,6 +13,7 @@ internal sealed record PackageManifest(
     string? SqlitePath,
     string? SqliteSchema,
     string? HttpOrigin,
+    WebRequestOptions? WebRequestOptions,
     IReadOnlyList<ProcessExecutablePin> ProcessExecutables,
     IReadOnlySet<string> Capabilities,
     IReadOnlyList<ConfigField> ConfigFields,
@@ -57,6 +58,8 @@ internal sealed record WebDatabaseOptions(
     string RelativePath,
     string SchemaPath,
     string SchemaText);
+
+internal sealed record WebRequestOptions(int MaxRequestBodyBytes, int RequestTimeoutMs);
 
 internal sealed record PackageLoadResult(LoadedPackage? Package, List<Diagnostic> Diagnostics);
 internal sealed record PackageSourceLoadResult(IReadOnlyList<PackageSource> Sources, List<Diagnostic> Diagnostics);
@@ -127,6 +130,8 @@ internal static class PackageLoader
         "sqlite_path",
         "sqlite_schema",
         "http_origin",
+        "max_request_body_bytes",
+        "request_timeout_ms",
         "process_windows_path",
         "process_windows_sha256",
         "process_linux_path",
@@ -339,6 +344,7 @@ internal static class PackageLoader
                 TryNormalizeHttpOrigin(configuredHttpOrigin, out var stableHttpOrigin)
                     ? stableHttpOrigin
                     : null,
+            GetWebRequestOptions(parsedManifest.Values),
             processExecutables,
             parsedManifest.Capabilities,
             parsedManifest.ConfigFields,
@@ -806,6 +812,7 @@ internal static class PackageLoader
         List<Diagnostic> diagnostics)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var rootKeysSeen = new HashSet<string>(StringComparer.Ordinal);
         var managedAdapterValues = new Dictionary<string, string>(StringComparer.Ordinal);
         var dependencies = new List<PackageDependency>();
         var capabilities = new HashSet<string>(StringComparer.Ordinal);
@@ -1086,9 +1093,25 @@ internal static class PackageLoader
                 continue;
             }
 
-            if (values.ContainsKey(key))
+            if (!rootKeysSeen.Add(key))
             {
                 diagnostics.Add(AtLine("E_MANIFEST", $"Duplicate manifest key '{key}'", file, lineNumber));
+                continue;
+            }
+
+            if (key is "max_request_body_bytes" or "request_timeout_ms")
+            {
+                if (!TryParseCanonicalPositiveDecimal(rawValue, out _))
+                {
+                    diagnostics.Add(AtLine(
+                        "E_MANIFEST",
+                        $"Value for '{key}' must be an unquoted canonical ASCII decimal integer without a sign, separator, or leading zero",
+                        file,
+                        lineNumber));
+                    continue;
+                }
+
+                values.Add(key, rawValue);
                 continue;
             }
 
@@ -1113,6 +1136,35 @@ internal static class PackageLoader
             configFields.OrderBy(field => field.Name, StringComparer.Ordinal).ToArray(),
             configSeen,
             managedAdapterSeen);
+    }
+
+    private static WebRequestOptions? GetWebRequestOptions(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("kind", out var kind) || kind != "web")
+            return null;
+
+        return new WebRequestOptions(
+            values.TryGetValue("max_request_body_bytes", out var maxRequestBodyBytes)
+                ? int.Parse(maxRequestBodyBytes, NumberStyles.None, CultureInfo.InvariantCulture)
+                : 1_048_576,
+            values.TryGetValue("request_timeout_ms", out var requestTimeoutMs)
+                ? int.Parse(requestTimeoutMs, NumberStyles.None, CultureInfo.InvariantCulture)
+                : 30_000);
+    }
+
+    private static bool TryParseCanonicalPositiveDecimal(string rawValue, out int value)
+    {
+        value = 0;
+        if (rawValue.Length == 0 || rawValue[0] == '0')
+            return false;
+
+        foreach (var character in rawValue)
+        {
+            if (character is < '0' or > '9')
+                return false;
+        }
+
+        return int.TryParse(rawValue, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value > 0;
     }
 
     private static void ValidateManifest(
@@ -1269,6 +1321,36 @@ internal static class PackageLoader
         var hasEntryModule = values.TryGetValue("entry_module", out var entryModule);
         if (values.TryGetValue("kind", out kind))
         {
+            var hasMaxRequestBodyBytes = values.ContainsKey("max_request_body_bytes");
+            var hasRequestTimeout = values.ContainsKey("request_timeout_ms");
+            if (kind != "web" && (hasMaxRequestBodyBytes || hasRequestTimeout))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "max_request_body_bytes and request_timeout_ms are only valid for web packages",
+                    file));
+            }
+
+            if (values.TryGetValue("max_request_body_bytes", out var maxRequestBodyBytes) &&
+                (!int.TryParse(maxRequestBodyBytes, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedMaxRequestBodyBytes) ||
+                 parsedMaxRequestBodyBytes is < 1 or > 16_777_216))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "max_request_body_bytes must be between 1 and 16777216",
+                    file));
+            }
+
+            if (values.TryGetValue("request_timeout_ms", out var requestTimeoutMs) &&
+                (!int.TryParse(requestTimeoutMs, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedRequestTimeoutMs) ||
+                 parsedRequestTimeoutMs is < 1 or > 300_000))
+            {
+                diagnostics.Add(AtStart(
+                    "E_MANIFEST",
+                    "request_timeout_ms must be between 1 and 300000",
+                    file));
+            }
+
             if ((kind is "cli" or "web") && !hasEntryModule)
                 diagnostics.Add(AtStart("E_MANIFEST", $"{(kind == "web" ? "Web" : "CLI")} packages require entry_module", file));
             else if (kind == "lib" && hasEntryModule)

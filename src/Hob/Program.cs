@@ -1072,7 +1072,7 @@ internal static class Driver
 
         var output = new
         {
-            schema_version = 12,
+            schema_version = 13,
             package = packageReferences[graph.Root.Id],
             dependencies,
             manifest_grants = graph.Root.Package.Manifest.Capabilities
@@ -1080,6 +1080,8 @@ internal static class Driver
                 .ToArray(),
             config = CheckedReportFacts.ConfigMetadata(program.ConfigFields),
             http_origin = graph.Root.Package.Manifest.HttpOrigin,
+            max_request_body_bytes = graph.Root.Package.Manifest.WebRequestOptions?.MaxRequestBodyBytes,
+            request_timeout_ms = graph.Root.Package.Manifest.WebRequestOptions?.RequestTimeoutMs,
             process_executables = graph.Root.Package.Manifest.ProcessExecutables
                 .OrderBy(pin => pin.Os == "windows" ? 0 : 1)
                 .Select(pin => new
@@ -1961,7 +1963,8 @@ internal static class Driver
                     executable,
                     package?.WebDatabaseOptions,
                     package?.Manifest.HttpOrigin,
-                    processRunnerOptions));
+                    processRunnerOptions,
+                    package?.Manifest.WebRequestOptions));
         }
         catch (ManagedAdapterPreparationException error)
         {

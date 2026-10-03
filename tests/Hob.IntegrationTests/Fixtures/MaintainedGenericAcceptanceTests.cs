@@ -376,8 +376,8 @@ internal static partial class IntegrationTests
         using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
         var api = apiDocument.RootElement;
         AssertInspectApiPropertyOrder(api);
-        AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
-            "The current inspect API schema is 12.");
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+            "The current inspect API schema is 13.");
         AssertJsonStringArray(api.GetProperty("manifest_grants"), ["net.client"]);
         AssertEqual(origin, api.GetProperty("http_origin").GetString(),
             "The root manifest should preserve its HTTP origin.");
@@ -441,8 +441,8 @@ internal static partial class IntegrationTests
         {
             var audit = auditDocument.RootElement;
             AssertAuditPropertyOrder(audit);
-            AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
-                "The current audit schema is 10.");
+            AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+                "The current audit schema is 11.");
             AssertJsonStringArray(audit.GetProperty("manifest_grants"), ["net.client"]);
             var httpClaim = audit.GetProperty("trusted_claims").EnumerateArray()
                 .Single(claim => claim.GetProperty("operation").GetString() == "HttpClient.get_text_async");
@@ -627,8 +627,8 @@ internal static partial class IntegrationTests
         using (var apiDocument = JsonDocument.Parse(api.StandardOutput))
         {
             AssertInspectApiPropertyOrder(apiDocument.RootElement);
-            AssertEqual(12, apiDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                "The canary package uses inspect API schema 12.");
+            AssertEqual(13, apiDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                "The canary package uses inspect API schema 13.");
             AssertTrue(apiDocument.RootElement.GetProperty("config").EnumerateArray()
                     .Any(field => field.GetProperty("name").GetString() == "token"
                         && field.GetProperty("source_type").GetString() == "Secret<Text>"),
@@ -642,8 +642,8 @@ internal static partial class IntegrationTests
         using (var auditDocument = JsonDocument.Parse(audit.StandardOutput))
         {
             AssertAuditPropertyOrder(auditDocument.RootElement);
-            AssertEqual(10, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
-                "The canary package uses audit schema 10.");
+            AssertEqual(11, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+                "The canary package uses audit schema 11.");
         }
 
         var build = await harness.InvokePackageDirectoryWithEnvironmentAsync(
