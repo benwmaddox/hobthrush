@@ -124,6 +124,7 @@ internal static partial class IntegrationTests
             ("async CLI handlers await FsRead results and format typed failures", TestAsyncCliCommandRuntime),
             ("FsWrite CLI grants, reports, receipts, and web route projections are checked", TestFsWritePackageContracts),
             ("typed startup config manifests, effects, reports, and redaction are checked", TestConfigManifestAndReports),
+            ("secret-free config example is deterministic, escaped, and never reads runtime secrets", TestConfigExample),
             ("CLI config defaults, empty values, explicit secret reveal, logging, and NativeAOT are checked", TestConfigCliRuntime),
             ("web config and logger injection work in an async route handler", TestConfigWebAsyncRuntime),
             ("clock.read capability is bounded, granted, reported, and injected in CLI and web hosts", TestClockCapability),
@@ -179,7 +180,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(129, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(130, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -6573,6 +6574,175 @@ internal static partial class IntegrationTests
         AssertEqual(0, refreshedCheck.ExitCode, Describe(refreshedCheck));
     }
 
+    private static async Task TestConfigExample(Harness harness)
+    {
+        const string secretCanary = "config-example-secret-canary-92c3";
+        const string nameCanary = "config-example-name-canary-a170";
+        const string modeCanary = "config-example-mode-canary-f680";
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["HOB_CONFIG_NAME"] = nameCanary,
+            ["HOB_CONFIG_MODE"] = modeCanary,
+            ["HOB_CONFIG_TOKEN"] = secretCanary
+        };
+
+        var defaultManifest = ConfigCliManifest().Replace(
+            "Text|default:normal",
+            "Text|default:keep $HOME # café = literal",
+            StringComparison.Ordinal);
+        var lockSentinel = new UTF8Encoding(false).GetBytes("lock sentinel\n");
+        var dependencyManifest = defaultManifest + "\n[dependencies]\nmissing = \"../missing-library\"\n";
+        var firstRoot = await harness.WritePackageAsync(
+            "config-example-first",
+            dependencyManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var lockPath = Path.Combine(firstRoot, "hob.lock");
+        await File.WriteAllBytesAsync(lockPath, lockSentinel);
+
+        Task<ProcessResult> GenerateExampleAsync(string packageRoot, IReadOnlyDictionary<string, string>? overrides = null) =>
+            harness.InvokeCompilerCommandAtDirectoryWithEnvironmentAsync(
+                packageRoot,
+                overrides,
+                "config",
+                "example",
+                packageRoot);
+
+        var first = await GenerateExampleAsync(firstRoot);
+        AssertEqual(0, first.ExitCode, Describe(first));
+        AssertEqual(string.Empty, first.StandardError, Describe(first));
+
+        var outputPath = Path.Combine(firstRoot, ".env.example");
+        var outputBytes = await File.ReadAllBytesAsync(outputPath);
+        var expectedText = "# Generated from hob.toml [config].\n"
+            + "# Informational only; Hob does not load this file.\n\n"
+            + "HOB_CONFIG_MODE=\"keep \\$HOME # café = literal\"\n"
+            + "HOB_CONFIG_NAME=\"\"\n"
+            + "# HOB_CONFIG_TOKEN is secret; supply it through deployment configuration.\n";
+        var expectedBytes = new UTF8Encoding(false).GetBytes(expectedText);
+        AssertTrue(outputBytes.AsSpan().SequenceEqual(expectedBytes),
+            "The config example must have exact sorted UTF-8-no-BOM LF bytes, literal-dollar escaping, and no secret assignment.");
+        var outputText = Encoding.UTF8.GetString(outputBytes);
+        foreach (var canary in new[] { secretCanary, nameCanary, modeCanary })
+        {
+            AssertTrue(!outputText.Contains(canary, StringComparison.Ordinal),
+                $"The config example file must not contain the runtime value {canary}.");
+        }
+        AssertTrue(!outputBytes.AsSpan().StartsWith(Encoding.UTF8.Preamble),
+            "The config example must not include a UTF-8 BOM.");
+        AssertTrue(!outputText.Contains('\r'), "The config example must use LF line endings on every host.");
+        AssertTrue(!outputText.Contains("HOB_CONFIG_TOKEN=", StringComparison.Ordinal),
+            "Secret config fields must be comments, never assignments.");
+        var lockAfter = await File.ReadAllBytesAsync(lockPath);
+        AssertTrue(lockSentinel.AsSpan().SequenceEqual(lockAfter),
+            "Generating a config example must not validate, create, or mutate the package lock.");
+
+        var repeatedRoot = await harness.WritePackageAsync(
+            "config-example-repeat",
+            dependencyManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var repeated = await GenerateExampleAsync(repeatedRoot, environment);
+        AssertEqual(0, repeated.ExitCode, Describe(repeated));
+        foreach (var canary in new[] { secretCanary, nameCanary, modeCanary })
+        {
+            AssertTrue(!repeated.StandardOutput.Contains(canary, StringComparison.Ordinal)
+                && !repeated.StandardError.Contains(canary, StringComparison.Ordinal),
+                $"The config example command must not print the runtime value {canary}.");
+        }
+        var repeatedBytes = await File.ReadAllBytesAsync(Path.Combine(repeatedRoot, ".env.example"));
+        foreach (var canary in new[] { secretCanary, nameCanary, modeCanary })
+            AssertTrue(!Encoding.UTF8.GetString(repeatedBytes).Contains(canary, StringComparison.Ordinal),
+                $"The config example file must not contain the runtime value {canary}.");
+        AssertTrue(outputBytes.AsSpan().SequenceEqual(repeatedBytes),
+            "Equivalent root config schemas must produce identical bytes across package roots.");
+
+        var invalidRoot = await harness.WritePackageAsync(
+            "config-example-invalid",
+            CliPackageManifest() + "\n[config]\nname = \"Text|optional\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var invalid = await GenerateExampleAsync(invalidRoot);
+        AssertTrue(invalid.ExitCode != 0, $"Malformed config unexpectedly generated an example. {Describe(invalid)}");
+        AssertTrue(invalid.StandardError.Contains("E_MANIFEST", StringComparison.Ordinal), Describe(invalid));
+        AssertTrue(!File.Exists(Path.Combine(invalidRoot, ".env.example")),
+            "Invalid config must fail before creating the output file.");
+
+        var existingRoot = await harness.WritePackageAsync(
+            "config-example-existing",
+            defaultManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var existingPath = Path.Combine(existingRoot, ".env.example");
+        var existingSentinel = new UTF8Encoding(false).GetBytes("preserve existing example\n");
+        await File.WriteAllBytesAsync(existingPath, existingSentinel);
+        var existing = await GenerateExampleAsync(existingRoot);
+        AssertTrue(existing.ExitCode != 0, $"Existing output was unexpectedly overwritten. {Describe(existing)}");
+        AssertTrue(existing.StandardError.Contains("E_IO", StringComparison.Ordinal), Describe(existing));
+        var existingAfter = await File.ReadAllBytesAsync(existingPath);
+        AssertTrue(existingSentinel.AsSpan().SequenceEqual(existingAfter),
+            "An existing config example must remain byte-identical after a refused write.");
+
+        var symlinkRoot = await harness.WritePackageAsync(
+            "config-example-symlink",
+            defaultManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var symlinkPath = Path.Combine(symlinkRoot, ".env.example");
+        var symlinkTarget = Path.Combine(harness.TemporaryRoot, "config-example-symlink-target.txt");
+        const string symlinkSentinel = "preserve symlink target\n";
+        await File.WriteAllTextAsync(symlinkTarget, symlinkSentinel, new UTF8Encoding(false));
+        var symlinkCreated = false;
+        try
+        {
+            File.CreateSymbolicLink(symlinkPath, symlinkTarget);
+            symlinkCreated = true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            Console.WriteLine("SKIP config example symlink subcase: this host does not permit file symbolic links.");
+        }
+
+        if (symlinkCreated)
+        {
+            var symlink = await GenerateExampleAsync(symlinkRoot);
+            AssertTrue(symlink.ExitCode != 0, $"A symlink at the output path was unexpectedly followed. {Describe(symlink)}");
+            AssertTrue(symlink.StandardError.Contains("E_IO", StringComparison.Ordinal), Describe(symlink));
+            AssertEqual(symlinkSentinel, await File.ReadAllTextAsync(symlinkTarget),
+                "Refusing a symlink output must leave its target byte-identical.");
+        }
+
+        var raceRoot = await harness.WritePackageAsync(
+            "config-example-race",
+            defaultManifest,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = "module app::main; pub fn main() -> i32 effects {} { return 0; }\n"
+            });
+        var attempts = await Task.WhenAll(Enumerable.Range(0, 6)
+            .Select(_ => GenerateExampleAsync(raceRoot)));
+        AssertEqual(1, attempts.Count(result => result.ExitCode == 0),
+            "Concurrent config example creators must have exactly one winner.");
+        foreach (var refused in attempts.Where(result => result.ExitCode != 0))
+        {
+            AssertTrue(refused.StandardError.Contains("E_IO", StringComparison.Ordinal),
+                $"Every concurrent losing creator should receive an I/O diagnostic. {Describe(refused)}");
+        }
+        var raceBytes = await File.ReadAllBytesAsync(Path.Combine(raceRoot, ".env.example"));
+        AssertTrue(expectedBytes.AsSpan().SequenceEqual(raceBytes),
+            "The concurrent winner must publish the complete deterministic example bytes.");
+    }
+
     private static async Task TestConfigCliRuntime(Harness harness)
     {
         var unusedSecretsPackage = await harness.WritePackageAsync(
@@ -12740,6 +12910,7 @@ internal static partial class IntegrationTests
             "build FILE_OR_PACKAGE [--aot --rid RID]",
             "run FILE_OR_PACKAGE [-- APP_ARGS]",
             "lock PACKAGE_DIRECTORY",
+            "config example PACKAGE_DIRECTORY",
             "audit PACKAGE_DIRECTORY --json",
             "inspect effects PACKAGE_DIRECTORY SYMBOL --json",
             "inspect api PACKAGE_DIRECTORY --json",
