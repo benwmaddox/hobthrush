@@ -170,6 +170,47 @@ internal static partial class IntegrationTests
         AssertEqual(0, check.ExitCode, Describe(check));
         AssertEqual(0, ParseDiagnosticSnapshots(check.StandardOutput).Length, Describe(check));
 
+        var inspectGraph = await harness.InvokeCompilerCommandAsync("inspect", packageRoot, "--json");
+        AssertEqual(0, inspectGraph.ExitCode, Describe(inspectGraph));
+        AssertEqual(string.Empty, inspectGraph.StandardError, Describe(inspectGraph));
+        using (var graphDocument = JsonDocument.Parse(inspectGraph.StandardOutput))
+        {
+            var graph = graphDocument.RootElement;
+            var adapterPackage = graph.GetProperty("packages").EnumerateArray()
+                .Single(item => item.GetProperty("name").GetString() == "sha256-adapter");
+            AssertEqual("root/dep:digest", adapterPackage.GetProperty("id").GetString(),
+                "The adapter's graph identity should follow its dependency alias, independent of its relative path.");
+            AssertSha256AdapterProvenance(graph.GetProperty("managed_adapters"), "../adapter", validHash);
+        }
+
+        var rootManifestPath = Path.Combine(packageRoot, "hob.toml");
+        var originalRootManifest = await File.ReadAllTextAsync(rootManifestPath);
+        const string originalDependency = "digest = \"../adapter\"";
+        AssertTrue(originalRootManifest.Contains(originalDependency, StringComparison.Ordinal),
+            "The managed-adapter fixture should contain its canonical dependency spelling.");
+        var spellingDirectory = Path.Combine(Path.GetDirectoryName(packageRoot)!, "spelling-hop");
+        Directory.CreateDirectory(spellingDirectory);
+        try
+        {
+            var equivalentRootManifest = originalRootManifest.Replace(
+                originalDependency,
+                "digest = \"../spelling-hop/../adapter\"",
+                StringComparison.Ordinal);
+            await File.WriteAllTextAsync(rootManifestPath, equivalentRootManifest, new UTF8Encoding(false));
+            AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+                "managed-adapter-lock-equivalent-spelling", packageRoot, "lock"));
+            var equivalentInspectGraph = await harness.InvokeCompilerCommandAsync("inspect", packageRoot, "--json");
+            AssertEqual(0, equivalentInspectGraph.ExitCode, Describe(equivalentInspectGraph));
+            AssertEqual(inspectGraph.StandardOutput, equivalentInspectGraph.StandardOutput,
+                "Equivalent dependency path spellings resolving to the same adapter must keep inspect graph JSON byte-identical.");
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(rootManifestPath, originalRootManifest, new UTF8Encoding(false));
+            AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+                "managed-adapter-lock-restore-spelling", packageRoot, "lock"));
+        }
+
         var audit = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
         AssertEqual(0, audit.ExitCode, Describe(audit));
         AssertEqual(string.Empty, audit.StandardError, Describe(audit));

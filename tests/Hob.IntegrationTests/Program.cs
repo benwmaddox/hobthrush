@@ -108,6 +108,7 @@ internal static partial class IntegrationTests
             ("inspect effects reports SQLite capabilities and trusted adapters", TestSqliteInspectEffects),
             ("inspect api exports a deterministic source-facing package graph", TestInspectApi),
             ("inspect api projects checked web routes and database capabilities", TestInspectApiWebRoutes),
+            ("inspect graph reports a deterministic full checked package and call graph", TestInspectGraph),
             ("audit reports a portable package graph and structured failures", TestAuditPackage),
             ("qualified calls carry effects into exact JSON diagnostics", TestQualifiedEffects),
             ("FsError requires an exhaustive typed match", TestFsErrorExhaustiveness),
@@ -180,7 +181,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(130, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(131, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -3045,6 +3046,446 @@ internal static partial class IntegrationTests
         AssertEqual("fs.read", string.Join(",", operations[0].GetProperty("effects").EnumerateArray()
             .Select(effect => effect.GetString())),
             "The async filesystem adapter should carry fs.read.");
+    }
+
+    private static async Task TestInspectGraph(Harness harness)
+    {
+        const string rootSource = """
+            module app::main;
+            pub struct RootBox<T> { item: a::models::Item<T> }
+            pub union RootEvent { Empty, Item(a::models::Item<Text>) }
+            pub newtype RootId = a::models::Item<i32>;
+            pub trait Render { fn render(value: Self) -> Text effects {}; }
+            fn render_i32(value: i32) -> Text effects {} { return "number"; }
+            pub impl self::app::main::Render for i32 { render = self::app::main::render_i32; }
+            pub fn measure<T: self::app::main::Render>(value: T) -> Text effects {} {
+                return self::app::main::Render.render(value);
+            }
+            pub fn forward_measure<T: self::app::main::Render>(value: T) -> Text effects {} {
+                return self::app::main::measure(value);
+            }
+            pub fn concrete_measure(value: i32) -> Text effects {} {
+                return self::app::main::Render.render(value);
+            }
+            pub fn concrete_call(value: i32) -> Text effects {} {
+                return self::app::main::measure(value);
+            }
+            pub fn recursive(value: i32) -> i32 effects {} {
+                if value == 0 { return 0; }
+                return self::app::main::recursive(value - 1);
+            }
+            pub fn call_a(value: i32) -> i32 effects {} { return a::service::first(value); }
+            pub fn call_b(value: i32) -> i32 effects {} { return b::helper::second(value); }
+            command scan {
+                help "Read a package graph fixture.";
+                argument path: FilePath help "Path to read.";
+                handler: self::handlers::run;
+                error: self::handlers::describe;
+            }
+            """;
+        const string handlersSource = """
+            module handlers;
+            pub fn run(args: self::app::main::ScanArgs, fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return a::service::read(fs);
+            }
+            pub fn describe(error: FsError) -> Text effects {} {
+                return match error {
+                    FsError.NotFound => "not found",
+                    FsError.PermissionDenied => "permission denied",
+                    FsError.InvalidPath => "invalid path",
+                    FsError.InvalidText => "invalid text",
+                    FsError.Io => "I/O error"
+                };
+            }
+            """;
+        const string aModels = """
+            module models;
+            pub struct Item<T> { value: T, shared: shared::models::Shared<T> }
+            pub union ItemStatus { Missing, Invalid(Text) }
+            pub newtype ItemName = shared::models::Shared<Text>;
+            trait Internal { fn inspect(value: Self) -> i32 effects {}; }
+            """;
+        const string aService = """
+            module service;
+            pub fn first(value: i32) -> i32 effects {} { return shared::graph::recursive(value); }
+            pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return shared::service::read(fs);
+            }
+            """;
+        const string bHelper = """
+            module helper;
+            pub fn second(value: i32) -> i32 effects {} { return shared::graph::recursive(value); }
+            """;
+        const string sharedGraph = """
+            module graph;
+            pub fn recursive(value: i32) -> i32 effects {} {
+                if value == 0 { return 0; }
+                return self::graph::recursive(value - 1);
+            }
+            """;
+        const string sharedModels = """
+            module models;
+            pub struct Shared<T> { value: T }
+            pub union SharedState<T> { Empty, Value(T) }
+            pub newtype SharedText = Text;
+            pub trait SharedValue { fn value(item: Self) -> Text effects {}; }
+            """;
+        const string sharedService = """
+            module service;
+            pub fn read(fs: FsRead) -> Result<Text, FsError> effects { fs.read } {
+                return fs.read_text("item.txt");
+            }
+            """;
+
+        static string WithLineEnding(string text, string lineEnding) =>
+            text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", lineEnding, StringComparison.Ordinal);
+
+        Dictionary<string, PackageFixture> Graph(string lineEnding, bool reverseDependencies = false, bool bodyEdit = false)
+        {
+            var rootManifest = "name = \"inspect-graph-root\"\nversion = \"0.1.0\"\nkind = \"cli\"\nsource_root = \"src\"\nentry_module = \"app::main\"\n"
+                + "\n[capabilities]\nfs.read = \"allow\"\n\n[dependencies]\n"
+                + (reverseDependencies ? "b = \"../b\"\na = \"../a\"\n" : "a = \"../a\"\nb = \"../b\"\n");
+            var aManifest = LibraryPackageManifest("inspect-graph-a") + "\n[dependencies]\nshared = \"../shared\"\n";
+            var bManifest = LibraryPackageManifest("inspect-graph-b") + "\n[dependencies]\nshared = \"../shared\"\n";
+            var transformedRoot = bodyEdit
+                ? rootSource.Replace("return \"number\";", "return \"changed body\";", StringComparison.Ordinal)
+                : rootSource;
+            return new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(WithLineEnding(rootManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/app/main.hob"] = WithLineEnding(transformedRoot, lineEnding),
+                    ["src/handlers.hob"] = WithLineEnding(handlersSource, lineEnding)
+                }),
+                ["a"] = new PackageFixture(WithLineEnding(aManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/models.hob"] = WithLineEnding(aModels, lineEnding),
+                    ["src/service.hob"] = WithLineEnding(aService, lineEnding)
+                }),
+                ["b"] = new PackageFixture(WithLineEnding(bManifest, lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/helper.hob"] = WithLineEnding(bHelper, lineEnding)
+                }),
+                ["shared"] = new PackageFixture(WithLineEnding(LibraryPackageManifest("inspect-graph-shared"), lineEnding), new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["src/graph.hob"] = WithLineEnding(sharedGraph, lineEnding),
+                    ["src/models.hob"] = WithLineEnding(sharedModels, lineEnding),
+                    ["src/service.hob"] = WithLineEnding(sharedService, lineEnding)
+                })
+            };
+        }
+
+        static async Task LockAsync(Harness harness, string label, string packageRoot)
+        {
+            var result = await harness.InvokePackageDirectoryAsync(label, packageRoot, "lock");
+            AssertEqual(0, result.ExitCode, Describe(result));
+        }
+
+        static async Task<ProcessResult> InspectAsync(Harness harness, string packageRoot) =>
+            await harness.InvokeCompilerCommandAsync("inspect", packageRoot, "--json");
+
+        static void AssertDiagnostic(ProcessResult result, string code, string context)
+        {
+            AssertEqual(1, result.ExitCode, context + " " + Describe(result));
+            AssertEqual(string.Empty, result.StandardError, context + " " + Describe(result));
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            var root = document.RootElement;
+            AssertEqual(1, root.GetProperty("schemaVersion").GetInt32(), context + " should use diagnostic schema v1.");
+            AssertTrue(!root.TryGetProperty("schema_version", out _) && !root.TryGetProperty("symbols", out _),
+                context + " must not emit a partial success report.");
+            AssertTrue(root.GetProperty("diagnostics").EnumerateArray().Any(item => item.GetProperty("code").GetString() == code),
+                context + $" should include {code}. {result.StandardOutput}");
+        }
+
+        var missingLockRoot = await harness.WritePackageGraphAsync("inspect-graph-missing-lock", Graph("\n"));
+        AssertDiagnostic(await InspectAsync(harness, missingLockRoot), "E_LOCK", "Inspect graph without a dependency lock");
+        await LockAsync(harness, "inspect-graph-create-lock", missingLockRoot);
+
+        var first = await InspectAsync(harness, missingLockRoot);
+        AssertEqual(0, first.ExitCode, Describe(first));
+        AssertEqual(string.Empty, first.StandardError, Describe(first));
+        using var firstDocument = JsonDocument.Parse(first.StandardOutput);
+        var report = firstDocument.RootElement;
+        AssertJsonPropertyOrder(report,
+            "schema_version,root_package_id,packages,symbols,trait_implementations,trait_calls,generic_call_witnesses,trait_binding_edges,manifest_grants,trusted_claims,foreign_dependencies,managed_adapters");
+        AssertEqual(1, report.GetProperty("schema_version").GetInt32(), "The complete graph report should use schema v1.");
+        AssertEqual("root", report.GetProperty("root_package_id").GetString(), "The root package has one stable ID.");
+        AssertEqual(4, report.GetProperty("packages").GetArrayLength(), "Every package in the diamond graph should appear once.");
+        AssertJsonPropertyOrder(report.GetProperty("packages")[0], "id,name,version,dependencies");
+        var packageIds = report.GetProperty("packages").EnumerateArray()
+            .Select(package => package.GetProperty("id").GetString() ?? string.Empty)
+            .ToHashSet(StringComparer.Ordinal);
+        AssertTrue(packageIds.SetEquals(["root", "root/dep:a", "root/dep:b", "root/dep:a/dep:shared"]),
+            "The shared dependency should use the ordinal-smallest alias path in the diamond.");
+        AssertTrue(report.GetProperty("packages").EnumerateArray().All(package =>
+                package.GetProperty("dependencies").EnumerateArray().All(dependency =>
+                    packageIds.Contains(dependency.GetProperty("package_id").GetString() ?? string.Empty))),
+            "Every serialized package edge must resolve to a package row.");
+        AssertTrue(report.GetProperty("packages").EnumerateArray()
+                .Where(package => package.GetProperty("id").GetString() is "root/dep:a" or "root/dep:b")
+                .All(package => package.GetProperty("dependencies")[0].GetProperty("package_id").GetString() == "root/dep:a/dep:shared"),
+            "Both sides of the dependency diamond must preserve their edge to the one canonical shared node.");
+        AssertJsonStringArray(report.GetProperty("manifest_grants"), ["fs.read"]);
+        AssertTrue(!first.StandardOutput.Contains(harness.TemporaryRoot, StringComparison.Ordinal),
+            "Successful graph JSON must not expose relocated checkout or integration-temp paths.");
+
+        var symbols = report.GetProperty("symbols").EnumerateArray().ToArray();
+        var symbolIds = symbols.Select(symbol => symbol.GetProperty("id").GetString() ?? string.Empty).ToHashSet(StringComparer.Ordinal);
+        AssertEqual(symbols.Length, symbolIds.Count, "Stable symbol IDs should be unique.");
+        AssertTrue(symbols.All(symbol => symbol.GetProperty("id").ValueKind == JsonValueKind.String),
+            "Stable IDs must not expose compiler-local numeric declaration IDs.");
+        var functions = symbols.Where(symbol => symbol.GetProperty("kind").GetString() == "function").ToArray();
+        var functionIds = functions.Select(function => function.GetProperty("id").GetString() ?? string.Empty).ToHashSet(StringComparer.Ordinal);
+        var traitIds = symbols.Where(symbol => symbol.GetProperty("kind").GetString() == "trait")
+            .Select(symbol => symbol.GetProperty("id").GetString() ?? string.Empty).ToHashSet(StringComparer.Ordinal);
+        foreach (var function in functions)
+        {
+            AssertJsonPropertyOrder(function,
+                "id,kind,package_id,module,name,visibility,is_async,signature,declared_effects,inferred_effects,effect_paths,required_capabilities,calls,callers");
+            AssertJsonPropertyOrder(function.GetProperty("signature"), "type_parameters,parameters,return_type");
+            var functionId = function.GetProperty("id").GetString()!;
+            var expectedCallers = functions.Where(candidate => candidate.GetProperty("calls").EnumerateArray()
+                    .Any(call => call.GetString() == functionId))
+                .Select(candidate => candidate.GetProperty("id").GetString()!)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            AssertEqual(string.Join("\n", expectedCallers),
+                string.Join("\n", function.GetProperty("callers").EnumerateArray().Select(item => item.GetString())),
+                $"Reverse callers for {functionId} must be exactly the inverse of direct calls.");
+            AssertTrue(function.GetProperty("calls").EnumerateArray().All(call => functionIds.Contains(call.GetString() ?? string.Empty)),
+                $"Every direct call from {functionId} must resolve to a function symbol.");
+            foreach (var caller in function.GetProperty("callers").EnumerateArray())
+                AssertTrue(functionIds.Contains(caller.GetString() ?? string.Empty), "Every caller reference must resolve.");
+            AssertTrue(function.GetProperty("id").ValueKind == JsonValueKind.String
+                && !function.TryGetProperty("local_id", out _), "Function symbols must not expose local numeric IDs.");
+
+            foreach (var typeParameter in function.GetProperty("signature").GetProperty("type_parameters").EnumerateArray())
+                foreach (var bound in typeParameter.GetProperty("bounds").EnumerateArray())
+                    AssertTrue(traitIds.Contains(bound.GetString() ?? string.Empty), "Every function bound must resolve to a trait symbol.");
+            AssertTypeReferences(function.GetProperty("signature"), symbolIds);
+            foreach (var path in function.GetProperty("effect_paths").EnumerateArray())
+                foreach (var step in path.GetProperty("steps").EnumerateArray())
+                    if (step.GetProperty("kind").GetString() == "function")
+                        AssertTrue(functionIds.Contains(step.GetProperty("symbol_id").GetString() ?? string.Empty),
+                            "Every effect-path step must resolve to a function symbol.");
+        }
+
+        var recursiveId = "hob.function.v1.root::app::main::recursive";
+        var recursive = functions.Single(function => function.GetProperty("id").GetString() == recursiveId);
+        AssertTrue(recursive.GetProperty("calls").EnumerateArray().Any(call => call.GetString() == recursiveId)
+            && recursive.GetProperty("callers").EnumerateArray().Any(caller => caller.GetString() == recursiveId),
+            "Recursive call edges must include the same stable ID in both directions.");
+
+        var graphCalls = report.GetProperty("trait_calls").EnumerateArray().ToArray();
+        var measureId = "hob.trait.v1.root::app::main::Render";
+        AssertTrue(graphCalls.Any(call => call.GetProperty("trait_id").GetString() == measureId
+                && call.GetProperty("witness").GetProperty("kind").GetString() == "bound"),
+            "Generic trait dispatch should retain its forwarded bound witness.");
+        var implementationCalls = graphCalls.Where(call => call.GetProperty("witness").GetProperty("kind").GetString() == "implementation").ToArray();
+        AssertTrue(implementationCalls.Length == 1
+                && implementationCalls[0].GetProperty("witness").GetProperty("implementation_id").GetString() ==
+                    report.GetProperty("trait_implementations")[0].GetProperty("id").GetString(),
+            "Concrete trait dispatch should report its stable implementation identity.");
+        AssertTrue(report.GetProperty("trait_binding_edges").EnumerateArray().Any(edge =>
+                edge.GetProperty("caller_function_id").GetString() == "hob.function.v1.root::app::main::concrete_measure"
+                && edge.GetProperty("callee_function_id").GetString() == "hob.function.v1.root::app::main::render_i32"),
+            "A concrete method dispatch should have an explicit binding edge.");
+        var concreteCallId = "hob.function.v1.root::app::main::concrete_call";
+        var genericWitness = report.GetProperty("generic_call_witnesses").EnumerateArray().Single(witness =>
+            witness.GetProperty("caller_function_id").GetString() == concreteCallId);
+        AssertEqual("implementation", genericWitness.GetProperty("witnesses")[0].GetProperty("selection").GetProperty("kind").GetString(),
+            "Concrete generic-call witnesses should remain distinct from method binding edges.");
+        var forwardedCallId = "hob.function.v1.root::app::main::forward_measure";
+        var forwardedWitness = report.GetProperty("generic_call_witnesses").EnumerateArray().Single(witness =>
+            witness.GetProperty("caller_function_id").GetString() == forwardedCallId);
+        AssertEqual("bound", forwardedWitness.GetProperty("witnesses")[0].GetProperty("selection").GetProperty("kind").GetString(),
+            "Forwarded generic witnesses must not invent a concrete implementation edge.");
+        AssertTrue(functions.Single(function => function.GetProperty("id").GetString() == concreteCallId)
+                .GetProperty("calls").EnumerateArray().Any(call => call.GetString() == "hob.function.v1.root::app::main::measure"),
+            "A generic function invocation remains an ordinary direct call.");
+
+        var implementations = report.GetProperty("trait_implementations").EnumerateArray().ToArray();
+        var implementationIds = implementations.Select(implementation => implementation.GetProperty("id").GetString() ?? string.Empty)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var implementation in implementations)
+        {
+            AssertTrue(traitIds.Contains(implementation.GetProperty("trait_id").GetString() ?? string.Empty),
+                "Every implementation trait reference must resolve.");
+            AssertTypeReferences(implementation.GetProperty("target_type"), symbolIds);
+            foreach (var binding in implementation.GetProperty("bindings").EnumerateArray())
+                AssertTrue(functionIds.Contains(binding.GetProperty("callee_function_id").GetString() ?? string.Empty),
+                    "Every implementation binding must resolve to a function symbol.");
+        }
+        foreach (var call in graphCalls)
+        {
+            AssertTrue(functionIds.Contains(call.GetProperty("caller_function_id").GetString() ?? string.Empty),
+                "Every trait caller must resolve.");
+            AssertTrue(traitIds.Contains(call.GetProperty("trait_id").GetString() ?? string.Empty),
+                "Every trait call must resolve its trait symbol.");
+            if (call.GetProperty("witness").GetProperty("kind").GetString() == "implementation")
+            {
+                AssertTrue(implementationIds.Contains(call.GetProperty("witness").GetProperty("implementation_id").GetString() ?? string.Empty),
+                    "Every concrete trait witness must resolve to an implementation.");
+                AssertTypeReferences(call.GetProperty("witness").GetProperty("target_type"), symbolIds);
+            }
+        }
+        foreach (var witness in report.GetProperty("generic_call_witnesses").EnumerateArray())
+        {
+            AssertTrue(functionIds.Contains(witness.GetProperty("caller_function_id").GetString() ?? string.Empty)
+                && functionIds.Contains(witness.GetProperty("callee_function_id").GetString() ?? string.Empty),
+                "Every generic call endpoint must resolve to a function symbol.");
+            foreach (var entry in witness.GetProperty("witnesses").EnumerateArray())
+            {
+                AssertTrue(traitIds.Contains(entry.GetProperty("trait_id").GetString() ?? string.Empty),
+                    "Every generic witness bound must resolve to a trait symbol.");
+                var selection = entry.GetProperty("selection");
+                if (selection.GetProperty("kind").GetString() == "implementation")
+                {
+                    AssertTrue(implementationIds.Contains(selection.GetProperty("implementation_id").GetString() ?? string.Empty),
+                        "Every concrete generic witness must resolve to an implementation.");
+                    AssertTypeReferences(selection.GetProperty("target_type"), symbolIds);
+                }
+            }
+        }
+        foreach (var edge in report.GetProperty("trait_binding_edges").EnumerateArray())
+        {
+            AssertTrue(functionIds.Contains(edge.GetProperty("caller_function_id").GetString() ?? string.Empty)
+                && functionIds.Contains(edge.GetProperty("callee_function_id").GetString() ?? string.Empty)
+                && traitIds.Contains(edge.GetProperty("trait_id").GetString() ?? string.Empty)
+                && implementationIds.Contains(edge.GetProperty("implementation_id").GetString() ?? string.Empty),
+                "Every trait-binding edge reference must resolve.");
+        }
+
+        var trustedClaims = report.GetProperty("trusted_claims").EnumerateArray().ToArray();
+        AssertTrue(trustedClaims.Any(claim => claim.GetProperty("source").GetString() == "trusted_host"
+                && claim.GetProperty("assurance").GetString() == "claim_only"
+                && claim.GetProperty("operation").GetString() == "cli.output"),
+            "Host operations should be reported as claim-only trusted claims.");
+        AssertTrue(trustedClaims.Any(claim => claim.GetProperty("source").GetString() == "trusted_adapter"
+                && claim.GetProperty("assurance").GetString() == "claim_only"
+                && claim.GetProperty("operation").GetString() == "FsRead.read_text"
+                && claim.GetProperty("effects").EnumerateArray().Any(effect => effect.GetString() == "fs.read")),
+            "Filesystem adapter operations should remain claim-only and separate from source effects.");
+        foreach (var claim in trustedClaims)
+            foreach (var functionId in claim.GetProperty("reachable_from").EnumerateArray())
+                AssertTrue(functionIds.Contains(functionId.GetString() ?? string.Empty), "Trusted claim roots must resolve to function symbols.");
+
+        foreach (var symbol in symbols)
+        {
+            if (symbol.GetProperty("kind").GetString() == "struct")
+                foreach (var field in symbol.GetProperty("fields").EnumerateArray())
+                    AssertTypeReferences(field.GetProperty("type"), symbolIds);
+            if (symbol.GetProperty("kind").GetString() == "union")
+                foreach (var variant in symbol.GetProperty("variants").EnumerateArray())
+                    foreach (var field in variant.GetProperty("fields").EnumerateArray())
+                        AssertTypeReferences(field.GetProperty("type"), symbolIds);
+            if (symbol.GetProperty("kind").GetString() == "newtype")
+                AssertTypeReferences(symbol.GetProperty("representation"), symbolIds);
+            if (symbol.GetProperty("kind").GetString() == "trait")
+                foreach (var method in symbol.GetProperty("methods").EnumerateArray())
+                {
+                    AssertTypeReferences(method.GetProperty("return_type"), symbolIds);
+                    foreach (var parameter in method.GetProperty("parameters").EnumerateArray())
+                        AssertTypeReferences(parameter.GetProperty("type"), symbolIds);
+                }
+        }
+        AssertStableIdValues(report);
+        static void AssertTypeReferences(JsonElement element, IReadOnlySet<string> symbolIds)
+        {
+            if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty("kind", out var kindProperty))
+                return;
+            var kind = kindProperty.GetString();
+            switch (kind)
+            {
+                case "nominal":
+                    AssertTrue(symbolIds.Contains(element.GetProperty("symbol_id").GetString() ?? string.Empty),
+                        "Every nominal type reference must resolve to a declaration symbol.");
+                    foreach (var argument in element.GetProperty("type_arguments").EnumerateArray())
+                        AssertTypeReferences(argument, symbolIds);
+                    break;
+                case "list":
+                case "option":
+                case "secret":
+                    AssertTypeReferences(element.GetProperty("item"), symbolIds);
+                    break;
+                case "map":
+                    AssertTypeReferences(element.GetProperty("key"), symbolIds);
+                    AssertTypeReferences(element.GetProperty("value"), symbolIds);
+                    break;
+                case "result":
+                    AssertTypeReferences(element.GetProperty("ok"), symbolIds);
+                    AssertTypeReferences(element.GetProperty("error"), symbolIds);
+                    break;
+            }
+        }
+
+        static void AssertStableIdValues(JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (property.Name is "id" or "package_id" or "symbol_id" or "trait_id" or "implementation_id" or
+                        "caller_function_id" or "callee_function_id" or "root_package_id")
+                        AssertEqual(JsonValueKind.String, property.Value.ValueKind,
+                            $"Stable reference field '{property.Name}' must not expose a compiler-local number.");
+                    AssertStableIdValues(property.Value);
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray()) AssertStableIdValues(item);
+            }
+        }
+
+        var repeated = await InspectAsync(harness, missingLockRoot);
+        AssertEqual(first.StandardOutput, repeated.StandardOutput, "Repeated inspect graph output should be byte-identical.");
+        var relocatedRoot = await harness.WritePackageGraphAsync("inspect-graph-relocated-crlf", Graph("\r\n", reverseDependencies: true));
+        await LockAsync(harness, "inspect-graph-relocated-lock", relocatedRoot);
+        var relocated = await InspectAsync(harness, relocatedRoot);
+        AssertEqual(0, relocated.ExitCode, Describe(relocated));
+        AssertEqual(first.StandardOutput, relocated.StandardOutput,
+            "Equivalent relocated, CRLF, reverse-alias-order graphs should report byte-identical stable data.");
+
+        var bodyEditedRoot = await harness.WritePackageGraphAsync("inspect-graph-body-edit", Graph("\n", bodyEdit: true));
+        await LockAsync(harness, "inspect-graph-body-edit-lock", bodyEditedRoot);
+        var bodyEdited = await InspectAsync(harness, bodyEditedRoot);
+        AssertEqual(0, bodyEdited.ExitCode, Describe(bodyEdited));
+        using var bodyEditedDocument = JsonDocument.Parse(bodyEdited.StandardOutput);
+        var bodyEditedIds = bodyEditedDocument.RootElement.GetProperty("symbols").EnumerateArray()
+            .Select(symbol => symbol.GetProperty("id").GetString() ?? string.Empty);
+        AssertEqual(string.Join("\n", symbolIds.Order(StringComparer.Ordinal)),
+            string.Join("\n", bodyEditedIds.Order(StringComparer.Ordinal)),
+            "Body-only edits must preserve all stable graph symbol IDs.");
+
+        var sharedSource = Path.GetFullPath(Path.Combine(missingLockRoot, "..", "shared", "src", "graph.hob"));
+        await File.AppendAllTextAsync(sharedSource, "\n// stale after lock\n");
+        AssertDiagnostic(await InspectAsync(harness, missingLockRoot), "E_LOCK", "Inspect graph with a stale dependency lock");
+
+        var invalidManifestRoot = await harness.WritePackageAsync(
+            "inspect-graph-invalid-manifest",
+            "name = \"broken\"\n",
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        AssertDiagnostic(await InspectAsync(harness, invalidManifestRoot), "E_MANIFEST", "Inspect graph with a malformed manifest");
+        var invalidSourceRoot = await harness.WritePackageAsync(
+            "inspect-graph-invalid-source",
+            LibraryPackageManifest("inspect-graph-invalid-source"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/invalid.hob"] = "module invalid; pub fn broken() -> i32 effects {} { return \"wrong\"; }"
+            });
+        AssertDiagnostic(await InspectAsync(harness, invalidSourceRoot), "E_TYPE_MISMATCH", "Inspect graph with invalid checked source");
+
+        var api = await harness.InvokeCompilerCommandAsync("inspect", "api", relocatedRoot, "--json");
+        AssertEqual(0, api.ExitCode, Describe(api));
+        using var apiDocument = JsonDocument.Parse(api.StandardOutput);
+        AssertEqual(13, apiDocument.RootElement.GetProperty("schema_version").GetInt32(),
+            "The full inspect graph must not change inspect API schema v13.");
+        var audit = await harness.InvokeCompilerCommandAsync("audit", relocatedRoot, "--json");
+        AssertEqual(0, audit.ExitCode, Describe(audit));
+        using var auditDocument = JsonDocument.Parse(audit.StandardOutput);
+        AssertEqual(11, auditDocument.RootElement.GetProperty("schema_version").GetInt32(),
+            "The full inspect graph must not change audit schema v11.");
     }
 
     private static async Task TestInspectApi(Harness harness)
@@ -12912,6 +13353,7 @@ internal static partial class IntegrationTests
             "lock PACKAGE_DIRECTORY",
             "config example PACKAGE_DIRECTORY",
             "audit PACKAGE_DIRECTORY --json",
+            "inspect PACKAGE_DIRECTORY --json",
             "inspect effects PACKAGE_DIRECTORY SYMBOL --json",
             "inspect api PACKAGE_DIRECTORY --json",
             "test [FILE_OR_PACKAGE]"
@@ -12926,6 +13368,8 @@ internal static partial class IntegrationTests
             ? "inspect effects"
             : form.StartsWith("inspect api ", StringComparison.Ordinal)
                 ? "inspect api"
+                : form.StartsWith("inspect ", StringComparison.Ordinal)
+                    ? "inspect"
                 : form.StartsWith("audit ", StringComparison.Ordinal)
                     ? "audit"
             : form.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
@@ -12954,6 +13398,8 @@ internal static partial class IntegrationTests
             + $"received [{string.Join(", ", packageCommands.Order(StringComparer.Ordinal))}].");
         AssertTrue(packageCommandBlock.Contains("hob inspect effects PACKAGE_DIRECTORY SYMBOL --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the inspect effects form.");
+        AssertTrue(packageCommandBlock.Contains("hob inspect PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
+            "docs/grammar.md package command list must show the full inspect graph form.");
         AssertTrue(packageCommandBlock.Contains("hob inspect api PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
             "docs/grammar.md package command list must show the inspect api form.");
         AssertTrue(packageCommandBlock.Contains("hob audit PACKAGE_DIRECTORY --json", StringComparison.Ordinal),
