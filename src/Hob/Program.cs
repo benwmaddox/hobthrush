@@ -68,7 +68,9 @@ internal static class Driver
         if (args.Length != 0 && args[0] == "inspect")
             return args.Length > 1 && args[1] == "api"
                 ? InspectApi(args)
-                : InspectEffects(args);
+                : args.Length > 1 && args[1] == "effects"
+                    ? InspectEffects(args)
+                    : InspectGraph(args);
 
         var hasApplicationSeparator = false;
         string[] applicationArguments = [];
@@ -1223,6 +1225,49 @@ internal static class Driver
         return 0;
     }
 
+    private static int InspectGraph(string[] args)
+    {
+        if (args.Length != 3 || args[2] != "--json")
+        {
+            PrintUsage();
+            return 2;
+        }
+
+        string packageDirectory;
+        try
+        {
+            packageDirectory = Path.GetFullPath(args[1]);
+        }
+        catch (Exception error) when (IsFileError(error))
+        {
+            PrintDiagnostics(
+            [
+                AtStart("E_IO", $"Invalid package directory: {error.Message}", args[1])
+            ],
+            json: true);
+            return 1;
+        }
+
+        var resolved = ResolvePackageGraph(packageDirectory);
+        if (resolved.Diagnostics.Count != 0 || resolved.Graph is null)
+        {
+            PrintDiagnostics(resolved.Diagnostics, json: true);
+            return 1;
+        }
+
+        var graph = resolved.Graph;
+        var checkedPackage = CheckPackageGraph(graph);
+        if (checkedPackage.Diagnostics.Count != 0 || checkedPackage.Program is null)
+        {
+            PrintDiagnostics(checkedPackage.Diagnostics, json: true);
+            return 1;
+        }
+
+        var adapterProvenance = CreateManagedAdapterProvenance(graph, checkedPackage.Program);
+        Console.WriteLine(InspectGraphReport.Create(graph, checkedPackage.Program, adapterProvenance));
+        return 0;
+    }
+
     private static object ApiType(
         HobType type,
         IReadOnlyDictionary<string, ApiPackageReference> packageReferences,
@@ -1801,7 +1846,7 @@ internal static class Driver
     }
 
     private static void PrintUsage() =>
-        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob fmt FILE_OR_PACKAGE [--check] | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob config example PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
+        Console.Error.WriteLine("Usage: hob new lib|cli|web NAME | hob add SOURCE | hob add PACKAGE_DIRECTORY SOURCE | hob fmt FILE_OR_PACKAGE [--check] | hob check FILE_OR_PACKAGE [--json] | hob build FILE_OR_PACKAGE [--aot --rid RID] | hob run FILE_OR_PACKAGE [-- APP_ARGS] | hob lock PACKAGE_DIRECTORY | hob config example PACKAGE_DIRECTORY | hob audit PACKAGE_DIRECTORY --json | hob inspect PACKAGE_DIRECTORY --json | hob inspect effects PACKAGE_DIRECTORY SYMBOL --json | hob inspect api PACKAGE_DIRECTORY --json | hob test [FILE_OR_PACKAGE]");
 
     private static int ReportProjectWorkflow(ProjectWorkflowResult result)
     {
