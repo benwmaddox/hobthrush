@@ -65,6 +65,24 @@ internal static class CheckedReportFacts
         return $"hob.newtype.v1.{packageIdentity}::{newtype.Module}::{newtype.Name}";
     }
 
+    public static string StableStructId(
+        CheckedStruct structure,
+        IReadOnlyDictionary<string, string> packageIdentities)
+    {
+        if (!packageIdentities.TryGetValue(structure.PackageId, out var packageIdentity))
+            throw new InvalidOperationException("A checked struct has no stable package identity");
+        return $"hob.struct.v1.{packageIdentity}::{structure.Module}::{structure.Name}";
+    }
+
+    public static string StableUnionId(
+        CheckedUnion union,
+        IReadOnlyDictionary<string, string> packageIdentities)
+    {
+        if (!packageIdentities.TryGetValue(union.PackageId, out var packageIdentity))
+            throw new InvalidOperationException("A checked union has no stable package identity");
+        return $"hob.union.v1.{packageIdentity}::{union.Module}::{union.Name}";
+    }
+
     public static string StableFunctionId(
         CheckedFunction function,
         IReadOnlyDictionary<string, string> packageIdentities)
