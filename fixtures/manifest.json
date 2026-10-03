@@ -755,5 +755,17 @@
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH"
     ]
+  },
+  {
+    "file": "125-valid-clock-read.hob",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "126-invalid-clock-effect-bound.hob",
+    "status": "active",
+    "expectedCodes": [
+      "E_EFFECT_EXCEEDED"
+    ]
   }
 ]

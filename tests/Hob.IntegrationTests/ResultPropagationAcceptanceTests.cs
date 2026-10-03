@@ -335,8 +335,8 @@ internal static partial class IntegrationTests
         using (var api = JsonDocument.Parse(apiRun.StandardOutput))
         {
             AssertInspectApiPropertyOrder(api.RootElement);
-            AssertEqual(11, api.RootElement.GetProperty("schema_version").GetInt32(),
-                "Postfix Result propagation must retain inspect API schema 11.");
+            AssertEqual(12, api.RootElement.GetProperty("schema_version").GetInt32(),
+                "Postfix Result propagation must retain inspect API schema 12.");
             var forward = api.RootElement.GetProperty("functions").EnumerateArray()
                 .Single(item => item.GetProperty("id").GetString() == "core::propagation::forward");
             var result = forward.GetProperty("return_type");
@@ -377,8 +377,8 @@ internal static partial class IntegrationTests
         using (var audit = JsonDocument.Parse(auditRun.StandardOutput))
         {
             AssertAuditPropertyOrder(audit.RootElement);
-            AssertEqual(9, audit.RootElement.GetProperty("schema_version").GetInt32(),
-                "Typed Result control flow must retain audit schema 9.");
+            AssertEqual(10, audit.RootElement.GetProperty("schema_version").GetInt32(),
+                "Typed Result control flow must retain audit schema 10.");
             var compiler = audit.RootElement.GetProperty("compiler");
             var effectChain = compiler.GetProperty("functions").EnumerateArray()
                 .Single(item => item.GetProperty("module").GetString() == "handlers"

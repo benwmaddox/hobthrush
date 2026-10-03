@@ -1000,7 +1000,7 @@ internal static class PackageLoader
             if (inCapabilities)
             {
                 if (key is not ("fs.read" or "fs.write" or "net.listen" or "net.client" or "db.read" or "db.write" or
-                    "env.read" or "secret.reveal" or "log.write" or "process.spawn"))
+                    "env.read" or "clock.read" or "secret.reveal" or "log.write" or "process.spawn"))
                 {
                     diagnostics.Add(AtLine("E_MANIFEST", $"Unknown capability '{key}'", file, lineNumber));
                     continue;

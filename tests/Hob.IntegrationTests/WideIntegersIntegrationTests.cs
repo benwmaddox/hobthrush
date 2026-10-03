@@ -737,8 +737,8 @@ internal static partial class IntegrationTests
             {
                 var api = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(api);
-                AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
-                    "Wide integer type facts must retain inspect API schema version 11.");
+                AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
+                    "Wide integer type facts must retain inspect API schema version 12.");
                 foreach (var (name, typeName) in new[] { ("keep_i64", "i64"), ("keep_u32", "u32"), ("keep_u64", "u64") })
                 {
                     var function = api.GetProperty("functions").EnumerateArray()
@@ -779,8 +779,8 @@ internal static partial class IntegrationTests
             {
                 var audit = auditDocument.RootElement;
                 AssertAuditPropertyOrder(audit);
-                AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
-                    "Wide integer audit facts must retain schema version 9.");
+                AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
+                    "Wide integer audit facts must retain schema version 10.");
                 var trait = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
                     .Single(item => item.GetProperty("name").GetString() == "NumericWitness");
                 var accepts = trait.GetProperty("methods").EnumerateArray()

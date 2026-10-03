@@ -1,0 +1,5 @@
+module app::main;
+
+pub fn read(clock: Clock) -> i64 effects { clock.read } {
+    return clock.unix_time_ms();
+}

@@ -635,8 +635,8 @@ internal static partial class IntegrationTests
             {
                 var api = apiDocument.RootElement;
                 AssertInspectApiPropertyOrder(api);
-                AssertEqual(11, api.GetProperty("schema_version").GetInt32(),
-                    "F64 API facts must retain inspect API schema version 11.");
+                AssertEqual(12, api.GetProperty("schema_version").GetInt32(),
+                    "F64 API facts must retain inspect API schema version 12.");
 
                 var keep = api.GetProperty("functions").EnumerateArray()
                     .Single(item => item.GetProperty("id").GetString() == "self::numeric::keep");
@@ -673,8 +673,8 @@ internal static partial class IntegrationTests
             {
                 var audit = auditDocument.RootElement;
                 AssertAuditPropertyOrder(audit);
-                AssertEqual(9, audit.GetProperty("schema_version").GetInt32(),
-                    "F64 audit facts must retain audit schema version 9.");
+                AssertEqual(10, audit.GetProperty("schema_version").GetInt32(),
+                    "F64 audit facts must retain audit schema version 10.");
                 var trait = audit.GetProperty("compiler").GetProperty("traits").EnumerateArray()
                     .Single(item => item.GetProperty("name").GetString() == "F64Witness");
                 var accepts = trait.GetProperty("methods").EnumerateArray()
