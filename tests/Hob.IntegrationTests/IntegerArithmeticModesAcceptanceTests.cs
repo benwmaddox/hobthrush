@@ -69,8 +69,8 @@ internal static partial class IntegrationTests
                     "command-schema.json"],
                    packageRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed integer arithmetic builds must retain receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed integer arithmetic builds must retain receipt schema 4.");
         }
 
         var positive = await harness.RunManagedArtifactAsync(
@@ -129,8 +129,8 @@ internal static partial class IntegrationTests
                     "command-schema.json"],
                    packageRoot))
         {
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "NativeAOT integer arithmetic builds must retain receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT integer arithmetic builds must retain receipt schema 4.");
         }
 
         var nativePositive = await ExecuteNativeAsync(

@@ -447,8 +447,8 @@ internal static partial class IntegrationTests
                    managedDirectory, "managed", null,
                    [Path.GetRelativePath(managedDirectory, managedArtifact).Replace(Path.DirectorySeparatorChar, '/'),
                     "command-schema.json"], packageRoot))
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "Managed propagation builds must retain receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "Managed propagation builds must retain receipt schema 4.");
 
         var resourcePath = Path.Combine(harness.TemporaryRoot, "result-propagation-resource.txt");
         const string resourcePayload = "preserved reader λ";
@@ -493,8 +493,8 @@ internal static partial class IntegrationTests
                    nativeDirectory, "native_aot", CurrentHostAotRid(),
                    [Path.GetRelativePath(nativeDirectory, nativeArtifact).Replace(Path.DirectorySeparatorChar, '/'),
                     "command-schema.json"], packageRoot))
-            AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-                "NativeAOT propagation builds must retain receipt schema 3.");
+            AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+                "NativeAOT propagation builds must retain receipt schema 4.");
 
         foreach (var (mode, exitCode, output, events, error) in modes)
         {

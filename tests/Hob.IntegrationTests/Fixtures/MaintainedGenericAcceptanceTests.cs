@@ -108,8 +108,8 @@ internal static partial class IntegrationTests
                 harness.TemporaryRoot);
 
             var receiptRoot = receipt.RootElement;
-            AssertEqual(3, receiptRoot.GetProperty("schema_version").GetInt32(),
-                "Maintained generic package builds use current build receipt schema 3.");
+            AssertEqual(4, receiptRoot.GetProperty("schema_version").GetInt32(),
+                "Maintained generic package builds use current build receipt schema 4.");
             var rootInputHash = MaintainedReceiptInputHash(receiptRoot, packageName: null, rootRelativePath);
             var dependencyInputHash = MaintainedReceiptInputHash(receiptRoot, dependencyName, dependencyRelativePath);
             var expectedRootHash = HashSha256(await File.ReadAllBytesAsync(
@@ -660,8 +660,8 @@ internal static partial class IntegrationTests
             [relativeArtifact, "command-schema.json"],
             packageRoot,
             harness.TemporaryRoot);
-        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "The canary package uses build receipt schema 3.");
+        AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "The canary package uses build receipt schema 4.");
         var schemaPath = Path.Combine(outputDirectory, "command-schema.json");
         var receiptPath = Path.Combine(outputDirectory, "build-receipt.json");
         AssertTrue(!(await File.ReadAllTextAsync(schemaPath)).Contains(secretCanary, StringComparison.Ordinal),

@@ -250,12 +250,12 @@ internal static class OutcomeEvaluator
                     && auditAdapters.GetArrayLength() == 0;
                 AddCheck(checks, scenarioPrefix + "audit-report", auditPassed,
                     "audit v11 records the fs.read grant, claim-only operation, portable root identity, and adapter array", Evidence(auditRun));
-                AddCheck(checks, scenarioPrefix + "receipt-v3", receiptValid && commandSchemaValid && receiptDetail,
-                    "build receipt v3 hashes its generated files and carries portable package identities and adapter array", Evidence(build));
+                AddCheck(checks, scenarioPrefix + "receipt-v4", receiptValid && commandSchemaValid && receiptDetail,
+                    "build receipt v4 records successful compiler/build stages and carries portable package identities and adapter array", Evidence(build));
                 break;
             case "web-greeting":
                 AddCheck(checks, scenarioPrefix + "check-clean", baseCheckPasses,
-                    "check/build/API v13/audit v11/effects and generated v5 schema/v3 receipt passed", Evidence(check, build, apiRun, auditRun));
+                    "check/build/API v13/audit v11/effects and generated v5 schema/v4 receipt passed", Evidence(check, build, apiRun, auditRun));
                 break;
         }
 
@@ -852,7 +852,7 @@ internal static class OutcomeEvaluator
     {
         detail = false;
         using var receipt = ReadJsonFile(Path.Combine(buildDirectory, "build-receipt.json"));
-        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 3
+        if (receipt is null || GetInt(receipt.RootElement, "schema_version") != 4
             || !receipt.RootElement.TryGetProperty("package_graph", out var packageGraph)
             || packageGraph.ValueKind != JsonValueKind.Array
             || !packageGraph.EnumerateArray().Any(package =>
@@ -866,6 +866,33 @@ internal static class OutcomeEvaluator
             || managedAdapters.ValueKind != JsonValueKind.Array
             || !receipt.RootElement.TryGetProperty("artifacts", out var artifacts)
             || artifacts.ValueKind != JsonValueKind.Array)
+            return false;
+
+        if (!receipt.RootElement.TryGetProperty("build", out var build)
+            || build.ValueKind != JsonValueKind.Object
+            || !TryGetString(build, "mode", out var buildMode)
+            || buildMode != "managed"
+            || !build.TryGetProperty("runtime_identifier", out var runtimeIdentifier)
+            || runtimeIdentifier.ValueKind != JsonValueKind.Null
+            || !receipt.RootElement.TryGetProperty("performed_checks", out var performedChecks)
+            || performedChecks.ValueKind != JsonValueKind.Array)
+            return false;
+
+        var expectedChecks = new List<string> { "compiler.package_graph_resolve" };
+        var lockWasRequired = packageGraph.EnumerateArray().Any(package =>
+                package.TryGetProperty("dependencies", out var dependencies)
+                && dependencies.ValueKind == JsonValueKind.Array
+                && dependencies.GetArrayLength() != 0)
+            || managedAdapters.GetArrayLength() != 0;
+        if (lockWasRequired)
+            expectedChecks.Add("compiler.package_lock_validate");
+        expectedChecks.Add("compiler.package_sources_parse");
+        expectedChecks.Add("compiler.semantic_check");
+        expectedChecks.Add("generated.managed_build");
+        var actualChecks = performedChecks.EnumerateArray()
+            .Select(check => check.ValueKind == JsonValueKind.String ? check.GetString() : null)
+            .ToArray();
+        if (!actualChecks.SequenceEqual(expectedChecks, StringComparer.Ordinal))
             return false;
 
         foreach (var artifact in artifacts.EnumerateArray())

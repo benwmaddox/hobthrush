@@ -5,7 +5,7 @@ using System.Text.Json;
 
 internal static class BuildReceipt
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -86,6 +86,7 @@ internal static class BuildReceipt
                 framework = "net10.0",
                 runtime_identifier = runtimeIdentifier
             },
+            performed_checks = PerformedChecks(graph, buildMode),
             package_graph = packageGraph,
             toolchain = new
             {
@@ -118,6 +119,32 @@ internal static class BuildReceipt
             if (File.Exists(temporaryPath))
                 File.Delete(temporaryPath);
         }
+    }
+
+    private static string[] PerformedChecks(PackageDependencyGraph? graph, string buildMode)
+    {
+        var checks = new List<string>();
+        if (graph is null)
+        {
+            checks.Add("compiler.source_parse");
+        }
+        else
+        {
+            checks.Add("compiler.package_graph_resolve");
+            if (graph.Nodes.Any(node =>
+                    node.Package.Manifest.Dependencies.Count != 0 || node.Package.ManagedAdapter is not null))
+                checks.Add("compiler.package_lock_validate");
+            checks.Add("compiler.package_sources_parse");
+        }
+
+        checks.Add("compiler.semantic_check");
+        checks.Add(buildMode switch
+        {
+            "managed" => "generated.managed_build",
+            "native_aot" => "generated.native_aot_publish",
+            _ => throw new ArgumentException($"Unknown successful build mode '{buildMode}'.", nameof(buildMode))
+        });
+        return checks.ToArray();
     }
 
     private static object[] EnumerateArtifacts(string outputDirectory) =>

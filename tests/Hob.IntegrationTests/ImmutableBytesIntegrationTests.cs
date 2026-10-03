@@ -596,8 +596,8 @@ internal static partial class IntegrationTests
             Path.GetDirectoryName(library)!, "managed", null,
             [Path.GetRelativePath(Path.GetDirectoryName(library)!, library).Replace(Path.DirectorySeparatorChar, '/')],
             originalRoot);
-        AssertEqual(3, receipt.RootElement.GetProperty("schema_version").GetInt32(),
-            "Bytes must remain covered by build receipt schema 3.");
+        AssertEqual(4, receipt.RootElement.GetProperty("schema_version").GetInt32(),
+            "Bytes must remain covered by build receipt schema 4.");
     }
 
     private static async Task TestImmutableBytesLockFreshness(Harness harness)
