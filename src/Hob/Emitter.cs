@@ -1352,11 +1352,52 @@ internal static class Emitter
 
         private void EmitNewtype(CheckedNewtype newtype)
         {
+            var typeName = "Newtype_" + newtype.Id.ToString(CultureInfo.InvariantCulture);
             _source.Append("    ").Append(newtype.Public ? "public" : "private")
-                .Append(" sealed record Newtype_").Append(newtype.Id.ToString(CultureInfo.InvariantCulture))
-                .Append('(').Append(EmitType(newtype.Representation)).AppendLine(" Value);");
+                .Append(" sealed record ").Append(typeName)
+                .Append('(').Append(EmitType(newtype.Representation)).Append(" Value)");
+            if (!IsSupportedMapKey(newtype.Type))
+            {
+                _source.AppendLine(";");
+                _source.AppendLine();
+                return;
+            }
+
+            _source.AppendLine();
+            _source.AppendLine("    {");
+            _source.Append("        internal sealed class KeyComparer : global::System.Collections.Generic.IComparer<")
+                .Append(typeName).AppendLine(">");
+            _source.AppendLine("        {");
+            _source.AppendLine("            internal static KeyComparer Instance { get; } = new();");
+            _source.Append("            public int Compare(").Append(typeName).Append("? left, ")
+                .Append(typeName).AppendLine("? right)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (global::System.Object.ReferenceEquals(left, right)) return 0;");
+            _source.AppendLine("                if (left is null) return -1;");
+            _source.AppendLine("                if (right is null) return 1;");
+            _source.Append("                return ")
+                .Append(EmitMapKeyComparison(newtype.Representation, "left.Value", "right.Value"))
+                .AppendLine(";");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
             _source.AppendLine();
         }
+
+        private string EmitMapKeyComparison(HobType type, string left, string right) => type.Kind switch
+        {
+            HobTypeKind.Text => "global::System.StringComparer.Ordinal.Compare(" + left + ", " + right + ")",
+            HobTypeKind.Bytes => "Bytes.KeyComparer.Instance.Compare(" + left + ", " + right + ")",
+            HobTypeKind.Newtype =>
+                "Newtype_" + type.NewtypeId.ToString(CultureInfo.InvariantCulture) + ".KeyComparer.Instance.Compare(" + left + ", " + right + ")",
+            _ => "global::System.Collections.Generic.Comparer<" + EmitType(type) + ">.Default.Compare(" + left + ", " + right + ")"
+        };
+
+        private bool IsSupportedMapKey(HobType type) =>
+            HobType.IsSupportedMapKey(type, newtypeId =>
+                newtypeId >= 0 && newtypeId < program.Newtypes.Count
+                    ? program.Newtypes[newtypeId].Representation
+                    : null);
 
         private void EmitTrait(CheckedTrait trait)
         {
@@ -1648,7 +1689,7 @@ internal static class Emitter
         {
             var keyType = EmitType(expression.Type.Arguments[0]);
             var valueType = EmitType(expression.Type.Arguments[1]);
-            if (!HobType.IsSupportedMapKey(expression.Type.Arguments[0]))
+            if (!IsSupportedMapKey(expression.Type.Arguments[0]))
                 throw new InvalidOperationException("Checked map key type is outside the supported concrete key domain");
             var empty = "global::System.Collections.Immutable.ImmutableSortedDictionary<" + keyType + ", " + valueType + ">.Empty";
             var key = expression.Type.Arguments[0];
@@ -1656,6 +1697,8 @@ internal static class Emitter
                 return empty + ".WithComparers(global::System.StringComparer.Ordinal)";
             if (key.IsBytes)
                 return empty + ".WithComparers(Bytes.KeyComparer.Instance)";
+            if (key.Kind == HobTypeKind.Newtype)
+                return empty + ".WithComparers(Newtype_" + key.NewtypeId.ToString(CultureInfo.InvariantCulture) + ".KeyComparer.Instance)";
             return empty;
         }
 
@@ -2252,7 +2295,7 @@ internal static class Emitter
                         pending.Push(current.Arguments[0]);
                         break;
                     case HobTypeKind.Map:
-                        if (current.Arguments.Count != 2 || !HobType.IsSupportedMapKey(current.Arguments[0])) return false;
+                        if (current.Arguments.Count != 2 || !IsSupportedMapKey(current.Arguments[0])) return false;
                         pending.Push(current.Arguments[1]);
                         break;
                     case HobTypeKind.Result:
@@ -4570,7 +4613,7 @@ internal static class Emitter
 
         private string EmitMapType(HobType type)
         {
-            if (type.Arguments.Count != 2 || !HobType.IsSupportedMapKey(type.Arguments[0]))
+            if (type.Arguments.Count != 2 || !IsSupportedMapKey(type.Arguments[0]))
                 throw new InvalidOperationException("Checked Map types must have a supported concrete key type and one value type");
             return "global::System.Collections.Immutable.ImmutableSortedDictionary<" +
                 EmitType(type.Arguments[0]) + ", " + EmitType(type.Arguments[1]) + ">";

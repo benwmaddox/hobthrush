@@ -123,6 +123,180 @@ internal static partial class IntegrationTests
             await ExecuteNativeAsync(packageExecutable, TimeSpan.FromSeconds(30)));
     }
 
+    private static async Task TestNewtypeMapKeys(Harness harness)
+    {
+        var fixturePath = Path.Combine(harness.RepositoryRoot, "fixtures", "128-valid-map-newtype-keys.hob");
+        var source = await File.ReadAllTextAsync(fixturePath);
+        var managed = await harness.InvokeAsync("newtype-map-keys-managed", "run", source);
+        AssertRunOutput("1000" + Environment.NewLine, managed);
+
+        const string reportSource = """
+            module app::main;
+
+            pub newtype UserId = i32;
+            pub newtype AccountId = i32;
+            pub newtype NestedUserId = self::app::main::UserId;
+            pub newtype UserMap = Map<self::app::main::NestedUserId, Text>;
+
+            pub fn copy<T>(values: Map<self::app::main::NestedUserId, T>) -> Map<self::app::main::NestedUserId, T> effects {} {
+                return values;
+            }
+            """;
+        var reportPackage = await harness.WritePackageAsync(
+            "newtype-map-key-report-shapes",
+            LibraryPackageManifest("newtype-map-key-report-shapes"),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/app/main.hob"] = reportSource
+            });
+        var reportCheck = await harness.InvokePackageDirectoryAsync(
+            "newtype-map-key-report-check", reportPackage, "check", "--json");
+        AssertEqual(0, reportCheck.ExitCode, Describe(reportCheck));
+        AssertEqual(0, ParseDiagnosticSnapshots(reportCheck.StandardOutput).Length, Describe(reportCheck));
+
+        var apiRun = await harness.InvokeCompilerCommandAsync("inspect", "api", reportPackage, "--json");
+        AssertEqual(0, apiRun.ExitCode, Describe(apiRun));
+        using var apiDocument = JsonDocument.Parse(apiRun.StandardOutput);
+        var api = apiDocument.RootElement;
+        AssertEqual(13, api.GetProperty("schema_version").GetInt32(),
+            "Nominal Map keys must retain inspect API schema v13.");
+        var apiNewtypes = api.GetProperty("newtypes").EnumerateArray().ToArray();
+        var apiShapes = apiNewtypes.ToDictionary(
+            item => item.GetProperty("id").GetString()!,
+            item => ReportTypeShape(item.GetProperty("representation")),
+            StringComparer.Ordinal);
+        AssertEqual("i32", apiShapes["self::app::main::UserId"],
+            "API must retain UserId as a nominal declaration over i32.");
+        AssertEqual("newtype:UserId", apiShapes["self::app::main::NestedUserId"],
+            "API must retain a nested newtype's nominal representation.");
+        AssertEqual("Map<newtype:NestedUserId,Text>", apiShapes["self::app::main::UserMap"],
+            "API must retain the nominal Map key inside a newtype representation.");
+        var apiCopy = api.GetProperty("functions").EnumerateArray()
+            .Single(function => function.GetProperty("id").GetString() == "self::app::main::copy");
+        AssertEqual("Map<newtype:NestedUserId,T#0>",
+            ReportTypeShape(apiCopy.GetProperty("parameters")[0].GetProperty("type")),
+            "API must preserve nominal key identity and the generic Map value parameter.");
+
+        var auditRun = await harness.InvokeCompilerCommandAsync("audit", reportPackage, "--json");
+        AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
+        using var auditDocument = JsonDocument.Parse(auditRun.StandardOutput);
+        var audit = auditDocument.RootElement;
+        AssertEqual(11, audit.GetProperty("schema_version").GetInt32(),
+            "Nominal Map keys must retain audit schema v11.");
+        var auditNewtypes = audit.GetProperty("compiler").GetProperty("newtypes").EnumerateArray().ToArray();
+        var auditUserMap = auditNewtypes.Single(item => item.GetProperty("name").GetString() == "UserMap");
+        AssertEqual("Map<newtype:NestedUserId,Text>",
+            ReportTypeShape(auditUserMap.GetProperty("representation")),
+            "Audit must retain both the Map representation and its nominal key identity.");
+
+        const string wrongNominalSource = """
+            module harness::newtype_map_wrong_nominal;
+            pub newtype UserId = i32;
+            pub newtype AccountId = i32;
+            fn invalid(values: Map<self::harness::newtype_map_wrong_nominal::UserId, Text>, key: self::harness::newtype_map_wrong_nominal::AccountId) -> Option<Text> effects {} {
+                return values.get(key);
+            }
+            pub fn main() -> i32 effects {} { return 0; }
+            """;
+        var wrongNominal = await harness.InvokeAsync(
+            "newtype-map-wrong-nominal-check", "check", wrongNominalSource, "--json");
+        AssertEqual(1, wrongNominal.ExitCode, Describe(wrongNominal));
+        var wrongNominalDiagnostics = ParseDiagnosticSnapshots(wrongNominal.StandardOutput);
+        AssertEqual(1, wrongNominalDiagnostics.Length,
+            "A Map.get call with a different nominal newtype must have one key-type diagnostic.");
+        AssertEqual("E_TYPE_MISMATCH", wrongNominalDiagnostics[0].Code,
+            "A supported newtype does not erase Map key nominal identity.");
+
+        const string resourceKeySource = """
+            module harness::newtype_map_resource_key;
+            pub newtype ResourceKey = FsRead;
+            fn invalid(values: Map<self::harness::newtype_map_resource_key::ResourceKey, i32>) -> i32 effects {} {
+                return values.length;
+            }
+            pub fn main() -> i32 effects {} { return 0; }
+            """;
+        var resourceKey = await harness.InvokeAsync(
+            "newtype-map-resource-key-check", "check", resourceKeySource, "--json");
+        AssertEqual(1, resourceKey.ExitCode, Describe(resourceKey));
+        var resourceKeyDiagnostics = ParseDiagnosticSnapshots(resourceKey.StandardOutput);
+        AssertTrue(resourceKeyDiagnostics.Length > 0
+                && resourceKeyDiagnostics.All(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE"),
+            "A resource-backed newtype Map key must retain E_RESOURCE_ESCAPE precedence over unsupported-key diagnostics.");
+
+        var dependencyRoot = await harness.WritePackageGraphAsync(
+            "newtype-map-keys-imported",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\ncore = \"../core\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.hob"] = """
+                            module app::main;
+                            pub fn main() -> i32 effects {} {
+                                let empty: Map<core::ids::NestedUserId, Text> = Map.empty();
+                                let key: core::ids::NestedUserId = core::ids::nested(7);
+                                let values: Map<core::ids::NestedUserId, Text> =
+                                    core::ids::insert::<Text>(empty, key, "imported");
+                                return values.length + match values.get(key) {
+                                    Some(value) => value.length,
+                                    None => -1,
+                                };
+                            }
+                            """
+                    }),
+                ["core"] = new PackageFixture(
+                    LibraryPackageManifest("newtype-map-keys-core"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/ids.hob"] = """
+                            module ids;
+                            pub newtype UserId = i32;
+                            pub newtype NestedUserId = self::ids::UserId;
+                            pub fn nested(value: i32) -> self::ids::NestedUserId effects {} {
+                                return self::ids::NestedUserId.wrap(self::ids::UserId.wrap(value));
+                            }
+                            pub fn insert<V>(values: Map<self::ids::NestedUserId, V>, key: self::ids::NestedUserId, value: V) -> Map<self::ids::NestedUserId, V> effects {} {
+                                return values.set(key, value);
+                            }
+                            """
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "newtype-map-keys-imported-lock", dependencyRoot, "lock"));
+        AssertRunOutput("9" + Environment.NewLine,
+            await harness.InvokePackageDirectoryAsync(
+                "newtype-map-keys-imported-managed", dependencyRoot, "run"));
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("Newtype Map-key NativeAOT coverage requires Windows x64 or Linux x64.");
+
+        const string executablePrefix = "Built native executable: ";
+        var aotBuild = await harness.InvokeWithTimeoutAsync(
+            "newtype-map-keys-aot", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, aotBuild.ExitCode, Describe(aotBuild));
+        AssertEqual(string.Empty, aotBuild.StandardError, Describe(aotBuild));
+        AssertTrue(aotBuild.StandardOutput.StartsWith(executablePrefix, StringComparison.Ordinal), Describe(aotBuild));
+        var executable = aotBuild.StandardOutput[executablePrefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(executable) && File.Exists(executable),
+            $"Expected a nominal Map-key NativeAOT executable at {executable}.");
+        AssertRunOutput("1000" + Environment.NewLine,
+            await ExecuteNativeAsync(executable, TimeSpan.FromSeconds(30)));
+
+        var packageAot = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "newtype-map-keys-imported-aot", dependencyRoot, "build", AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, packageAot.ExitCode, Describe(packageAot));
+        AssertTrue(packageAot.StandardOutput.StartsWith(executablePrefix, StringComparison.Ordinal), Describe(packageAot));
+        var packageExecutable = packageAot.StandardOutput[executablePrefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(packageExecutable) && File.Exists(packageExecutable),
+            $"Expected an imported nominal Map-key NativeAOT executable at {packageExecutable}.");
+        AssertRunOutput("9" + Environment.NewLine,
+            await ExecuteNativeAsync(packageExecutable, TimeSpan.FromSeconds(30)));
+    }
+
     private static async Task TestMapKeyReportsAsync(Harness harness)
     {
         const string reportSource = """
@@ -311,8 +485,8 @@ internal static partial class IntegrationTests
         AssertEqual(1, resourceFixtureCheck.ExitCode, Describe(resourceFixtureCheck));
         AssertEqual(string.Empty, resourceFixtureCheck.StandardError, Describe(resourceFixtureCheck));
         var resourceFixtureDiagnostics = ParseDiagnosticSnapshots(resourceFixtureCheck.StandardOutput);
-        AssertEqual(7, resourceFixtureDiagnostics.Length,
-            "The resource-key fixture should report five Map-key errors plus the existing two List resource-invariant errors.");
+        AssertEqual(9, resourceFixtureDiagnostics.Length,
+            "The resource-key fixture should report six Map-key errors, the newtype representation error, and the existing two List resource-invariant errors.");
         AssertTrue(resourceFixtureDiagnostics.All(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE"),
             "Every direct, nested, or stored resource-bearing Map key and independent List invariant must report E_RESOURCE_ESCAPE.");
         var actualResourceRanges = resourceFixtureDiagnostics
@@ -322,12 +496,12 @@ internal static partial class IntegrationTests
             .ToArray();
         var expectedResourceRanges = new[]
         {
-            (6, 23), (7, 15), (7, 27), (7, 82), (8, 28), (9, 28), (10, 29)
+            (12, 27), (14, 23), (18, 15), (18, 27), (19, 12), (22, 28), (26, 28), (30, 29), (34, 24)
         };
         AssertTrue(actualResourceRanges.SequenceEqual(expectedResourceRanges),
             $"Resource-key diagnostics should stay on the exact key and existing List invariant tokens. Got [{string.Join(", ", actualResourceRanges.Select(range => $"{range.StartLine}:{range.StartColumn}"))}].");
         var mapKeyResourceDiagnostic = resourceFixtureDiagnostics.Single(diagnostic =>
-            diagnostic.StartLine == 7 && diagnostic.StartColumn == 27);
+            diagnostic.StartLine == 18 && diagnostic.StartColumn == 27);
         AssertEqual("Map keys cannot contain resource handles, directly or through stored fields",
             mapKeyResourceDiagnostic.Message,
             "A nested resource-bearing Map key should receive the key-specific resource diagnostic.");

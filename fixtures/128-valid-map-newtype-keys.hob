@@ -1,0 +1,223 @@
+module fixture::map_newtype_keys;
+
+pub newtype UserId = i32;
+
+pub newtype AccountId = i32;
+
+pub newtype NestedUserId = self::fixture::map_newtype_keys::UserId;
+
+pub newtype ByteId = Bytes;
+
+pub newtype NestedByteId = self::fixture::map_newtype_keys::ByteId;
+
+pub newtype TextId = Text;
+
+pub newtype UnitId = Unit;
+
+fn userId(value: i32) -> self::fixture::map_newtype_keys::UserId effects {} {
+    return self::fixture::map_newtype_keys::UserId.wrap(value);
+}
+
+fn nestedUserId(value: i32) -> self::fixture::map_newtype_keys::NestedUserId effects {} {
+    return self::fixture::map_newtype_keys::NestedUserId.wrap(self::fixture::map_newtype_keys::userId(value));
+}
+
+fn appendByte(value: Bytes, octet: i32) -> Bytes effects {} {
+    return match value.append(octet) {
+        Ok(next) => next,
+        Err(error) => Bytes.empty(),
+    };
+}
+
+fn byte(octet: i32) -> Bytes effects {} {
+    return self::fixture::map_newtype_keys::appendByte(Bytes.empty(), octet);
+}
+
+fn pair(first: i32, second: i32) -> Bytes effects {} {
+    return self::fixture::map_newtype_keys::appendByte(self::fixture::map_newtype_keys::byte(first), second);
+}
+
+fn nestedByteId(value: Bytes) -> self::fixture::map_newtype_keys::NestedByteId effects {} {
+    return self::fixture::map_newtype_keys::NestedByteId.wrap(self::fixture::map_newtype_keys::ByteId.wrap(value));
+}
+
+fn textId(value: Text) -> self::fixture::map_newtype_keys::TextId effects {} {
+    return self::fixture::map_newtype_keys::TextId.wrap(value);
+}
+
+fn userKeyAt(keys: List<self::fixture::map_newtype_keys::UserId>, index: i32, expected: self::fixture::map_newtype_keys::UserId) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn nestedUserKeyAt(keys: List<self::fixture::map_newtype_keys::NestedUserId>, index: i32, expected: self::fixture::map_newtype_keys::NestedUserId) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn nestedByteKeyAt(keys: List<self::fixture::map_newtype_keys::NestedByteId>, index: i32, expected: self::fixture::map_newtype_keys::NestedByteId) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn textKeyAt(keys: List<self::fixture::map_newtype_keys::TextId>, index: i32, expected: self::fixture::map_newtype_keys::TextId) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn hasUserText(values: Map<self::fixture::map_newtype_keys::UserId, Text>, key: self::fixture::map_newtype_keys::UserId, expected: Text) -> bool effects {} {
+    return match values.get(key) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn hasNoUserText(values: Map<self::fixture::map_newtype_keys::UserId, Text>, key: self::fixture::map_newtype_keys::UserId) -> bool effects {} {
+    return match values.get(key) {
+        Some(value) => false,
+        None => true,
+    };
+}
+
+fn sameUsers(left: Map<self::fixture::map_newtype_keys::UserId, Text>, right: Map<self::fixture::map_newtype_keys::UserId, Text>) -> bool effects {} {
+    return left == right;
+}
+
+fn sameNestedBytes(left: Map<self::fixture::map_newtype_keys::NestedByteId, Text>, right: Map<self::fixture::map_newtype_keys::NestedByteId, Text>) -> bool effects {} {
+    return left == right;
+}
+
+fn store<T>(values: Map<self::fixture::map_newtype_keys::UserId, T>, key: self::fixture::map_newtype_keys::UserId, value: T) -> Map<self::fixture::map_newtype_keys::UserId, T> effects {} {
+    return values.set(key, value);
+}
+
+pub fn main() -> i32 effects {} {
+    let empty: Map<self::fixture::map_newtype_keys::UserId, Text> = Map.empty();
+    let values: Map<self::fixture::map_newtype_keys::UserId, Text> = empty.set(self::fixture::map_newtype_keys::userId(20), "twenty").set(self::fixture::map_newtype_keys::userId(2), "two").set(self::fixture::map_newtype_keys::userId(10), "ten");
+    let keys: List<self::fixture::map_newtype_keys::UserId> = values.keys();
+    if values.length != 3 {
+        return 1;
+    }
+    if self::fixture::map_newtype_keys::userKeyAt(keys, 0, self::fixture::map_newtype_keys::userId(2)) == false {
+        return 2;
+    }
+    if self::fixture::map_newtype_keys::userKeyAt(keys, 1, self::fixture::map_newtype_keys::userId(10)) == false {
+        return 3;
+    }
+    if self::fixture::map_newtype_keys::userKeyAt(keys, 2, self::fixture::map_newtype_keys::userId(20)) == false {
+        return 4;
+    }
+    let same: Map<self::fixture::map_newtype_keys::UserId, Text> = empty.set(self::fixture::map_newtype_keys::userId(10), "ten").set(self::fixture::map_newtype_keys::userId(20), "twenty").set(self::fixture::map_newtype_keys::userId(2), "two");
+    if self::fixture::map_newtype_keys::sameUsers(values, same) == false {
+        return 5;
+    }
+    let replaced: Map<self::fixture::map_newtype_keys::UserId, Text> = values.set(self::fixture::map_newtype_keys::userId(10), "updated");
+    if replaced.length != 3 {
+        return 6;
+    }
+    if self::fixture::map_newtype_keys::hasUserText(values, self::fixture::map_newtype_keys::userId(10), "ten") == false {
+        return 7;
+    }
+    if self::fixture::map_newtype_keys::hasUserText(replaced, self::fixture::map_newtype_keys::userId(10), "updated") == false {
+        return 8;
+    }
+    if self::fixture::map_newtype_keys::hasNoUserText(values, self::fixture::map_newtype_keys::userId(99)) == false {
+        return 9;
+    }
+    let generic: Map<self::fixture::map_newtype_keys::UserId, Text> = self::fixture::map_newtype_keys::store::<Text>(empty, self::fixture::map_newtype_keys::userId(30), "generic");
+    if self::fixture::map_newtype_keys::hasUserText(generic, self::fixture::map_newtype_keys::userId(30), "generic") == false {
+        return 10;
+    }
+    let nestedUserEmpty: Map<self::fixture::map_newtype_keys::NestedUserId, Text> = Map.empty();
+    let nestedUsers: Map<self::fixture::map_newtype_keys::NestedUserId, Text> = nestedUserEmpty.set(self::fixture::map_newtype_keys::nestedUserId(5), "five").set(self::fixture::map_newtype_keys::nestedUserId(3), "three");
+    let nestedUserKeys: List<self::fixture::map_newtype_keys::NestedUserId> = nestedUsers.keys();
+    if self::fixture::map_newtype_keys::nestedUserKeyAt(nestedUserKeys, 0, self::fixture::map_newtype_keys::nestedUserId(3)) == false {
+        return 11;
+    }
+    if self::fixture::map_newtype_keys::nestedUserKeyAt(nestedUserKeys, 1, self::fixture::map_newtype_keys::nestedUserId(5)) == false {
+        return 12;
+    }
+    let nestedByteEmpty: Map<self::fixture::map_newtype_keys::NestedByteId, Text> = Map.empty();
+    let nestedBytes: Map<self::fixture::map_newtype_keys::NestedByteId, Text> = nestedByteEmpty.set(self::fixture::map_newtype_keys::nestedByteId(Bytes.empty()), "empty").set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(2)), "two").set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::pair(1, 255)), "one-high").set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(1)), "one");
+    let nestedByteKeys: List<self::fixture::map_newtype_keys::NestedByteId> = nestedBytes.keys();
+    if self::fixture::map_newtype_keys::nestedByteKeyAt(nestedByteKeys, 0, self::fixture::map_newtype_keys::nestedByteId(Bytes.empty())) == false {
+        return 13;
+    }
+    if self::fixture::map_newtype_keys::nestedByteKeyAt(nestedByteKeys, 1, self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(1))) == false {
+        return 14;
+    }
+    if self::fixture::map_newtype_keys::nestedByteKeyAt(nestedByteKeys, 2, self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::pair(1, 255))) == false {
+        return 15;
+    }
+    if self::fixture::map_newtype_keys::nestedByteKeyAt(nestedByteKeys, 3, self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(2))) == false {
+        return 16;
+    }
+    let nestedSame: Map<self::fixture::map_newtype_keys::NestedByteId, Text> = nestedByteEmpty.set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(1)), "one").set(self::fixture::map_newtype_keys::nestedByteId(Bytes.empty()), "empty").set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::byte(2)), "two").set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::pair(1, 255)), "one-high");
+    if self::fixture::map_newtype_keys::sameNestedBytes(nestedBytes, nestedSame) == false {
+        return 17;
+    }
+    let nestedByteReplaced: Map<self::fixture::map_newtype_keys::NestedByteId, Text> = nestedBytes.set(self::fixture::map_newtype_keys::nestedByteId(self::fixture::map_newtype_keys::pair(1, 255)), "updated-high");
+    if nestedByteReplaced.length != 4 {
+        return 18;
+    }
+    if self::fixture::map_newtype_keys::sameNestedBytes(nestedBytes, nestedByteReplaced) {
+        return 19;
+    }
+    let accountEmpty: Map<self::fixture::map_newtype_keys::AccountId, Text> = Map.empty();
+    let accounts: Map<self::fixture::map_newtype_keys::AccountId, Text> = accountEmpty.set(self::fixture::map_newtype_keys::AccountId.wrap(7), "account");
+    if accounts.length != 1 {
+        return 20;
+    }
+    let unitKey: self::fixture::map_newtype_keys::UnitId = self::fixture::map_newtype_keys::UnitId.wrap(());
+    let unitEmpty: Map<self::fixture::map_newtype_keys::UnitId, Text> = Map.empty();
+    let unitValues: Map<self::fixture::map_newtype_keys::UnitId, Text> = unitEmpty.set(unitKey, "first").set(self::fixture::map_newtype_keys::UnitId.wrap(()), "replacement");
+    if unitValues.length != 1 {
+        return 21;
+    }
+    if match unitValues.get(unitKey) {
+        Some(value) => value == "replacement",
+        None => false
+    }
+    == false {
+        return 22;
+    }
+    let textEmpty: Map<self::fixture::map_newtype_keys::TextId, Text> = Map.empty();
+    let textValues: Map<self::fixture::map_newtype_keys::TextId, Text> = textEmpty.set(self::fixture::map_newtype_keys::textId("a"), "lower").set(self::fixture::map_newtype_keys::textId("é"), "accent").set(self::fixture::map_newtype_keys::textId("A"), "upper");
+    let textKeys: List<self::fixture::map_newtype_keys::TextId> = textValues.keys();
+    if self::fixture::map_newtype_keys::textKeyAt(textKeys, 0, self::fixture::map_newtype_keys::textId("A")) == false {
+        return 23;
+    }
+    if self::fixture::map_newtype_keys::textKeyAt(textKeys, 1, self::fixture::map_newtype_keys::textId("a")) == false {
+        return 24;
+    }
+    if self::fixture::map_newtype_keys::textKeyAt(textKeys, 2, self::fixture::map_newtype_keys::textId("é")) == false {
+        return 25;
+    }
+    let textReplaced: Map<self::fixture::map_newtype_keys::TextId, Text> = textValues.set(self::fixture::map_newtype_keys::textId("a"), "updated");
+    if textReplaced.length != 3 {
+        return 26;
+    }
+    if match textValues.get(self::fixture::map_newtype_keys::textId("a")) {
+        Some(value) => value == "lower",
+        None => false
+    }
+    == false {
+        return 27;
+    }
+    if match textReplaced.get(self::fixture::map_newtype_keys::textId("a")) {
+        Some(value) => value == "updated",
+        None => false
+    }
+    == false {
+        return 28;
+    }
+    return 1000;
+}

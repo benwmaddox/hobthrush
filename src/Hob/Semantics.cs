@@ -116,15 +116,29 @@ internal sealed class HobType : IEquatable<HobType>
     public bool IsList => Kind == HobTypeKind.List;
     public bool IsMap => Kind == HobTypeKind.Map;
 
-    internal static bool IsSupportedMapKey(HobType type) => type.Kind is
-        HobTypeKind.Text or
-        HobTypeKind.Bool or
-        HobTypeKind.I32 or
-        HobTypeKind.I64 or
-        HobTypeKind.U32 or
-        HobTypeKind.U64 or
-        HobTypeKind.Bytes or
-        HobTypeKind.Unit;
+    internal static bool IsSupportedMapKey(HobType type, Func<int, HobType?> resolveNewtypeRepresentation)
+    {
+        ArgumentNullException.ThrowIfNull(resolveNewtypeRepresentation);
+
+        var visitedNewtypes = new HashSet<int>();
+        while (type.Kind == HobTypeKind.Newtype)
+        {
+            if (!visitedNewtypes.Add(type.NewtypeId)) return false;
+            var representation = resolveNewtypeRepresentation(type.NewtypeId);
+            if (representation is null) return false;
+            type = representation;
+        }
+
+        return type.Kind is
+            HobTypeKind.Text or
+            HobTypeKind.Bool or
+            HobTypeKind.I32 or
+            HobTypeKind.I64 or
+            HobTypeKind.U32 or
+            HobTypeKind.U64 or
+            HobTypeKind.Bytes or
+            HobTypeKind.Unit;
+    }
 
     public bool IsDbError => Kind == HobTypeKind.DbError;
     internal int UnionId { get; }
@@ -3619,7 +3633,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private bool ValidateMapKeyType(HobType keyType, Token at)
     {
         if (!_mapKeyDiagnosticLocations.Add((at.File, at.Line, at.Column)))
-            return !ContainsResourceHandle(keyType, _resourceReachableDeclarations) && HobType.IsSupportedMapKey(keyType);
+            return !ContainsResourceHandle(keyType, _resourceReachableDeclarations) && IsSupportedMapKey(keyType);
 
         if (ContainsResourceHandle(keyType, _resourceReachableDeclarations))
         {
@@ -3630,17 +3644,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             return false;
         }
 
-        if (!HobType.IsSupportedMapKey(keyType))
+        if (!IsSupportedMapKey(keyType))
         {
             Add(
                 "E_TYPE_MISMATCH",
-                $"Map keys must have type Text, bool, i32, i64, u32, u64, Bytes, or Unit; found '{keyType.DisplayName}'",
+                $"Map keys must have type Text, bool, i32, i64, u32, u64, Bytes, Unit, or a supported newtype; found '{keyType.DisplayName}'",
                 at);
             return false;
         }
 
         return true;
     }
+
+    private bool IsSupportedMapKey(HobType type) =>
+        HobType.IsSupportedMapKey(type, newtypeId =>
+            newtypeId >= 0 && newtypeId < _newtypes.Count
+                ? _newtypes[newtypeId].Representation
+                : null);
 
     private void BuildResourceGraphSummaries()
     {
@@ -5518,7 +5538,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     pending.Push(current.Arguments[0]);
                     break;
                 case HobTypeKind.Map:
-                    if (current.Arguments.Count != 2 || !HobType.IsSupportedMapKey(current.Arguments[0])) return false;
+                    if (current.Arguments.Count != 2 || !IsSupportedMapKey(current.Arguments[0])) return false;
                     pending.Push(current.Arguments[1]);
                     break;
                 case HobTypeKind.Result:
@@ -5836,7 +5856,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             if (current.IsMap)
             {
                 if (current.Arguments.Count != 2 ||
-                    !HobType.IsSupportedMapKey(current.Arguments[0]) ||
+                    !IsSupportedMapKey(current.Arguments[0]) ||
                     ContainsResourceHandle(current.Arguments[0], _resourceReachableDeclarations))
                     return true;
             }

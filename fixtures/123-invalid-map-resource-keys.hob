@@ -1,10 +1,36 @@
 module fixture::invalid_map_resource_keys;
 
-pub struct Stored<T> { value: T }
-pub union StoredUnion<T> { Present(T), Empty }
+pub struct Stored<T> {
+    value: T
+}
 
-fn direct(values: Map<FsRead, i32>) -> i32 effects {} { return values.length; }
-fn listOption(values: Map<List<Option<FsRead>>, i32>) -> i32 effects {} { return values.length; }
-fn resultError(values: Map<Result<Text, FsRead>, i32>) -> i32 effects {} { return values.length; }
-fn storedField(values: Map<self::fixture::invalid_map_resource_keys::Stored<FsRead>, i32>) -> i32 effects {} { return values.length; }
-fn unionPayload(values: Map<self::fixture::invalid_map_resource_keys::StoredUnion<FsRead>, i32>) -> i32 effects {} { return values.length; }
+pub union StoredUnion<T> {
+    Present(T),
+    Empty
+}
+
+pub newtype ResourceKey = FsRead;
+
+fn direct(values: Map<FsRead, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn listOption(values: Map<List<Option<FsRead>>, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn resultError(values: Map<Result<Text, FsRead>, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn storedField(values: Map<self::fixture::invalid_map_resource_keys::Stored<FsRead>, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn unionPayload(values: Map<self::fixture::invalid_map_resource_keys::StoredUnion<FsRead>, i32>) -> i32 effects {} {
+    return values.length;
+}
+
+fn newtype(values: Map<self::fixture::invalid_map_resource_keys::ResourceKey, i32>) -> i32 effects {} {
+    return values.length;
+}
