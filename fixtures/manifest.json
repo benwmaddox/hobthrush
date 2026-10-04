@@ -731,6 +731,7 @@
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH",
+      "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH"
     ]
   },
@@ -738,6 +739,8 @@
     "file": "123-invalid-map-resource-keys.hob",
     "status": "active",
     "expectedCodes": [
+      "E_RESOURCE_ESCAPE",
+      "E_RESOURCE_ESCAPE",
       "E_RESOURCE_ESCAPE",
       "E_RESOURCE_ESCAPE",
       "E_RESOURCE_ESCAPE",
@@ -769,6 +772,11 @@
   },
   {
     "file": "127-valid-map-bytes-keys.hob",
+    "status": "active",
+    "expectedCodes": []
+  },
+  {
+    "file": "128-valid-map-newtype-keys.hob",
     "status": "active",
     "expectedCodes": []
   }
