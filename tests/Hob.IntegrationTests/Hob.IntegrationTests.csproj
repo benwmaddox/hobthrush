@@ -7,6 +7,6 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Hob/Hob.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Hob/Hob.csproj" ReferenceOutputAssembly="false" AdditionalProperties="HobIntegrationTestBuild=true" />
   </ItemGroup>
 </Project>

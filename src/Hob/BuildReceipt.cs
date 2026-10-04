@@ -64,9 +64,7 @@ internal static class BuildReceipt
         var adapterProvenance = snapshot?.ManagedAdapters ??
             AuditReport.CanonicalizeManagedAdapters(managedAdapters ?? []);
         var foreignDependencies = snapshot?.ForeignDependencies ??
-            (AuditReport.RequiresSqliteDependency(null, program)
-                ? new[] { new AuditForeignDependency("Microsoft.Data.Sqlite", "10.0.12", "nuget", "generated_build") }
-                : []);
+            AuditReport.SqliteForeignDependencies(null, program);
         var assembly = typeof(CheckedProgram).Assembly;
         var compilerPath = assembly.Location;
         if (string.IsNullOrEmpty(compilerPath) || !File.Exists(compilerPath))

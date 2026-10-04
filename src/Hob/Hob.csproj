@@ -8,4 +8,9 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(HobIntegrationTestBuild)' == 'true'">
+    <DefineConstants>$(DefineConstants);HOB_INTEGRATION_TEST_BUILD</DefineConstants>
+    <OutputPath>bin/IntegrationTest/$(Configuration)/</OutputPath>
+    <IntermediateOutputPath>obj/IntegrationTest/$(Configuration)/</IntermediateOutputPath>
+  </PropertyGroup>
 </Project>

@@ -1,0 +1,16 @@
+module app::main;
+
+pub struct Parameters {
+    id: i32
+}
+
+pub struct Row {
+    id: i32
+}
+
+pub async fn read(id: i32, db: DbRead) -> Result<Option<self::app::main::Row>, DbError> effects {db.read} {
+    let loaded: Result<Option<self::app::main::Row>, DbError> = await db.query_one_async("SELECT id FROM items WHERE id = $id", self::app::main::Parameters {
+        id: id
+    });
+    return loaded;
+}

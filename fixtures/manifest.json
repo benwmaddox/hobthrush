@@ -779,5 +779,10 @@
     "file": "128-valid-map-newtype-keys.hob",
     "status": "active",
     "expectedCodes": []
+  },
+  {
+    "file": "129-valid-async-sqlite-query-one.hob",
+    "status": "active",
+    "expectedCodes": []
   }
 ]

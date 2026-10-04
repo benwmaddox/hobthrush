@@ -1,58 +1,100 @@
 module app::main;
 
-struct Profile { city: Text }
-struct GreetingRequest { name: Text, profile: self::app::main::Profile }
-struct Greeting { message: Text, profile: self::app::main::Profile }
-struct GreetingRow { id: i32, name: Text, city: Text }
-struct GreetingLookupParameters { id: i32 }
-struct GreetingWriteParameters { id: i32, name: Text, city: Text }
-struct NoteWriteRequest { content: Text }
+struct Profile {
+    city: Text
+}
 
-union HomeReply { Page(Html) }
-union LookupReply { Found(self::app::main::Greeting), Missing, StorageFailure(Text) }
-union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text) }
-union HealthReply { Healthy }
-union FaultReply { Completed }
-union ResetReply { Reset }
-union NoteWriteReply { Saved, Failed(Text) }
+struct GreetingRequest {
+    name: Text,
+    profile: self::app::main::Profile
+}
 
-fn load_greeting(id: i32, db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects { db.read } {
-    let result: Result<Option<self::app::main::GreetingRow>, DbError> = db.query_one(
-        "SELECT id, name, city FROM greeting WHERE id = $id",
-        self::app::main::GreetingLookupParameters { id: id }
-    );
+struct Greeting {
+    message: Text,
+    profile: self::app::main::Profile
+}
+
+struct GreetingRow {
+    id: i32,
+    name: Text,
+    city: Text
+}
+
+struct GreetingLookupParameters {
+    id: i32
+}
+
+struct GreetingWriteParameters {
+    id: i32,
+    name: Text,
+    city: Text
+}
+
+struct NoteWriteRequest {
+    content: Text
+}
+
+union HomeReply {
+    Page(Html)
+}
+
+union LookupReply {
+    Found(self::app::main::Greeting),
+    Missing,
+    StorageFailure(Text)
+}
+
+union CreateReply {
+    Created(self::app::main::Greeting),
+    Invalid(Text),
+    StorageFailure(Text)
+}
+
+union HealthReply {
+    Healthy
+}
+
+union FaultReply {
+    Completed
+}
+
+union ResetReply {
+    Reset
+}
+
+union NoteWriteReply {
+    Saved,
+    Failed(Text)
+}
+
+async fn load_greeting(id: i32, db: DbRead) -> Result<Option<self::app::main::GreetingRow>, DbError> effects {db.read} {
+    let result: Result<Option<self::app::main::GreetingRow>, DbError> = await db.query_one_async("SELECT id, name, city FROM greeting WHERE id = $id", self::app::main::GreetingLookupParameters {
+        id: id
+    });
     return result;
 }
 
-fn home(db: DbRead) -> self::app::main::HomeReply effects { db.read } {
-    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(1, db);
+async fn home(db: DbRead) -> self::app::main::HomeReply effects {db.read} {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = await self::app::main::load_greeting(1, db);
     let content: Html = match loaded {
         Ok(value) => match value {
-            Some(row) => html.concat(
-                html.heading("A safe web page backed by SQLite"),
-                html.paragraph(row.name)
-            ),
-            None => html.concat(
-                html.heading("A safe web page backed by SQLite"),
-                html.paragraph("No greeting has been saved yet.")
-            )
+            Some(row) => html.concat(html.heading("A safe web page backed by SQLite"), html.paragraph(row.name)),
+            None => html.concat(html.heading("A safe web page backed by SQLite"), html.paragraph("No greeting has been saved yet."))
         },
-        Err(error) => html.concat(
-            html.heading("A safe web page backed by SQLite"),
-            html.paragraph("The greeting is temporarily unavailable.")
-        )
+        Err(error) => html.concat(html.heading("A safe web page backed by SQLite"), html.paragraph("The greeting is temporarily unavailable."))
     };
     let page: Html = html.document("SQLite web example", content);
     return self::app::main::HomeReply.Page(page);
 }
 
-fn lookup(db: DbRead) -> self::app::main::LookupReply effects { db.read } {
-    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(1, db);
+async fn lookup(db: DbRead) -> self::app::main::LookupReply effects {db.read} {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = await self::app::main::load_greeting(1, db);
     return match loaded {
         Ok(value) => match value {
             Some(row) => self::app::main::LookupReply.Found(self::app::main::Greeting {
-                message: row.name,
-                profile: self::app::main::Profile { city: row.city }
+                message: row.name, profile: self::app::main::Profile {
+                    city: row.city
+                }
             }),
             None => self::app::main::LookupReply.Missing
         },
@@ -71,16 +113,17 @@ fn filter_greeting(row_name: Text, row_city: Text, expected_name: Text, expected
     if row_name == expected_name {
         if row_city == city_to_match {
             return Some(self::app::main::Greeting {
-                message: row_name,
-                profile: self::app::main::Profile { city: row_city }
+                message: row_name, profile: self::app::main::Profile {
+                    city: row_city
+                }
             });
         }
     }
     return None;
 }
 
-fn lookup_by_id(id: i32, name: Text, city: Option<Text>, db: DbRead) -> self::app::main::LookupReply effects { db.read } {
-    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = self::app::main::load_greeting(id, db);
+async fn lookup_by_id(id: i32, name: Text, city: Option<Text>, db: DbRead) -> self::app::main::LookupReply effects {db.read} {
+    let loaded: Result<Option<self::app::main::GreetingRow>, DbError> = await self::app::main::load_greeting(id, db);
     return match loaded {
         Ok(value) => match value {
             Some(row) => match self::app::main::filter_greeting(row.name, row.city, name, city) {
@@ -96,34 +139,31 @@ fn lookup_by_id(id: i32, name: Text, city: Option<Text>, db: DbRead) -> self::ap
     };
 }
 
-fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects { db.write } {
+fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects {db.write} {
     let normalized: Text = match validation::text::validation::normalize(request.name) {
         validation::text::validation::Validation.Valid(value) => value.value,
         validation::text::validation::Validation.Invalid(error) => match error {
             validation::text::validation::NormalizeError.Empty => "",
-            validation::text::validation::NormalizeError.TooLong(max) =>
-                "name exceeds the configured maximum"
+            validation::text::validation::NormalizeError.TooLong(max) => "name exceeds the configured maximum"
         }
     };
     if normalized.length == 0 {
         return self::app::main::CreateReply.Invalid("name must contain non-whitespace text");
     }
-
     let city: Text = request.profile.city.trim();
     if city.length == 0 {
         return self::app::main::CreateReply.Invalid("city must contain non-whitespace text");
     }
-
-    with db.begin() as tx {
-        let written: Result<i32, DbError> = tx.execute(
-            "INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city",
-            self::app::main::GreetingWriteParameters { id: 1, name: normalized, city: city }
-        );
+    with db.begin()as tx {
+        let written: Result<i32, DbError> = tx.execute("INSERT INTO greeting (id, name, city) VALUES ($id, $name, $city) ON CONFLICT(id) DO UPDATE SET name = excluded.name, city = excluded.city", self::app::main::GreetingWriteParameters {
+            id: 1, name: normalized, city: city
+        });
         return match written {
             Ok(count) => match tx.commit() {
                 Ok(committed) => self::app::main::CreateReply.Created(self::app::main::Greeting {
-                    message: normalized,
-                    profile: self::app::main::Profile { city: city }
+                    message: normalized, profile: self::app::main::Profile {
+                        city: city
+                    }
                 }),
                 Err(error) => match error {
                     DbError.Statement => self::app::main::CreateReply.StorageFailure("database statement failed"),
@@ -151,7 +191,7 @@ fn reset() -> self::app::main::ResetReply effects {} {
     return self::app::main::ResetReply.Reset;
 }
 
-async fn save_note(request: self::app::main::NoteWriteRequest, writer: FsWrite) -> self::app::main::NoteWriteReply effects { fs.write } {
+async fn save_note(request: self::app::main::NoteWriteRequest, writer: FsWrite) -> self::app::main::NoteWriteReply effects {fs.write} {
     return match await writer.write_text_async("data/async-note.txt", request.content) {
         Ok(written) => self::app::main::NoteWriteReply.Saved,
         Err(error) => self::app::main::NoteWriteReply.Failed("Could not save the note")

@@ -2089,6 +2089,13 @@ internal static class Driver
 
         var executable = isWebPackage || entry is not null || entryCommand is not null;
         var usesDatabaseAdapter = package?.WebDatabaseOptions is not null || UsesDatabaseAdapter(program);
+        var usesAsyncSqliteQuery = CheckedReportFacts.UsesAsyncSqliteQueryOne(program);
+#if HOB_INTEGRATION_TEST_BUILD
+        var sqliteAsyncTestHooks = usesAsyncSqliteQuery &&
+            Environment.GetEnvironmentVariable("HOB_SQLITE_ASYNC_TEST_HOOKS") == "true";
+#else
+        const bool sqliteAsyncTestHooks = false;
+#endif
         var assemblyName = package?.Manifest.Name ?? "Generated";
         var generatedDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -2119,6 +2126,7 @@ internal static class Driver
                     assemblyName,
                     webPackage: isWebPackage,
                     sqlitePackage: usesDatabaseAdapter,
+                    sqliteRawPackage: usesAsyncSqliteQuery,
                     managedAdapters: adapterReferences));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),
@@ -2128,7 +2136,8 @@ internal static class Driver
                     package?.WebDatabaseOptions,
                     package?.Manifest.HttpOrigin,
                     processRunnerOptions,
-                    package?.Manifest.WebRequestOptions));
+                    package?.Manifest.WebRequestOptions,
+                    sqliteAsyncTestHooks: sqliteAsyncTestHooks));
         }
         catch (ManagedAdapterPreparationException error)
         {
@@ -2820,6 +2829,7 @@ internal static class Driver
         string assemblyName = "Generated",
         bool webPackage = false,
         bool sqlitePackage = false,
+        bool sqliteRawPackage = false,
         IReadOnlyList<ManagedAdapterProjectReference>? managedAdapters = null)
     {
         var outputType = executable ? "Exe" : "Library";
@@ -2841,6 +2851,7 @@ internal static class Driver
             (sqlitePackage
                 ? "  <ItemGroup>\n" +
                   "    <PackageReference Include=\"Microsoft.Data.Sqlite\" Version=\"10.0.12\" />\n" +
+                  (sqliteRawPackage ? "    <PackageReference Include=\"SQLitePCLRaw.core\" Version=\"2.1.12\" />\n" : string.Empty) +
                   "  </ItemGroup>\n"
                 : string.Empty) +
             ManagedAdapterReferencesContents(managedAdapters) +

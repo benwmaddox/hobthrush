@@ -604,7 +604,7 @@ internal sealed record TypedResultPropagateExpr(
     TypedExpr Operand,
     Token At) : TypedExpr(OkType, At);
 
-internal enum CheckedDatabaseOperationKind { QueryOne, Execute, TransactionExecute }
+internal enum CheckedDatabaseOperationKind { QueryOne, QueryOneAsync, Execute, TransactionExecute }
 internal sealed record CheckedDatabaseOperation(
     CheckedDatabaseOperationKind Kind,
     string Effect,
@@ -1068,6 +1068,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         foreach (var function in _functions)
             CheckFunctionBody(function);
 
+        ValidateAsyncDatabaseReadsOutsideTransactions();
         ValidateTraitConstraintRecursion();
 
         ValidateResourceListInvariant();
@@ -4120,6 +4121,56 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
     }
 
+    private void RecordFunctionCall(FunctionSymbol target, Token at)
+    {
+        if (_currentFunction is null)
+            return;
+
+        var call = new FunctionCallSite(target, at);
+        _currentFunction.Calls.Add(call);
+        if (_activeTransactionLocals.Count != 0)
+            _currentFunction.TransactionCalls.Add(call);
+    }
+
+    private void ValidateAsyncDatabaseReadsOutsideTransactions()
+    {
+        var canReachAsyncDatabaseRead = new HashSet<int>(_functions
+            .Where(function => function.DirectEffects.Any(effect => effect.IntrinsicName == "DbRead.query_one_async"))
+            .Select(function => function.Id));
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var function in _functions)
+            {
+                if (canReachAsyncDatabaseRead.Contains(function.Id) ||
+                    !function.Calls.Any(call => canReachAsyncDatabaseRead.Contains(call.Target.Id)))
+                    continue;
+                canReachAsyncDatabaseRead.Add(function.Id);
+                changed = true;
+            }
+        }
+
+        foreach (var function in _functions)
+        {
+            var reportedLocations = new HashSet<(string File, int Line, int Column)>();
+            foreach (var call in function.TransactionCalls
+                         .OrderBy(call => call.At.File, StringComparer.Ordinal)
+                         .ThenBy(call => call.At.Line)
+                         .ThenBy(call => call.At.Column))
+            {
+                if (!canReachAsyncDatabaseRead.Contains(call.Target.Id) ||
+                    !reportedLocations.Add((call.At.File, call.At.Line, call.At.Column)))
+                    continue;
+
+                Add(
+                    "E_DB_ASYNC_IN_TRANSACTION",
+                    $"Call to '{FormatFunctionName(call.Target)}' may reach 'DbRead.query_one_async' while a lexical database transaction is active",
+                    call.At);
+            }
+        }
+    }
+
     private void InferEffectsAndValidateBounds()
     {
         var inferred = _functions.ToDictionary(
@@ -4254,7 +4305,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             BinaryExpr binary => CheckBinary(binary, locals, depth + 1),
             CallExpr call => CheckCall(call, expected, locals, depth + 1, isAwaitOperand),
             MemberCallExpr call => CheckMemberCall(call, expected, locals, depth + 1, isAwaitOperand),
-            AwaitExpr awaited => CheckAwait(awaited, locals, depth + 1),
+            AwaitExpr awaited => CheckAwait(awaited, expected, locals, depth + 1),
             ResultPropagateExpr propagated => CheckResultPropagate(propagated, locals, depth + 1),
             StructConstructExpr structure => CheckStructConstruction(structure, locals, depth + 1),
             UnionConstructExpr union => CheckUnionConstruction(union, locals, depth + 1),
@@ -4388,6 +4439,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
 
     private TypedExpr CheckAwait(
         AwaitExpr expression,
+        HobType? expected,
         Dictionary<string, LocalSymbol> locals,
         int depth)
     {
@@ -4401,10 +4453,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             Add("E_AWAIT_CONTEXT", "The 'await' expression is only valid inside an async function", expression.At);
 
         var diagnosticsBeforeOperand = diagnostics.Count;
-        var value = CheckExpr(expression.Value, null, locals, depth, isAwaitOperand: true);
+        var value = CheckExpr(expression.Value, expected, locals, depth, isAwaitOperand: true);
         if (value is TypedCallExpr { IsAsync: true } or
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.FsWriteTextAsync or
-                BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync })
+                BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } or
+            TypedDatabaseCallExpr { Operation.Kind: CheckedDatabaseOperationKind.QueryOneAsync })
             return new TypedAwaitExpr(value.Type, value, expression.At);
 
         if (value.Type.IsError)
@@ -4915,7 +4968,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             var impl = _traitImpls[concrete.ImplId];
             var bindingId = impl.BindingFunctionIds[method.Id];
-            _currentFunction.Calls.Add(new FunctionCallSite(_functions[bindingId], at));
+            RecordFunctionCall(_functions[bindingId], at);
         }
         return typed;
     }
@@ -5673,7 +5726,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 typeArguments.All(typeArgument => !ContainsError(typeArgument) && !ContainsInvalidMapKey(typeArgument)) &&
                 arguments.All(argument => !ContainsError(argument.Type) && !ContainsInvalidMapKey(argument.Type));
             if (hasCorrectArity && signatureTypesValid && mapKeysValid && diagnostics.Count == diagnosticsBeforeArguments)
-                _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
+                RecordFunctionCall(function, expression.At);
 
             var returnType = instantiatedReturnType;
             if (!mapKeysValid ||
@@ -5822,7 +5875,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             IsResourceContainerValid(instantiatedReturnType) &&
             arguments.All(argument => IsResourceContainerValid(argument.Type));
         if (hasCorrectValueArity && signatureTypesValid && argumentsValid && boundsValid && resourceTypesValid)
-            _currentFunction?.Calls.Add(new FunctionCallSite(function, expression.At));
+            RecordFunctionCall(function, expression.At);
 
         var returnType = hasCorrectValueArity && signatureTypesValid && argumentsValid && boundsValid && resourceTypesValid
             ? instantiatedReturnType
@@ -6153,7 +6206,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 foreach (var argument in expression.Arguments)
                     _ = CheckExpr(argument, null, locals, depth);
-                var requiredType = expression.Member == "query_one" ? "DbRead" : "DbWrite";
+                var requiredType = expression.Member is "query_one" or "query_one_async" ? "DbRead" : "DbWrite";
                 Add("E_CAPABILITY_MISSING", $"Intrinsic 'db.{expression.Member}' requires a local or parameter of type '{requiredType}'", expression.At);
                 return new TypedErrorExpr(expression.At);
             }
@@ -6518,10 +6571,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 expression.At);
         }
 
-        if ((receiver.Type.IsDbRead && expression.Member == "query_one") ||
+        if ((receiver.Type.IsDbRead && (expression.Member is "query_one" or "query_one_async")) ||
             (receiver.Type.IsDbWrite && expression.Member == "execute"))
         {
-            return CheckDatabaseCall(expression, expected, locals, depth, receiver);
+            return CheckDatabaseCall(
+                expression,
+                expected,
+                locals,
+                depth,
+                receiver,
+                isAwaitOperand: isAwaitOperand,
+                asynchronousQuery: expression.Member == "query_one_async");
         }
 
         if (IsDatabaseMember(expression.Member))
@@ -6531,7 +6591,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             var capabilityTargetDescription = expression.Target is NameExpr localName && locals.ContainsKey(localName.Name)
                 ? $"Local '{localName.Name}' of type '{receiver.Type.DisplayName}'"
                 : $"Value of type '{receiver.Type.DisplayName}'";
-            var requiredType = expression.Member == "query_one" ? "DbRead" : "DbWrite";
+            var requiredType = expression.Member is "query_one" or "query_one_async" ? "DbRead" : "DbWrite";
             Add("E_CAPABILITY_MISSING", $"{capabilityTargetDescription} cannot provide database capability member '{expression.Member}' (requires '{requiredType}')", expression.MemberAt);
             return new TypedErrorExpr(expression.At);
         }
@@ -6889,12 +6949,23 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth,
         TypedExpr receiver,
-        bool transactionExecute = false)
+        bool transactionExecute = false,
+        bool isAwaitOperand = false,
+        bool asynchronousQuery = false)
     {
         var diagnosticsBeforeCall = diagnostics.Count;
-        var queryOne = expression.Member == "query_one";
-        var operationName = queryOne ? "DbRead.query_one" : transactionExecute ? "Transaction.execute" : "DbWrite.execute";
+        var queryOne = expression.Member is "query_one" or "query_one_async";
+        var operationName = asynchronousQuery
+            ? "DbRead.query_one_async"
+            : queryOne ? "DbRead.query_one" : transactionExecute ? "Transaction.execute" : "DbWrite.execute";
         var effect = queryOne ? "db.read" : "db.write";
+        if (asynchronousQuery && !isAwaitOperand)
+            Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'DbRead.query_one_async' must be called with 'await'", expression.At);
+        if (asynchronousQuery && _activeTransactionLocals.Count != 0)
+            Add(
+                "E_DB_ASYNC_IN_TRANSACTION",
+                "DbRead.query_one_async cannot run inside a lexical database transaction scope",
+                expression.At);
         var hasCorrectArity = expression.Arguments.Count == 2;
         if (!hasCorrectArity)
             Add("E_TYPE_MISMATCH", $"Intrinsic '{operationName}' expects 2 arguments, got {expression.Arguments.Count}", expression.MemberAt);
@@ -6922,7 +6993,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 Add(
                     "E_DB_READ_STATEMENT",
-                    "DbRead.query_one requires a single SELECT statement beginning with a standalone SELECT token and containing no semicolon",
+                    $"{operationName} requires a single SELECT statement beginning with a standalone SELECT token and containing no semicolon",
                     expression.Arguments[0].At);
             }
 
@@ -6959,7 +7030,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             {
                 Add(
                     "E_DB_RESULT_TYPE",
-                    "DbRead.query_one requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
+                    $"{operationName} requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
                     expression.At);
             }
             else if (!expected.IsError)
@@ -6976,7 +7047,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 {
                     Add(
                         "E_DB_RESULT_TYPE",
-                        "DbRead.query_one requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
+                        $"{operationName} requires an expected type of Result<Option<fully-qualified RowStruct>, DbError>",
                         expression.At);
                 }
             }
@@ -6989,14 +7060,16 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         if (hasCorrectArity && hasLiteralSql && parameterStruct is not null &&
-            validExpectedResult && diagnostics.Count == diagnosticsBeforeCall)
+            validExpectedResult && (!asynchronousQuery || isAwaitOperand) && diagnostics.Count == diagnosticsBeforeCall)
         {
             _currentFunction?.DirectEffects.Add(new DirectEffectCall(effect, operationName, expression.MemberAt));
         }
 
         var operation = new CheckedDatabaseOperation(
             queryOne
-                ? CheckedDatabaseOperationKind.QueryOne
+                ? asynchronousQuery
+                    ? CheckedDatabaseOperationKind.QueryOneAsync
+                    : CheckedDatabaseOperationKind.QueryOne
                 : transactionExecute
                     ? CheckedDatabaseOperationKind.TransactionExecute
                     : CheckedDatabaseOperationKind.Execute,
@@ -7060,7 +7133,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         type.Kind == HobTypeKind.Option &&
         (type.Arguments[0].IsI32 || type.Arguments[0].IsBool || type.Arguments[0].IsText);
 
-    private static bool IsDatabaseMember(string member) => member is "query_one" or "execute";
+    private static bool IsDatabaseMember(string member) => member is "query_one" or "query_one_async" or "execute";
 
     private static bool IsSingleSqliteReadSelect(string sql)
     {
@@ -8173,6 +8246,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         public IReadOnlyList<string> DeclaredEffects { get; set; } = [];
         public CheckedManagedAdapterBinding? AdapterBinding { get; set; }
         public List<FunctionCallSite> Calls { get; } = [];
+        public List<FunctionCallSite> TransactionCalls { get; } = [];
         public List<DirectEffectCall> DirectEffects { get; } = [];
         public CheckedFunction? CheckedFunction { get; set; }
     }
