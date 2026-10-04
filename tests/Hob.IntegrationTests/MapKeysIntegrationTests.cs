@@ -32,6 +32,97 @@ internal static partial class IntegrationTests
             await ExecuteNativeAsync(executablePath, TimeSpan.FromSeconds(30)));
     }
 
+    private static async Task TestBytesMapKeys(Harness harness)
+    {
+        var fixturePath = Path.Combine(harness.RepositoryRoot, "fixtures", "127-valid-map-bytes-keys.hob");
+        var source = await File.ReadAllTextAsync(fixturePath);
+        var managed = await harness.InvokeAsync("bytes-map-keys-managed", "run", source);
+        AssertRunOutput("1000" + Environment.NewLine, managed);
+
+        var dependencyRoot = await harness.WritePackageGraphAsync(
+            "bytes-map-keys-generic-dependency",
+            new Dictionary<string, PackageFixture>(StringComparer.Ordinal)
+            {
+                ["root"] = new PackageFixture(
+                    CliPackageManifest() + "\n[dependencies]\ncore = \"../core\"\n",
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/app/main.hob"] = """
+                            module app::main;
+                            pub fn main() -> i32 effects {} {
+                                let empty: Map<Bytes, Text> = Map.empty();
+                                let key: Bytes = match Bytes.empty().append(255) {
+                                    Ok(value) => value,
+                                    Err(error) => Bytes.empty(),
+                                };
+                                let values: Map<Bytes, Text> = core::bytes::insert::<Text>(empty, key, "imported");
+                                return values.length + match values.get(key) {
+                                    Some(value) => value.length,
+                                    None => -1,
+                                };
+                            }
+                            """
+                    }),
+                ["core"] = new PackageFixture(
+                    LibraryPackageManifest("bytes-map-keys-core"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["src/bytes.hob"] = """
+                            module bytes;
+                            pub fn insert<V>(values: Map<Bytes, V>, key: Bytes, value: V) -> Map<Bytes, V> effects {} {
+                                return values.set(key, value);
+                            }
+                            """
+                    })
+            });
+        AssertLockCommandSucceeded(await harness.InvokePackageDirectoryAsync(
+            "bytes-map-keys-generic-dependency-lock", dependencyRoot, "lock"));
+        AssertRunOutput("9" + Environment.NewLine,
+            await harness.InvokePackageDirectoryAsync("bytes-map-keys-generic-dependency-managed", dependencyRoot, "run"));
+
+        const string resourceValueSource = """
+            module harness::bytes_map_resource_value;
+            fn invalid(values: Map<Bytes, FsRead>) -> i32 effects {} { return values.length; }
+            pub fn main() -> i32 effects {} { return 0; }
+            """;
+        var resourceValueCheck = await harness.InvokeAsync(
+            "bytes-map-resource-value-check", "check", resourceValueSource, "--json");
+        AssertEqual(1, resourceValueCheck.ExitCode, Describe(resourceValueCheck));
+        var resourceValueDiagnostics = ParseDiagnosticSnapshots(resourceValueCheck.StandardOutput);
+        AssertTrue(resourceValueDiagnostics.Any(diagnostic => diagnostic.Code == "E_RESOURCE_ESCAPE"),
+            "A supported Bytes key must not make a Map containing an FsRead value valid.");
+        AssertTrue(resourceValueDiagnostics.All(diagnostic => diagnostic.Code != "E_TYPE_MISMATCH"),
+            "Map<Bytes, FsRead> should fail because the value stores a capability, not because Bytes is unsupported.");
+
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
+            (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+            throw new IntegrationTestSkippedException("Bytes Map-key NativeAOT coverage requires Windows x64 or Linux x64.");
+
+        const string executablePrefix = "Built native executable: ";
+        var aotBuild = await harness.InvokeWithTimeoutAsync(
+            "bytes-map-keys-aot", "build", source, AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, aotBuild.ExitCode, Describe(aotBuild));
+        AssertEqual(string.Empty, aotBuild.StandardError, Describe(aotBuild));
+        AssertTrue(aotBuild.StandardOutput.StartsWith(executablePrefix, StringComparison.Ordinal), Describe(aotBuild));
+        var executable = aotBuild.StandardOutput[executablePrefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(executable) && File.Exists(executable),
+            $"Expected a Bytes Map-key NativeAOT executable at {executable}.");
+        AssertRunOutput("1000" + Environment.NewLine,
+            await ExecuteNativeAsync(executable, TimeSpan.FromSeconds(30)));
+
+        var packageAot = await harness.InvokePackageDirectoryWithTimeoutAsync(
+            "bytes-map-keys-generic-dependency-aot", dependencyRoot, "build", AotPublishTimeout,
+            "--aot", "--rid", CurrentHostAotRid());
+        AssertEqual(0, packageAot.ExitCode, Describe(packageAot));
+        AssertTrue(packageAot.StandardOutput.StartsWith(executablePrefix, StringComparison.Ordinal), Describe(packageAot));
+        var packageExecutable = packageAot.StandardOutput[executablePrefix.Length..].TrimEnd('\r', '\n');
+        AssertTrue(Path.IsPathFullyQualified(packageExecutable) && File.Exists(packageExecutable),
+            $"Expected a Bytes Map-key dependency NativeAOT executable at {packageExecutable}.");
+        AssertRunOutput("9" + Environment.NewLine,
+            await ExecuteNativeAsync(packageExecutable, TimeSpan.FromSeconds(30)));
+    }
+
     private static async Task TestMapKeyReportsAsync(Harness harness)
     {
         const string reportSource = """
@@ -42,6 +133,10 @@ internal static partial class IntegrationTests
             }
 
             pub fn copy<T>(values: Map<i32, T>) -> Map<i32, T> effects {} {
+                return values;
+            }
+
+            pub fn bytes_copy<T>(values: Map<Bytes, T>) -> Map<Bytes, T> effects {} {
                 return values;
             }
 
@@ -98,6 +193,17 @@ internal static partial class IntegrationTests
             "The explicit generic Map helper should produce one direct call and no synthetic Map call facts.");
         AssertEqual("copy", apiCalls[0].GetProperty("name").GetString(),
             "The explicit generic Map helper should report its actual target function.");
+        var apiBytesCopy = apiFunctions.Single(function => function.GetProperty("id").GetString() == "self::app::main::bytes_copy");
+        AssertMapTypeShape(apiBytesCopy.GetProperty("parameters")[0].GetProperty("type"), "Bytes", value =>
+        {
+            AssertEqual("type_parameter", value.GetProperty("kind").GetString(),
+                "API Bytes Map values must retain generic value parameters.");
+            AssertEqual("T", value.GetProperty("name").GetString(),
+                "API Bytes Map value type parameter identity must remain stable.");
+        });
+        AssertMapTypeShape(apiBytesCopy.GetProperty("return_type"), "Bytes", value =>
+            AssertEqual("type_parameter", value.GetProperty("kind").GetString(),
+                "API Bytes Map returns must retain generic value parameters."));
 
         var auditRun = await harness.InvokeCompilerCommandAsync("audit", packageRoot, "--json");
         AssertEqual(0, auditRun.ExitCode, Describe(auditRun));
@@ -127,6 +233,16 @@ internal static partial class IntegrationTests
             "The audit should record the explicit generic Map helper as one real direct call.");
         AssertEqual("copy", auditCalls[0].GetProperty("name").GetString(),
             "The audit direct-call identity should identify the generic helper.");
+        var auditBytesCopy = audit.GetProperty("compiler").GetProperty("functions").EnumerateArray()
+            .Single(function => function.GetProperty("module").GetString() == "app::main"
+                && function.GetProperty("name").GetString() == "bytes_copy");
+        var auditBytesTypeParameters = auditBytesCopy.GetProperty("type_parameters").EnumerateArray().ToArray();
+        AssertEqual(1, auditBytesTypeParameters.Length,
+            "The audit should preserve the generic value parameter on an accepted Bytes-key Map function.");
+        AssertEqual("T", auditBytesTypeParameters[0].GetProperty("name").GetString(),
+            "The audit generic value parameter identity should remain stable.");
+        AssertEqual(0, auditBytesTypeParameters[0].GetProperty("ordinal").GetInt32(),
+            "The audit generic value parameter ordinal should remain stable.");
 
         await TestInvalidExplicitMapKeyVectorAsync(harness);
     }

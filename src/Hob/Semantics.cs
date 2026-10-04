@@ -123,6 +123,7 @@ internal sealed class HobType : IEquatable<HobType>
         HobTypeKind.I64 or
         HobTypeKind.U32 or
         HobTypeKind.U64 or
+        HobTypeKind.Bytes or
         HobTypeKind.Unit;
 
     public bool IsDbError => Kind == HobTypeKind.DbError;
@@ -3633,7 +3634,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         {
             Add(
                 "E_TYPE_MISMATCH",
-                $"Map keys must have type Text, bool, i32, i64, u32, u64, or Unit; found '{keyType.DisplayName}'",
+                $"Map keys must have type Text, bool, i32, i64, u32, u64, Bytes, or Unit; found '{keyType.DisplayName}'",
                 at);
             return false;
         }

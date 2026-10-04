@@ -5,7 +5,6 @@ pub union UnionKey { Value(i32), Empty }
 pub newtype NewtypeKey = i32;
 
 fn floating(values: Map<f64, Text>) -> i32 effects {} { return values.length; }
-fn bytes(values: Map<Bytes, Text>) -> i32 effects {} { return values.length; }
 fn structure(values: Map<self::fixture::invalid_map_key_types::StructKey, Text>) -> i32 effects {} { return values.length; }
 fn union(values: Map<self::fixture::invalid_map_key_types::UnionKey, Text>) -> i32 effects {} { return values.length; }
 fn newtype(values: Map<self::fixture::invalid_map_key_types::NewtypeKey, Text>) -> i32 effects {} { return values.length; }
