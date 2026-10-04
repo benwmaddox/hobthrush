@@ -34,7 +34,7 @@ internal static partial class IntegrationTests
             return 2;
         }
 
-        var compilerDll = Path.Combine(repositoryRoot, "src", "Hob", "bin", "Release", "net10.0", "hob.dll");
+        var compilerDll = Path.Combine(repositoryRoot, "src", "Hob", "bin", "IntegrationTest", "Release", "net10.0", "hob.dll");
         if (!File.Exists(compilerDll))
         {
             Console.Error.WriteLine($"Compiler build not found: {compilerDll}");
@@ -164,6 +164,7 @@ internal static partial class IntegrationTests
             ("configurable web request limits and request deadlines", TestConfigurableWebRequestLimits),
             ("SQLite transactions commit once and roll back on scope exit and early return", TestSqliteTransactions),
             ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
+            ("SQLite async query_one cancellation, row decoding, and transaction boundaries", TestSqliteAsyncQueryOne),
             ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
             ("SQLite library operations build without web database configuration", TestSqliteLibraryBuild),
             ("maintained scan CLI awaits FsRead and handles typed file and normalization results", TestScanCliExample),
@@ -184,7 +185,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(134, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(135, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -10382,7 +10383,7 @@ internal static partial class IntegrationTests
         AssertTrue(source.Contains("Validation.Valid", StringComparison.Ordinal)
             && source.Contains(".value", StringComparison.Ordinal),
             "The POST handler must match the generic validation union and explicitly project Normalized<Text>.value.");
-        AssertTrue(source.Contains("db.query_one", StringComparison.Ordinal)
+        AssertTrue(source.Contains("await db.query_one_async", StringComparison.Ordinal)
             && source.Contains("tx.execute", StringComparison.Ordinal)
             && source.Contains("DbError.Statement", StringComparison.Ordinal)
             && source.Contains("DbError.RowShape", StringComparison.Ordinal)
@@ -10515,7 +10516,7 @@ internal static partial class IntegrationTests
         var runtimeSource = (await File.ReadAllTextAsync(runtimeSourcePath))
             .Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
         const string createHandlerSignature =
-            "fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects { db.write } {";
+            "fn create(request: self::app::main::GreetingRequest, db: DbWrite) -> self::app::main::CreateReply effects {db.write} {";
         AssertTrue(runtimeSource.Contains(createHandlerSignature, StringComparison.Ordinal),
             "The copied web source must retain the expected create handler signature before N3 instrumentation.");
         var instrumentedSource = runtimeSource.Replace(createHandlerSignature,
@@ -10926,11 +10927,11 @@ internal static partial class IntegrationTests
             Path.Combine(unmappedGraphRoot, "text-validation"));
         var unmappedSource = source.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
         const string createReplyDeclaration =
-            "union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text) }";
+            "union CreateReply {\n    Created(self::app::main::Greeting),\n    Invalid(Text),\n    StorageFailure(Text)\n}";
         AssertTrue(unmappedSource.Contains(createReplyDeclaration, StringComparison.Ordinal),
             "The maintained web fixture must retain its expected CreateReply declaration.");
         unmappedSource = unmappedSource.Replace(createReplyDeclaration,
-            "union CreateReply { Created(self::app::main::Greeting), Invalid(Text), StorageFailure(Text), Unmapped }",
+            "union CreateReply {\n    Created(self::app::main::Greeting),\n    Invalid(Text),\n    StorageFailure(Text),\n    Unmapped\n}",
             StringComparison.Ordinal);
         const string createResponseMapping =
             "    response StorageFailure: 500 json Text;\n}\n\nroute POST \"/api/note\"";
@@ -13083,14 +13084,14 @@ internal static partial class IntegrationTests
             fixtureSources[$"src/module{fixtureIndex++:D3}.hob"] = await File.ReadAllTextAsync(fixturePath);
         }
 
-        AssertEqual(128, activeFixtureCount,
+        AssertEqual(129, activeFixtureCount,
             "The active formatter fixture corpus must stay aligned with the checked-in fixture manifest.");
         AssertEqual(11, syntaxDiagnosticFixtureCount,
             "Syntax-error fixture exclusions must stay aligned with the checked-in manifest.");
         AssertEqual(string.Join('\n', parserRejectedFixtureFiles.Order(StringComparer.Ordinal)),
             string.Join('\n', parserRejectedFixtureFilesSeen.Order(StringComparer.Ordinal)),
             "Only the four active fixtures rejected by Parser.Parse should be excluded from formatter coverage.");
-        AssertEqual(113, fixtureSources.Count,
+        AssertEqual(114, fixtureSources.Count,
             "Every other active fixture should be included, including semantic-error cases.");
         foreach (var fixtureFile in parserRejectedFixtureFiles)
         {
@@ -13364,7 +13365,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(128, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(129, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -13373,7 +13374,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.hob ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("128 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("129 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -13557,9 +13558,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b128\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b129\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 128 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 129 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)
@@ -13635,10 +13636,10 @@ internal static partial class IntegrationTests
 
         var compilerAssembly = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly =>
                 string.Equals(assembly.Location, Path.GetFullPath(Path.Combine(
-                    harness.RepositoryRoot, "src", "Hob", "bin", "Release", "net10.0", "hob.dll")),
+                    harness.RepositoryRoot, "src", "Hob", "bin", "IntegrationTest", "Release", "net10.0", "hob.dll")),
                     StringComparison.OrdinalIgnoreCase))
             ?? AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.GetFullPath(Path.Combine(
-                harness.RepositoryRoot, "src", "Hob", "bin", "Release", "net10.0", "hob.dll")));
+                harness.RepositoryRoot, "src", "Hob", "bin", "IntegrationTest", "Release", "net10.0", "hob.dll")));
         var compilerType = compilerAssembly.GetType("Compiler", throwOnError: true)!;
         var checkMethod = compilerType.GetMethod("Check", BindingFlags.Public | BindingFlags.Static)
             ?? throw new InvalidOperationException("Compiler.Check(string, string) was not found.");
@@ -14005,7 +14006,7 @@ internal static partial class IntegrationTests
         IReadOnlyList<(string Module, string Source)> sources)
     {
         var compilerPath = Path.GetFullPath(Path.Combine(
-            harness.RepositoryRoot, "src", "Hob", "bin", "Release", "net10.0", "hob.dll"));
+            harness.RepositoryRoot, "src", "Hob", "bin", "IntegrationTest", "Release", "net10.0", "hob.dll"));
         var assembly = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(candidate =>
                 string.Equals(candidate.Location, compilerPath, StringComparison.OrdinalIgnoreCase))
             ?? AssemblyLoadContext.Default.LoadFromAssemblyPath(compilerPath);

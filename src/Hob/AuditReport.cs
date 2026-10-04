@@ -70,6 +70,8 @@ internal static class AuditReport
     private const int SchemaVersion = 11;
     private const string SqlitePackageName = "Microsoft.Data.Sqlite";
     private const string SqlitePackageVersion = "10.0.12";
+    private const string SqliteRawPackageName = "SQLitePCLRaw.core";
+    private const string SqliteRawPackageVersion = "2.1.12";
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly byte[] ContentHashDomain = Encoding.UTF8.GetBytes("HOB-AUDIT-PACKAGE-CONTENT\0v1");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
@@ -93,12 +95,7 @@ internal static class AuditReport
         var grants = graph.Root.Package.Manifest.Capabilities
             .OrderBy(capability => capability, StringComparer.Ordinal)
             .ToArray();
-        var foreignDependencies = RequiresSqliteDependency(graph.Root.Package, program)
-            ? new[]
-            {
-                new AuditForeignDependency(SqlitePackageName, SqlitePackageVersion, "nuget", "generated_build")
-            }
-            : [];
+        var foreignDependencies = SqliteForeignDependencies(graph.Root.Package, program);
 
         var output = new
         {
@@ -199,18 +196,13 @@ internal static class AuditReport
                 assurance = claim.Assurance,
                 reachable_from = claim.ReachableFrom.Select(FunctionJson).ToArray()
             }).ToArray(),
-            foreign_dependencies = RequiresSqliteDependency(null, program)
-                ? new[]
-                {
-                    new
-                    {
-                        name = SqlitePackageName,
-                        version = SqlitePackageVersion,
-                        ecosystem = "nuget",
-                        reason = "generated_build"
-                    }
-                }
-                : [],
+            foreign_dependencies = SqliteForeignDependencies(null, program).Select(dependency => new
+            {
+                name = dependency.Name,
+                version = dependency.Version,
+                ecosystem = dependency.Ecosystem,
+                reason = dependency.Reason
+            }).ToArray(),
             managed_adapters = Array.Empty<object>()
         };
         return Serialize(output);
@@ -367,6 +359,22 @@ internal static class AuditReport
     public static bool RequiresSqliteDependency(LoadedPackage? package, CheckedProgram program) =>
         package?.WebDatabaseOptions is not null ||
         program.Functions.Any(function => function.InferredEffects.Any(effect => effect is "db.read" or "db.write"));
+
+    public static IReadOnlyList<AuditForeignDependency> SqliteForeignDependencies(
+        LoadedPackage? package,
+        CheckedProgram program)
+    {
+        if (!RequiresSqliteDependency(package, program))
+            return [];
+
+        var dependencies = new List<AuditForeignDependency>
+        {
+            new(SqlitePackageName, SqlitePackageVersion, "nuget", "generated_build")
+        };
+        if (CheckedReportFacts.UsesAsyncSqliteQueryOne(program))
+            dependencies.Add(new AuditForeignDependency(SqliteRawPackageName, SqliteRawPackageVersion, "nuget", "generated_build"));
+        return dependencies;
+    }
 
     private static IReadOnlyList<AuditPackageSnapshot> CreatePackageSnapshots(PackageDependencyGraph graph)
     {
