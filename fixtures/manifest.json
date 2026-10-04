@@ -731,7 +731,6 @@
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH",
-      "E_TYPE_MISMATCH",
       "E_TYPE_MISMATCH"
     ]
   },
@@ -767,5 +766,10 @@
     "expectedCodes": [
       "E_EFFECT_EXCEEDED"
     ]
+  },
+  {
+    "file": "127-valid-map-bytes-keys.hob",
+    "status": "active",
+    "expectedCodes": []
   }
 ]

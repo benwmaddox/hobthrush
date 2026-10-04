@@ -573,6 +573,17 @@ internal static class Emitter
             _source.AppendLine("        private static readonly Bytes EmptyValue = new(global::System.Collections.Immutable.ImmutableArray<byte>.Empty);");
             _source.AppendLine("        private readonly global::System.Collections.Immutable.ImmutableArray<byte> _octets;");
             _source.AppendLine("        private Bytes(global::System.Collections.Immutable.ImmutableArray<byte> octets) => _octets = octets;");
+            _source.AppendLine("        internal sealed class KeyComparer : global::System.Collections.Generic.IComparer<Bytes>");
+            _source.AppendLine("        {");
+            _source.AppendLine("            internal static KeyComparer Instance { get; } = new();");
+            _source.AppendLine("            public int Compare(Bytes? left, Bytes? right)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                if (global::System.Object.ReferenceEquals(left, right)) return 0;");
+            _source.AppendLine("                if (left is null) return -1;");
+            _source.AppendLine("                if (right is null) return 1;");
+            _source.AppendLine("                return left.CompareSequence(right);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
             _source.AppendLine("        internal static Bytes Empty() => EmptyValue;");
             _source.AppendLine("        internal static Result<Bytes, BytesError> Append(Bytes receiver, int octet)");
             _source.AppendLine("        {");
@@ -593,6 +604,16 @@ internal static class Emitter
             _source.AppendLine("            for (var index = 0; index < _octets.Length; index++)");
             _source.AppendLine("                if (_octets[index] != other._octets[index]) return false;");
             _source.AppendLine("            return true;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        internal int CompareSequence(Bytes other)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var sharedLength = global::System.Math.Min(_octets.Length, other._octets.Length);");
+            _source.AppendLine("            for (var index = 0; index < sharedLength; index++)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                var difference = _octets[index].CompareTo(other._octets[index]);");
+            _source.AppendLine("                if (difference != 0) return difference;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            return _octets.Length.CompareTo(other._octets.Length);");
             _source.AppendLine("        }");
             _source.AppendLine("    }");
             _source.AppendLine();
@@ -1630,9 +1651,12 @@ internal static class Emitter
             if (!HobType.IsSupportedMapKey(expression.Type.Arguments[0]))
                 throw new InvalidOperationException("Checked map key type is outside the supported concrete key domain");
             var empty = "global::System.Collections.Immutable.ImmutableSortedDictionary<" + keyType + ", " + valueType + ">.Empty";
-            return expression.Type.Arguments[0].IsText
-                ? empty + ".WithComparers(global::System.StringComparer.Ordinal)"
-                : empty;
+            var key = expression.Type.Arguments[0];
+            if (key.IsText)
+                return empty + ".WithComparers(global::System.StringComparer.Ordinal)";
+            if (key.IsBytes)
+                return empty + ".WithComparers(Bytes.KeyComparer.Instance)";
+            return empty;
         }
 
         private string EmitDatabaseCall(TypedDatabaseCallExpr call)

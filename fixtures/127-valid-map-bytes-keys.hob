@@ -1,0 +1,88 @@
+module fixture::map_bytes_keys;
+
+fn appendByte(value: Bytes, octet: i32) -> Bytes effects {} {
+    return match value.append(octet) {
+        Ok(next) => next,
+        Err(error) => Bytes.empty(),
+    };
+}
+
+fn byte(octet: i32) -> Bytes effects {} {
+    return self::fixture::map_bytes_keys::appendByte(Bytes.empty(), octet);
+}
+
+fn pair(first: i32, second: i32) -> Bytes effects {} {
+    let prefix: Bytes = self::fixture::map_bytes_keys::byte(first);
+    return self::fixture::map_bytes_keys::appendByte(prefix, second);
+}
+
+fn keyAt(keys: List<Bytes>, index: i32, expected: Bytes) -> bool effects {} {
+    return match keys.get(index) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn hasText(values: Map<Bytes, Text>, key: Bytes, expected: Text) -> bool effects {} {
+    return match values.get(key) {
+        Some(value) => value == expected,
+        None => false,
+    };
+}
+
+fn hasNoText(values: Map<Bytes, Text>, key: Bytes) -> bool effects {} {
+    return match values.get(key) {
+        Some(value) => false,
+        None => true,
+    };
+}
+
+fn store<T>(values: Map<Bytes, T>, key: Bytes, value: T) -> Map<Bytes, T> effects {} {
+    return values.set(key, value);
+}
+
+pub fn main() -> i32 effects {} {
+    let empty: Map<Bytes, Text> = Map.empty();
+    let map: Map<Bytes, Text> = empty
+        .set(self::fixture::map_bytes_keys::byte(255), "high")
+        .set(self::fixture::map_bytes_keys::byte(2), "two")
+        .set(self::fixture::map_bytes_keys::pair(1, 255), "one-high")
+        .set(self::fixture::map_bytes_keys::pair(1, 128), "one-128")
+        .set(self::fixture::map_bytes_keys::pair(1, 127), "one-127")
+        .set(self::fixture::map_bytes_keys::pair(1, 0), "one-zero")
+        .set(self::fixture::map_bytes_keys::byte(1), "one")
+        .set(Bytes.empty(), "empty");
+    let keys: List<Bytes> = map.keys();
+    if map.length != 8 { return 1; }
+    if keys.length != 8 { return 2; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 0, Bytes.empty()) == false { return 3; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 1, self::fixture::map_bytes_keys::byte(1)) == false { return 4; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 2, self::fixture::map_bytes_keys::pair(1, 0)) == false { return 5; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 3, self::fixture::map_bytes_keys::pair(1, 127)) == false { return 6; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 4, self::fixture::map_bytes_keys::pair(1, 128)) == false { return 7; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 5, self::fixture::map_bytes_keys::pair(1, 255)) == false { return 8; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 6, self::fixture::map_bytes_keys::byte(2)) == false { return 9; }
+    if self::fixture::map_bytes_keys::keyAt(keys, 7, self::fixture::map_bytes_keys::byte(255)) == false { return 10; }
+
+    let same: Map<Bytes, Text> = empty
+        .set(Bytes.empty(), "empty")
+        .set(self::fixture::map_bytes_keys::byte(1), "one")
+        .set(self::fixture::map_bytes_keys::pair(1, 0), "one-zero")
+        .set(self::fixture::map_bytes_keys::pair(1, 127), "one-127")
+        .set(self::fixture::map_bytes_keys::pair(1, 128), "one-128")
+        .set(self::fixture::map_bytes_keys::pair(1, 255), "one-high")
+        .set(self::fixture::map_bytes_keys::byte(2), "two")
+        .set(self::fixture::map_bytes_keys::byte(255), "high");
+    if map != same { return 11; }
+
+    let replaced: Map<Bytes, Text> = map.set(self::fixture::map_bytes_keys::byte(1), "updated");
+    if replaced.length != 8 { return 12; }
+    if self::fixture::map_bytes_keys::hasText(map, self::fixture::map_bytes_keys::byte(1), "one") == false { return 13; }
+    if self::fixture::map_bytes_keys::hasText(replaced, self::fixture::map_bytes_keys::byte(1), "updated") == false { return 14; }
+    if self::fixture::map_bytes_keys::hasNoText(map, self::fixture::map_bytes_keys::byte(3)) == false { return 15; }
+
+    let generic: Map<Bytes, Text> = self::fixture::map_bytes_keys::store::<Text>(empty, self::fixture::map_bytes_keys::pair(8, 255), "generic");
+    if generic.length != 1 { return 16; }
+    if self::fixture::map_bytes_keys::hasText(generic, self::fixture::map_bytes_keys::pair(8, 255), "generic") == false { return 17; }
+    return 1000;
+}
