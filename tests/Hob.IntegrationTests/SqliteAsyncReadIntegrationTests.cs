@@ -141,8 +141,7 @@ internal static partial class IntegrationTests
                 var registrationRequest = client.GetAsync("/probe/register-cancel", HttpCompletionOption.ResponseHeadersRead,
                     registrationCancellation.Token);
                 var registeredMarker = Path.Combine(testDirectory, "registered.entered");
-                await WaitForFileAsync(registeredMarker, TimeSpan.FromSeconds(10));
-                var registrationOperationId = await File.ReadAllTextAsync(registeredMarker);
+                var registrationOperationId = await WaitForNonEmptyFileContentAsync(registeredMarker, TimeSpan.FromSeconds(10));
                 registrationCancellation.Cancel();
                 await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "interrupt", registrationOperationId),
                     TimeSpan.FromSeconds(10));
@@ -152,7 +151,7 @@ internal static partial class IntegrationTests
                 await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "connection-closing", registrationOperationId),
                     TimeSpan.FromSeconds(10));
 
-                var registrationEvents = await File.ReadAllLinesAsync(Path.Combine(testDirectory, "events.log"));
+                var registrationEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(testDirectory, "events.log"));
                 AssertTrue(!registrationEvents.Select(line => line.Split('\t'))
                         .Any(parts => parts.Length == 4 && parts[1] == "sql-active" && parts[2] == registrationOperationId),
                     "A cancellation observed after callback registration must not execute guest SQL.");
@@ -177,13 +176,13 @@ internal static partial class IntegrationTests
                 .ToArray();
             foreach (var id in heldIds)
             {
-                await WaitForFileAsync(SqliteAsyncMarker(testDirectory, "sql-active", id), TimeSpan.FromSeconds(10));
-                var operationId = await File.ReadAllTextAsync(SqliteAsyncMarker(testDirectory, "sql-active", id));
+                var operationId = await WaitForNonEmptyFileContentAsync(
+                    SqliteAsyncMarker(testDirectory, "sql-active", id), TimeSpan.FromSeconds(10));
                 await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "pause-entered", operationId),
                     TimeSpan.FromSeconds(10));
             }
 
-            var activeEvents = await File.ReadAllLinesAsync(Path.Combine(testDirectory, "events.log"));
+            var activeEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(testDirectory, "events.log"));
             var activeOperationId = activeEvents.Select(line => line.Split('\t'))
                 .Single(parts => parts.Length == 4 && parts[1] == "sql-active" && parts[3] == "hold-a")[2];
             AssertEqual(4, activeEvents
@@ -193,10 +192,7 @@ internal static partial class IntegrationTests
             using var queuedCancellation = new CancellationTokenSource();
             var queuedRequest = client.GetAsync("/probe/queued-fifth", HttpCompletionOption.ResponseHeadersRead, queuedCancellation.Token);
             var queuedMarker = Path.Combine(testDirectory, "queued.entered");
-            await WaitForFileAsync(queuedMarker, TimeSpan.FromSeconds(10));
-            var queuedOperationId = (await File.ReadAllLinesAsync(Path.Combine(testDirectory, "events.log")))
-                .Select(line => line.Split('\t'))
-                .Single(parts => parts.Length == 4 && parts[1] == "queued")[2];
+            var queuedOperationId = await WaitForNonEmptyFileContentAsync(queuedMarker, TimeSpan.FromSeconds(10));
             queuedCancellation.Cancel();
             await AssertHttpRequestCanceledAsync(queuedRequest, "The fifth async SQLite request should cancel while waiting for a worker slot.");
 
@@ -225,7 +221,7 @@ internal static partial class IntegrationTests
             await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "callback-entered", activeOperationId), TimeSpan.FromSeconds(10));
             await File.WriteAllTextAsync(SqliteAsyncReleasePath(testDirectory, "hold-a"), "release");
             await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "callback-dispose-started", activeOperationId), TimeSpan.FromSeconds(10));
-            var heldCallbackEvents = await File.ReadAllLinesAsync(Path.Combine(testDirectory, "events.log"));
+            var heldCallbackEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(testDirectory, "events.log"));
             AssertTrue(!heldCallbackEvents.Select(line => line.Split('\t'))
                     .Any(parts => parts.Length == 4 && parts[2] == activeOperationId
                         && parts[1] is "callback-quiesced" or "progress-handler-cleared" or "connection-closing"),
@@ -235,7 +231,7 @@ internal static partial class IntegrationTests
             await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "sqlite-interrupted", activeOperationId), TimeSpan.FromSeconds(10));
             await WaitForFileAsync(SqliteAsyncOperationMarker(testDirectory, "connection-closing", activeOperationId), TimeSpan.FromSeconds(10));
 
-            var events = await File.ReadAllLinesAsync(Path.Combine(testDirectory, "events.log"));
+            var events = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(testDirectory, "events.log"));
             var callbackReturning = SqliteAsyncEventSequence(events, "callback-returning", activeOperationId);
             var callbackQuiesced = SqliteAsyncEventSequence(events, "callback-quiesced", activeOperationId);
             var progressCleared = SqliteAsyncEventSequence(events, "progress-handler-cleared", activeOperationId);
@@ -411,8 +407,8 @@ internal static partial class IntegrationTests
             await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
             await File.WriteAllTextAsync(Path.Combine(deadlineDirectory, "callback-barrier-armed"), "armed");
             var request = client.GetAsync("/probe/hold-deadline", HttpCompletionOption.ResponseHeadersRead);
-            await WaitForFileAsync(SqliteAsyncMarker(deadlineDirectory, "sql-active", "hold-deadline"), TimeSpan.FromSeconds(10));
-            activeOperationId = await File.ReadAllTextAsync(SqliteAsyncMarker(deadlineDirectory, "sql-active", "hold-deadline"));
+            activeOperationId = await WaitForNonEmptyFileContentAsync(
+                SqliteAsyncMarker(deadlineDirectory, "sql-active", "hold-deadline"), TimeSpan.FromSeconds(10));
             await WaitForFileAsync(SqliteAsyncOperationMarker(deadlineDirectory, "pause-entered", activeOperationId),
                 TimeSpan.FromSeconds(10));
             try
@@ -425,7 +421,7 @@ internal static partial class IntegrationTests
                 await File.WriteAllTextAsync(SqliteAsyncReleasePath(deadlineDirectory, "hold-deadline"), "release");
                 using var response = await request.WaitAsync(TimeSpan.FromSeconds(10));
                 var body = await response.Content.ReadAsStringAsync();
-                var timeoutEvents = await File.ReadAllLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
+                var timeoutEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
                 throw new InvalidOperationException(
                     $"The request deadline did not interrupt active SQLite work; response={(int)response.StatusCode} {body}; events={string.Join(" | ", timeoutEvents)}");
             }
@@ -434,7 +430,7 @@ internal static partial class IntegrationTests
             await File.WriteAllTextAsync(SqliteAsyncReleasePath(deadlineDirectory, "hold-deadline"), "release");
             await WaitForFileAsync(SqliteAsyncOperationMarker(deadlineDirectory, "callback-dispose-started", activeOperationId),
                 TimeSpan.FromSeconds(10));
-            var pendingEvents = await File.ReadAllLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
+            var pendingEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
             AssertTrue(!pendingEvents.Select(line => line.Split('\t'))
                     .Any(parts => parts.Length == 4 && parts[2] == activeOperationId
                         && parts[1] is "callback-quiesced" or "progress-handler-cleared" or "connection-closing"),
@@ -449,7 +445,7 @@ internal static partial class IntegrationTests
                     "The deadline response should retain the stable request-timeout body.");
             }
 
-            var events = await File.ReadAllLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
+            var events = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(deadlineDirectory, "events.log"));
             var sqlActive = SqliteAsyncEventSequence(events, "sql-active", activeOperationId);
             var sqliteInterrupted = SqliteAsyncEventSequence(events, "sqlite-interrupted", activeOperationId);
             var interrupt = SqliteAsyncEventSequence(events, "interrupt", activeOperationId);

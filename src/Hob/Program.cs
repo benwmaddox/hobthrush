@@ -2089,9 +2089,9 @@ internal static class Driver
 
         var executable = isWebPackage || entry is not null || entryCommand is not null;
         var usesDatabaseAdapter = package?.WebDatabaseOptions is not null || UsesDatabaseAdapter(program);
-        var usesAsyncSqliteQuery = CheckedReportFacts.UsesAsyncSqliteQueryOne(program);
+        var usesAsyncSqliteOperation = CheckedReportFacts.UsesAsyncSqliteOperation(program);
 #if HOB_INTEGRATION_TEST_BUILD
-        var sqliteAsyncTestHooks = usesAsyncSqliteQuery &&
+        var sqliteAsyncTestHooks = usesAsyncSqliteOperation &&
             Environment.GetEnvironmentVariable("HOB_SQLITE_ASYNC_TEST_HOOKS") == "true";
 #else
         const bool sqliteAsyncTestHooks = false;
@@ -2126,7 +2126,7 @@ internal static class Driver
                     assemblyName,
                     webPackage: isWebPackage,
                     sqlitePackage: usesDatabaseAdapter,
-                    sqliteRawPackage: usesAsyncSqliteQuery,
+                    sqliteRawPackage: usesAsyncSqliteOperation,
                     managedAdapters: adapterReferences));
             File.WriteAllText(
                 Path.Combine(generatedDirectory, "Program.cs"),

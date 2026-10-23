@@ -784,5 +784,10 @@
     "file": "129-valid-async-sqlite-query-one.hob",
     "status": "active",
     "expectedCodes": []
+  },
+  {
+    "file": "130-valid-async-sqlite-execute.hob",
+    "status": "active",
+    "expectedCodes": []
   }
 ]

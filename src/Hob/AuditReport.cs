@@ -371,7 +371,7 @@ internal static class AuditReport
         {
             new(SqlitePackageName, SqlitePackageVersion, "nuget", "generated_build")
         };
-        if (CheckedReportFacts.UsesAsyncSqliteQueryOne(program))
+        if (CheckedReportFacts.UsesAsyncSqliteOperation(program))
             dependencies.Add(new AuditForeignDependency(SqliteRawPackageName, SqliteRawPackageVersion, "nuget", "generated_build"));
         return dependencies;
     }
