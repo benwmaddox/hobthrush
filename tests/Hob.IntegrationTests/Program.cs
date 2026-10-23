@@ -165,6 +165,7 @@ internal static partial class IntegrationTests
             ("SQLite transactions commit once and roll back on scope exit and early return", TestSqliteTransactions),
             ("SQLite row decoding and failures are enforced at runtime", TestSqliteRowDecoding),
             ("SQLite async query_one cancellation, row decoding, and transaction boundaries", TestSqliteAsyncQueryOne),
+            ("SQLite async execute cancellation, commit boundary, rollback, and shared worker limit", TestSqliteAsyncExecute),
             ("SQLite manifest paths, grants, and generated dependency are validated", TestSqlitePackageContract),
             ("SQLite library operations build without web database configuration", TestSqliteLibraryBuild),
             ("maintained scan CLI awaits FsRead and handles typed file and normalization results", TestScanCliExample),
@@ -185,7 +186,7 @@ internal static partial class IntegrationTests
             ("HOB_DOTNET launch failures become process diagnostics", TestDotnetLaunchFailure),
             ("concurrent runs keep their generated outputs isolated", TestParallelRuns)
         };
-        AssertEqual(135, cases.Length, "The integration registry count should match the current accepted suite.");
+        AssertEqual(136, cases.Length, "The integration registry count should match the current accepted suite.");
 
         // Set HOB_INTEGRATION_TEST_FILTER to a case-insensitive test-name substring while iterating on one case.
         var filter = Environment.GetEnvironmentVariable("HOB_INTEGRATION_TEST_FILTER");
@@ -7921,6 +7922,48 @@ internal static partial class IntegrationTests
         }
     }
 
+    private static async Task<string> WaitForNonEmptyFileContentAsync(string path, TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var contents = await File.ReadAllTextAsync(path, cancellation.Token);
+                    if (!string.IsNullOrWhiteSpace(contents))
+                        return contents;
+                }
+                catch (IOException)
+                {
+                    // A marker producer may still have the file open while replacing its contents.
+                }
+            }
+
+            await Task.Delay(20, cancellation.Token);
+        }
+    }
+
+    private static StreamReader OpenSqliteAsyncEventLogReader(string path)
+    {
+        var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
+            bufferSize: 4096, leaveOpen: false);
+    }
+
+    private static async Task<string[]> ReadSqliteAsyncEventLogLinesAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        using var reader = OpenSqliteAsyncEventLogReader(path);
+        var contents = await reader.ReadToEndAsync(cancellationToken);
+        return contents.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+    }
+
     private static async Task AssertProcessTreeWasReapedAsync(string markerPath)
     {
         AssertTrue(File.Exists(markerPath), $"The child process did not publish its PID marker: {markerPath}.");
@@ -13084,14 +13127,14 @@ internal static partial class IntegrationTests
             fixtureSources[$"src/module{fixtureIndex++:D3}.hob"] = await File.ReadAllTextAsync(fixturePath);
         }
 
-        AssertEqual(129, activeFixtureCount,
+        AssertEqual(130, activeFixtureCount,
             "The active formatter fixture corpus must stay aligned with the checked-in fixture manifest.");
         AssertEqual(11, syntaxDiagnosticFixtureCount,
             "Syntax-error fixture exclusions must stay aligned with the checked-in manifest.");
         AssertEqual(string.Join('\n', parserRejectedFixtureFiles.Order(StringComparer.Ordinal)),
             string.Join('\n', parserRejectedFixtureFilesSeen.Order(StringComparer.Ordinal)),
             "Only the four active fixtures rejected by Parser.Parse should be excluded from formatter coverage.");
-        AssertEqual(114, fixtureSources.Count,
+        AssertEqual(115, fixtureSources.Count,
             "Every other active fixture should be included, including semantic-error cases.");
         foreach (var fixtureFile in parserRejectedFixtureFiles)
         {
@@ -13365,7 +13408,7 @@ internal static partial class IntegrationTests
         var fixtures = manifest.RootElement.EnumerateArray().ToArray();
         var activeCount = fixtures.Count(item => item.GetProperty("status").GetString() == "active");
         var pendingCount = fixtures.Count(item => item.GetProperty("status").GetString() == "pending");
-        AssertEqual(129, activeCount, $"Unexpected active fixture count in {manifestPath}.");
+        AssertEqual(130, activeCount, $"Unexpected active fixture count in {manifestPath}.");
         AssertEqual(0, pendingCount, $"Unexpected pending fixture count in {manifestPath}.");
         AssertTrue(fixtures.All(item => item.GetProperty("status").GetString() is "active" or "pending"),
             $"Fixture manifest contains an unknown status: {manifestPath}.");
@@ -13374,7 +13417,7 @@ internal static partial class IntegrationTests
         AssertEqual(0, fixtureRun.ExitCode, Describe(fixtureRun));
         AssertTrue(fixtureRun.StandardOutput.StartsWith("PASS 01-valid-constant.hob ", StringComparison.Ordinal),
             Describe(fixtureRun));
-        AssertTrue(fixtureRun.StandardOutput.EndsWith("129 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
+        AssertTrue(fixtureRun.StandardOutput.EndsWith("130 active, 0 pending, 0 failed" + Environment.NewLine, StringComparison.Ordinal),
             Describe(fixtureRun));
         AssertEqual(string.Empty, fixtureRun.StandardError, Describe(fixtureRun));
 
@@ -13394,6 +13437,14 @@ internal static partial class IntegrationTests
             }
             """;
 
+        string MakeWriteSource(string sql) => $$"""
+            module app::spec;
+            struct Parameters { id: i32 }
+            async fn probe(db: DbWrite) -> Result<i32, DbError> effects { db.write } {
+                return await db.execute_async({{JsonSerializer.Serialize(sql)}}, self::app::spec::Parameters { id: 1 });
+            }
+            """;
+
         var dbDiagnosticPrograms = new (string Code, string Source)[]
         {
             ("E_DB_SQL_LITERAL", MakeReadSource("sql")),
@@ -13402,6 +13453,16 @@ internal static partial class IntegrationTests
             ("E_DB_CODEC_UNSUPPORTED", MakeReadSource(
                 JsonSerializer.Serialize("SELECT path FROM records"),
                 rowFields: "path: FilePath")),
+            ("E_DB_WRITE_STATEMENT", MakeWriteSource("COMMIT")),
+            ("E_DB_ASYNC_IN_TRANSACTION", """
+                module app::spec;
+                struct Parameters { id: i32 }
+                async fn probe(db: DbWrite) -> Result<i32, DbError> effects { db.write } {
+                    with db.begin() as tx {
+                        return await db.execute_async("INSERT INTO records (id) VALUES ($id)", self::app::spec::Parameters { id: 1 });
+                    }
+                }
+                """),
             ("E_DB_PARAMETERS", """
                 module app::spec;
                 fn probe(db: DbWrite) -> bool effects { db.write } {
@@ -13558,9 +13619,9 @@ internal static partial class IntegrationTests
         }
 
         var roadmap = await File.ReadAllTextAsync(Path.Combine(harness.RepositoryRoot, "docs", "roadmap.md"));
-        AssertTrue(Regex.IsMatch(roadmap, @"\b129\s+active\b", RegexOptions.IgnoreCase)
+        AssertTrue(Regex.IsMatch(roadmap, @"\b130\s+active\b", RegexOptions.IgnoreCase)
             && Regex.IsMatch(roadmap, @"\b0\s+pending\b", RegexOptions.IgnoreCase),
-            "docs/roadmap.md must state that all 129 fixtures are active and none are pending.");
+            "docs/roadmap.md must state that all 130 fixtures are active and none are pending.");
     }
 
     private static Dictionary<string, string> ParseDiagnosticTableStatuses(string markdown)

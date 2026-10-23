@@ -461,7 +461,7 @@ internal static class Emitter
                 if (UsesDatabase)
                     _source.AppendLine("using Microsoft.Data.Sqlite;");
             }
-            if (_sqliteAsyncTestHooks && UsesAsyncSqliteQuery && !webHost &&
+            if (_sqliteAsyncTestHooks && UsesAsyncSqliteOperation && !webHost &&
                 !(UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText || UsesFsWriteTextAsync))
                 _source.AppendLine("using System.IO;");
             if (UsesFsReadText || UsesFsReadTextAsync || UsesFsWriteText || UsesFsWriteTextAsync)
@@ -1733,6 +1733,9 @@ internal static class Emitter
                     ", ReadDatabaseRow_" + rowStructId + ")";
             }
 
+            if (call.Operation.Kind == CheckedDatabaseOperationKind.ExecuteAsync)
+                return "DatabaseExecuteAsync(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters + ", " + bindMethod + ")";
+
             if (call.Operation.Kind == CheckedDatabaseOperationKind.Execute)
                 return "DatabaseExecute(" + EmitExpr(call.Receiver) + ", " + sql + ", " + parameters + ", " + bindMethod + ")";
 
@@ -1815,7 +1818,7 @@ internal static class Emitter
                 "await " + EmitIntrinsicCall(intrinsic),
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.ProcessRunTextAsync } intrinsic =>
                 "await " + EmitIntrinsicCall(intrinsic),
-            TypedDatabaseCallExpr { Operation.Kind: CheckedDatabaseOperationKind.QueryOneAsync } call =>
+            TypedDatabaseCallExpr { Operation.Kind: CheckedDatabaseOperationKind.QueryOneAsync or CheckedDatabaseOperationKind.ExecuteAsync } call =>
                 "await " + EmitDatabaseCall(call),
             _ => throw new InvalidOperationException("Await expression has no checked async target")
         };
@@ -3252,10 +3255,10 @@ internal static class Emitter
                 _source.AppendLine("        catch (SqliteException) { return new Result<Option<TRow>, DbError>.Err(new DbError.Statement()); }");
                 _source.AppendLine("    }");
                 }
-
-                if (UsesAsyncSqliteQuery)
-                    EmitDatabaseAsyncQueryHelpers();
             }
+
+            if (UsesAsyncSqliteOperation)
+                EmitDatabaseAsyncOperationHelpers();
 
             if (DatabaseCalls.Any(call => call.Operation.Kind == CheckedDatabaseOperationKind.Execute))
             {
@@ -3351,10 +3354,11 @@ internal static class Emitter
             _source.AppendLine();
         }
 
-        private void EmitDatabaseAsyncQueryHelpers()
+        private void EmitDatabaseAsyncOperationHelpers()
         {
-            _source.AppendLine("    private static readonly SemaphoreSlim DatabaseAsyncQuerySlots = new(4, 4);");
-            _source.AppendLine("    private sealed class DatabaseAsyncCancellationState { internal int Requested; }");
+            _source.AppendLine("    private static readonly SemaphoreSlim DatabaseAsyncSlots = new(4, 4);");
+            _source.AppendLine("    private enum DatabaseAsyncCancellationPhase { Active, CommitStarted, Closed }");
+            _source.AppendLine("    private sealed class DatabaseAsyncCancellationState { internal readonly object Sync = new(); internal DatabaseAsyncCancellationPhase Phase = DatabaseAsyncCancellationPhase.Active; internal int Requested; }");
             _source.AppendLine("    private sealed class DatabaseAsyncInterruptState(SQLitePCL.sqlite3 handle, DatabaseAsyncCancellationState cancellation, long operationId)");
             _source.AppendLine("    {");
             _source.AppendLine("        internal SQLitePCL.sqlite3 Handle { get; } = handle;");
@@ -3366,16 +3370,54 @@ internal static class Emitter
             _source.AppendLine("        var state = (DatabaseAsyncCancellationState)value!;");
             _source.AppendLine("        return Volatile.Read(ref state.Requested) == 0 ? 0 : 1;");
             _source.AppendLine("    }");
-            _source.AppendLine("    private static void InterruptDatabaseAsyncQuery(object? value)");
+            _source.AppendLine("    private static void InterruptDatabaseAsyncOperation(object? value)");
             _source.AppendLine("    {");
             _source.AppendLine("        var state = (DatabaseAsyncInterruptState)value!;");
-            _source.AppendLine("        Volatile.Write(ref state.Cancellation.Requested, 1);");
-            _source.AppendLine("        SQLitePCL.raw.sqlite3_interrupt(state.Handle);");
+            _source.AppendLine("        var phase = DatabaseAsyncCancellationPhase.Closed;");
+            _source.AppendLine("        lock (state.Cancellation.Sync)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            phase = state.Cancellation.Phase;");
+            _source.AppendLine("            if (phase == DatabaseAsyncCancellationPhase.Active)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                Volatile.Write(ref state.Cancellation.Requested, 1);");
+            _source.AppendLine("                SQLitePCL.raw.sqlite3_interrupt(state.Handle);");
+            _source.AppendLine("            }");
+            _source.AppendLine("        }");
+            _source.AppendLine("        if (phase != DatabaseAsyncCancellationPhase.Active)");
+            _source.AppendLine("        {");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (phase == DatabaseAsyncCancellationPhase.CommitStarted) DatabaseAsyncTestRecord(\"interrupt-skipped\", state.OperationId);");
+            _source.AppendLine("            return;");
+            _source.AppendLine("        }");
             if (_sqliteAsyncTestHooks)
             {
                 _source.AppendLine("        DatabaseAsyncTestRecord(\"interrupt\", state.OperationId);");
                 _source.AppendLine("        DatabaseAsyncTestInterruptBarrier(state.OperationId);");
             }
+            _source.AppendLine("    }");
+
+            _source.AppendLine("    private static bool TryStartDatabaseAsyncCommit(DatabaseAsyncCancellationState state, CancellationToken cancellationToken)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        lock (state.Sync)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (state.Phase != DatabaseAsyncCancellationPhase.Active) throw new InvalidOperationException(\"SQLite async operation is no longer active\");");
+            _source.AppendLine("            if (cancellationToken.IsCancellationRequested || Volatile.Read(ref state.Requested) != 0)");
+            _source.AppendLine("            {");
+            _source.AppendLine("                Volatile.Write(ref state.Requested, 1);");
+            _source.AppendLine("                return false;");
+            _source.AppendLine("            }");
+            _source.AppendLine("            state.Phase = DatabaseAsyncCancellationPhase.CommitStarted;");
+            _source.AppendLine("            return true;");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static bool CloseDatabaseAsyncCancellationState(DatabaseAsyncCancellationState state, CancellationToken cancellationToken)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        lock (state.Sync)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var cancellationBeforeCommit = Volatile.Read(ref state.Requested) != 0 || state.Phase == DatabaseAsyncCancellationPhase.Active && cancellationToken.IsCancellationRequested;");
+            _source.AppendLine("            state.Phase = DatabaseAsyncCancellationPhase.Closed;");
+            _source.AppendLine("            return cancellationBeforeCommit;");
+            _source.AppendLine("        }");
             _source.AppendLine("    }");
 
             if (_sqliteAsyncTestHooks)
@@ -3388,16 +3430,16 @@ internal static class Emitter
             if (_sqliteAsyncTestHooks)
             {
                 _source.AppendLine("        operationId = DatabaseAsyncTestNextOperationId();");
-                _source.AppendLine("        if (DatabaseAsyncQuerySlots.CurrentCount == 0) DatabaseAsyncTestRecord(\"queued\", operationId);");
+                _source.AppendLine("        if (DatabaseAsyncSlots.CurrentCount == 0) DatabaseAsyncTestRecord(\"queued\", operationId);");
             }
-            _source.AppendLine("        await DatabaseAsyncQuerySlots.WaitAsync(cancellationToken);");
+            _source.AppendLine("        await DatabaseAsyncSlots.WaitAsync(cancellationToken);");
             _source.AppendLine("        try");
             _source.AppendLine("        {");
             if (_sqliteAsyncTestHooks)
                 _source.AppendLine("            DatabaseAsyncTestRecord(\"admitted\", operationId);");
             _source.AppendLine("            return await Task.Run(() => DatabaseQueryOneWorker(database, sql, parameters, bindParameters, getColumnOrdinals, readRow, cancellationToken, operationId), CancellationToken.None);");
             _source.AppendLine("        }");
-            _source.AppendLine("        finally { DatabaseAsyncQuerySlots.Release(); }");
+            _source.AppendLine("        finally { DatabaseAsyncSlots.Release(); }");
             _source.AppendLine("    }");
 
             _source.AppendLine("    private static Result<Option<TRow>, DbError> DatabaseQueryOneWorker<TParameters, TRow>(DbRead database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters, Func<SqliteDataReader, int[]> getColumnOrdinals, Func<SqliteDataReader, int[], TRow> readRow, CancellationToken cancellationToken, long operationId)");
@@ -3419,7 +3461,7 @@ internal static class Emitter
             _source.AppendLine("            try");
             _source.AppendLine("            {");
             _source.AppendLine("                var interruptState = new DatabaseAsyncInterruptState(nativeHandle, cancellationState, operationId);");
-            _source.AppendLine("                interruptRegistration = cancellationToken.Register(InterruptDatabaseAsyncQuery, interruptState);");
+            _source.AppendLine("                interruptRegistration = cancellationToken.Register(InterruptDatabaseAsyncOperation, interruptState);");
             if (_sqliteAsyncTestHooks)
             {
                 _source.AppendLine("                DatabaseAsyncTestBeforeExecution(operationId);");
@@ -3453,6 +3495,7 @@ internal static class Emitter
             _source.AppendLine("            }");
             _source.AppendLine("            finally");
             _source.AppendLine("            {");
+            _source.AppendLine("                _ = CloseDatabaseAsyncCancellationState(cancellationState, cancellationToken);");
             if (_sqliteAsyncTestHooks)
                 _source.AppendLine("                if (Volatile.Read(ref cancellationState.Requested) != 0) DatabaseAsyncTestRecord(\"callback-dispose-started\", operationId);");
             _source.AppendLine("                interruptRegistration.Dispose();");
@@ -3468,7 +3511,7 @@ internal static class Emitter
             _source.AppendLine("                GC.KeepAlive(progressHandler);");
             if (_sqliteAsyncTestHooks)
             {
-                _source.AppendLine("                if (Volatile.Read(ref cancellationState.Requested) != 0) DatabaseAsyncTestRecord(\"connection-closing\", operationId);");
+                _source.AppendLine("                DatabaseAsyncTestRecord(\"connection-closing\", operationId);");
             }
             _source.AppendLine("            }");
             _source.AppendLine("        }");
@@ -3487,6 +3530,133 @@ internal static class Emitter
             _source.AppendLine("        catch (SqliteException) { return new Result<Option<TRow>, DbError>.Err(new DbError.Statement()); }");
             _source.AppendLine("    }");
             _source.AppendLine();
+            if (UsesAsyncSqliteExecute)
+                EmitDatabaseAsyncWriteHelper();
+        }
+
+        private void EmitDatabaseAsyncWriteHelper()
+        {
+            _source.AppendLine("    private static async Task<Result<int, DbError>> DatabaseExecuteAsync<TParameters>(DbWrite database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        var cancellationToken = database.CancellationToken;");
+            _source.AppendLine("        long operationId = 0;");
+            if (_sqliteAsyncTestHooks)
+            {
+                _source.AppendLine("        operationId = DatabaseAsyncTestNextOperationId();");
+                _source.AppendLine("        if (DatabaseAsyncSlots.CurrentCount == 0) DatabaseAsyncTestRecord(\"queued\", operationId);");
+            }
+            _source.AppendLine("        await DatabaseAsyncSlots.WaitAsync(cancellationToken);");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"admitted\", operationId);");
+            _source.AppendLine("            return await Task.Run(() => DatabaseExecuteAsyncWorker(database, sql, parameters, bindParameters, cancellationToken, operationId), CancellationToken.None);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        finally { DatabaseAsyncSlots.Release(); }");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static Result<int, DbError> DatabaseExecuteAsyncWorker<TParameters>(DbWrite database, string sql, TParameters parameters, Action<SqliteCommand, TParameters> bindParameters, CancellationToken cancellationToken, long operationId)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("        var connectionString = new SqliteConnectionStringBuilder(database.ConnectionString) { Pooling = false, Mode = SqliteOpenMode.ReadWrite }.ToString();");
+            _source.AppendLine("        using var connection = new SqliteConnection(connectionString);");
+            _source.AppendLine("        try { connection.Open(); }");
+            _source.AppendLine("        catch (SqliteException) { cancellationToken.ThrowIfCancellationRequested(); return new Result<int, DbError>.Err(new DbError.Statement()); }");
+            _source.AppendLine("        cancellationToken.ThrowIfCancellationRequested();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("        DatabaseAsyncTestRecord(\"opened\", operationId);");
+            _source.AppendLine("        var nativeHandle = connection.Handle;");
+            _source.AppendLine("        var cancellationState = new DatabaseAsyncCancellationState();");
+            _source.AppendLine("        SQLitePCL.delegate_progress progressHandler = DatabaseCancellationProgress;");
+            _source.AppendLine("        SQLitePCL.raw.sqlite3_progress_handler(nativeHandle, 1000, progressHandler, cancellationState);");
+            _source.AppendLine("        var interruptRegistration = default(CancellationTokenRegistration);");
+            _source.AppendLine("        SqliteTransaction? transaction = null;");
+            _source.AppendLine("        var cancellationHooksClosed = false;");
+            _source.AppendLine("        var cancellationBeforeCommit = false;");
+            _source.AppendLine("        void CloseCancellationHooks()");
+            _source.AppendLine("        {");
+            _source.AppendLine("            if (cancellationHooksClosed) return;");
+            _source.AppendLine("            cancellationHooksClosed = true;");
+            _source.AppendLine("            cancellationBeforeCommit = CloseDatabaseAsyncCancellationState(cancellationState, cancellationToken);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (Volatile.Read(ref cancellationState.Requested) != 0) DatabaseAsyncTestRecord(\"callback-dispose-started\", operationId);");
+            _source.AppendLine("            interruptRegistration.Dispose();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (Volatile.Read(ref cancellationState.Requested) != 0) DatabaseAsyncTestRecord(\"callback-quiesced\", operationId);");
+            _source.AppendLine("            SQLitePCL.raw.sqlite3_progress_handler(nativeHandle, 0, null!, null);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (Volatile.Read(ref cancellationState.Requested) != 0) DatabaseAsyncTestRecord(\"progress-handler-cleared\", operationId);");
+            _source.AppendLine("            GC.KeepAlive(progressHandler);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        try");
+            _source.AppendLine("        {");
+            _source.AppendLine("            var interruptState = new DatabaseAsyncInterruptState(nativeHandle, cancellationState, operationId);");
+            _source.AppendLine("            interruptRegistration = cancellationToken.Register(InterruptDatabaseAsyncOperation, interruptState);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestBeforeExecution(operationId);");
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            connection.CreateFunction<string, string?>(\"hob_test_pause\", id => DatabaseAsyncTestPause(operationId, id), false);");
+            _source.AppendLine("            transaction = connection.BeginTransaction();");
+            _source.AppendLine("            using var command = connection.CreateCommand();");
+            _source.AppendLine("            command.Transaction = transaction;");
+            _source.AppendLine("            command.CommandText = sql;");
+            _source.AppendLine("            bindParameters(command, parameters);");
+            _source.AppendLine("            cancellationToken.ThrowIfCancellationRequested();");
+            _source.AppendLine("            var affectedRows = command.ExecuteNonQuery();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestBeforeCommit(operationId);");
+            _source.AppendLine("            if (!TryStartDatabaseAsyncCommit(cancellationState, cancellationToken))");
+            _source.AppendLine("            {");
+            _source.AppendLine("                CloseCancellationHooks();");
+            _source.AppendLine("                try { transaction.Rollback(); } catch { }");
+            _source.AppendLine("                throw new OperationCanceledException(cancellationToken);");
+            _source.AppendLine("            }");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestCommitStarted(operationId);");
+            _source.AppendLine("            transaction.Commit();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"commit-completed\", operationId);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"provider-result-ok\", operationId, affectedRows.ToString(CultureInfo.InvariantCulture));");
+            _source.AppendLine("            return new Result<int, DbError>.Ok(affectedRows);");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (OperationCanceledException)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            CloseCancellationHooks();");
+            _source.AppendLine("            try { transaction?.Rollback(); } catch { }");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"provider-result-canceled\", operationId);");
+            _source.AppendLine("            throw;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch (SqliteException error)");
+            _source.AppendLine("        {");
+            _source.AppendLine("            CloseCancellationHooks();");
+            _source.AppendLine("            try { transaction?.Rollback(); } catch { }");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (error.SqliteErrorCode == 9) DatabaseAsyncTestRecord(\"sqlite-interrupted\", operationId);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            if (cancellationBeforeCommit) DatabaseAsyncTestRecord(\"provider-result-canceled\", operationId);");
+            _source.AppendLine("            if (cancellationBeforeCommit) throw new OperationCanceledException(cancellationToken);");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"provider-result-error\", operationId, \"statement\");");
+            _source.AppendLine("            return new Result<int, DbError>.Err(new DbError.Statement());");
+            _source.AppendLine("        }");
+            _source.AppendLine("        catch");
+            _source.AppendLine("        {");
+            _source.AppendLine("            CloseCancellationHooks();");
+            _source.AppendLine("            try { transaction?.Rollback(); } catch { }");
+            _source.AppendLine("            throw;");
+            _source.AppendLine("        }");
+            _source.AppendLine("        finally");
+            _source.AppendLine("        {");
+            _source.AppendLine("            CloseCancellationHooks();");
+            _source.AppendLine("            transaction?.Dispose();");
+            if (_sqliteAsyncTestHooks)
+                _source.AppendLine("            DatabaseAsyncTestRecord(\"connection-closing\", operationId);");
+            _source.AppendLine("            connection.Dispose();");
+            _source.AppendLine("        }");
+            _source.AppendLine("    }");
+            _source.AppendLine();
         }
 
         private void EmitDatabaseAsyncTestHooks()
@@ -3496,6 +3666,8 @@ internal static class Emitter
             _source.AppendLine("    private static long DatabaseAsyncTestEventSequence;");
             _source.AppendLine("    private static int DatabaseAsyncTestRegistrationBarrierUsed;");
             _source.AppendLine("    private static int DatabaseAsyncTestCallbackBarrierUsed;");
+            _source.AppendLine("    private static int DatabaseAsyncTestPreCommitBarrierUsed;");
+            _source.AppendLine("    private static int DatabaseAsyncTestCommitBarrierUsed;");
             _source.AppendLine("    private static long DatabaseAsyncTestNextOperationId() => Interlocked.Increment(ref DatabaseAsyncTestOperationId);");
             _source.AppendLine("    private static void DatabaseAsyncTestBeforeExecution(long operationId)");
             _source.AppendLine("    {");
@@ -3504,6 +3676,23 @@ internal static class Emitter
             _source.AppendLine("        var directory = Environment.GetEnvironmentVariable(\"HOB_SQLITE_ASYNC_TEST_DIR\") ?? throw new InvalidOperationException();");
             _source.AppendLine("        var releasePath = Path.Combine(directory, \"release-registered-\" + operationId.ToString(CultureInfo.InvariantCulture));");
             _source.AppendLine("        if (!SpinWait.SpinUntil(() => File.Exists(releasePath), TimeSpan.FromSeconds(45))) throw new TimeoutException(\"Async SQLite registration barrier was not released.\");");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static void DatabaseAsyncTestBeforeCommit(long operationId)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        DatabaseAsyncTestRecord(\"before-commit\", operationId);");
+            _source.AppendLine("        var directory = Environment.GetEnvironmentVariable(\"HOB_SQLITE_ASYNC_TEST_DIR\") ?? throw new InvalidOperationException();");
+            _source.AppendLine("        if (!File.Exists(Path.Combine(directory, \"precommit-barrier-armed\")) || Interlocked.Exchange(ref DatabaseAsyncTestPreCommitBarrierUsed, 1) != 0) return;");
+            _source.AppendLine("        var releasePath = Path.Combine(directory, \"release-before-commit-\" + operationId.ToString(CultureInfo.InvariantCulture));");
+            _source.AppendLine("        if (!SpinWait.SpinUntil(() => File.Exists(releasePath), TimeSpan.FromSeconds(45))) throw new TimeoutException(\"Async SQLite precommit barrier was not released.\");");
+            _source.AppendLine("    }");
+            _source.AppendLine("    private static void DatabaseAsyncTestCommitStarted(long operationId)");
+            _source.AppendLine("    {");
+            _source.AppendLine("        DatabaseAsyncTestRecord(\"commit-started\", operationId);");
+            _source.AppendLine("        var directory = Environment.GetEnvironmentVariable(\"HOB_SQLITE_ASYNC_TEST_DIR\") ?? throw new InvalidOperationException();");
+            _source.AppendLine("        if (!File.Exists(Path.Combine(directory, \"commit-barrier-armed\")) || Interlocked.Exchange(ref DatabaseAsyncTestCommitBarrierUsed, 1) != 0) return;");
+            _source.AppendLine("        var releasePath = Path.Combine(directory, \"release-commit-\" + operationId.ToString(CultureInfo.InvariantCulture));");
+            _source.AppendLine("        if (!SpinWait.SpinUntil(() => File.Exists(releasePath), TimeSpan.FromSeconds(45))) throw new TimeoutException(\"Async SQLite commit barrier was not released.\");");
+            _source.AppendLine("        DatabaseAsyncTestRecord(\"commit-barrier-released\", operationId);");
             _source.AppendLine("    }");
             _source.AppendLine("    private static void DatabaseAsyncTestInterruptBarrier(long operationId)");
             _source.AppendLine("    {");
@@ -4974,6 +5163,11 @@ internal static class Emitter
 
         private bool UsesAsyncSqliteQuery => DatabaseCalls.Any(call =>
             call.Operation.Kind == CheckedDatabaseOperationKind.QueryOneAsync);
+
+        private bool UsesAsyncSqliteExecute => DatabaseCalls.Any(call =>
+            call.Operation.Kind == CheckedDatabaseOperationKind.ExecuteAsync);
+
+        private bool UsesAsyncSqliteOperation => UsesAsyncSqliteQuery || UsesAsyncSqliteExecute;
 
         private IReadOnlyList<TypedDatabaseCallExpr> DatabaseCalls => EmittedFunctions
             .SelectMany(function => EnumerateStatements(function.Body))

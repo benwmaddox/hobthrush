@@ -203,7 +203,7 @@ internal static class CheckedReportFacts
         "Clock.unix_time_ms" => ["clock.read"],
         "FsWrite.write_text" or "FsWrite.write_text_async" => ["fs.write"],
         "DbRead.query_one" or "DbRead.query_one_async" => ["db.read"],
-        "DbWrite.execute" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => ["db.write"],
+        "DbWrite.execute" or "DbWrite.execute_async" or "DbWrite.begin" or "Transaction.execute" or "Transaction.commit" => ["db.write"],
         "HttpClient.get_text_async" => ["net.client"],
         "ProcessRunner.run_text_async" => ["process.spawn"],
         "Config.get_text" or "Config.get_secret_text" => ["env.read"],
@@ -419,6 +419,7 @@ internal static class CheckedReportFacts
                         CheckedDatabaseOperationKind.QueryOne => "DbRead.query_one",
                         CheckedDatabaseOperationKind.QueryOneAsync => "DbRead.query_one_async",
                         CheckedDatabaseOperationKind.Execute => "DbWrite.execute",
+                        CheckedDatabaseOperationKind.ExecuteAsync => "DbWrite.execute_async",
                         CheckedDatabaseOperationKind.TransactionExecute => "Transaction.execute",
                         _ => throw new InvalidOperationException("Unknown checked database operation")
                     });
@@ -491,8 +492,8 @@ internal static class CheckedReportFacts
             };
     }
 
-    public static bool UsesAsyncSqliteQueryOne(CheckedProgram program) =>
+    public static bool UsesAsyncSqliteOperation(CheckedProgram program) =>
         program.Functions.Any(function =>
             FindTrustedAdapterOperations(program, function)
-                .Any(operation => operation.Operation == "DbRead.query_one_async"));
+                .Any(operation => operation.Operation is "DbRead.query_one_async" or "DbWrite.execute_async"));
 }
