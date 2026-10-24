@@ -604,7 +604,15 @@ internal sealed record TypedResultPropagateExpr(
     TypedExpr Operand,
     Token At) : TypedExpr(OkType, At);
 
-internal enum CheckedDatabaseOperationKind { QueryOne, QueryOneAsync, Execute, ExecuteAsync, TransactionExecute }
+internal enum CheckedDatabaseOperationKind
+{
+    QueryOne,
+    QueryOneAsync,
+    Execute,
+    ExecuteAsync,
+    TransactionExecute,
+    TransactionExecuteAsync
+}
 internal sealed record CheckedDatabaseOperation(
     CheckedDatabaseOperationKind Kind,
     string Effect,
@@ -618,6 +626,8 @@ internal sealed record TypedDatabaseCallExpr(
     CheckedDatabaseOperation Operation,
     Token At) : TypedExpr(Type, At);
 internal sealed record TypedTransactionCommitExpr(int TransactionLocalId, Token At)
+    : TypedExpr(HobType.Result(HobType.Bool, HobType.DbError), At);
+internal sealed record TypedTransactionCommitAsyncExpr(int TransactionLocalId, Token At)
     : TypedExpr(HobType.Result(HobType.Bool, HobType.DbError), At);
 
 internal enum BuiltinVariant
@@ -715,6 +725,7 @@ internal sealed record TypedWithTransactionStmt(
     TypedExpr Database,
     int TransactionLocalId,
     string TransactionName,
+    bool IsAsync,
     IReadOnlyList<TypedStmt> Body,
     Token At) : TypedStmt(At);
 
@@ -945,6 +956,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     private readonly List<CommandSymbol> _commands = [];
     private readonly List<CheckedRoute> _routes = [];
     private readonly HashSet<int> _activeTransactionLocals = [];
+    private readonly HashSet<int> _asyncTransactionLocals = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceListDiagnosticLocations = [];
     private readonly HashSet<(string File, int Line, int Column)> _resourceMapDiagnosticLocations = [];
     private readonly HashSet<(string File, int Line, int Column)> _mapKeyDiagnosticLocations = [];
@@ -3520,23 +3532,42 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         List<TypedStmt> typedStatements,
         Dictionary<string, LocalSymbol> locals)
     {
+        var beginCall = transaction.Begin switch
+        {
+            MemberCallExpr { Member: "begin" } call => call,
+            AwaitExpr { Value: MemberCallExpr { Member: "begin_async" } call } => call,
+            MemberCallExpr { Member: "begin_async" } call => call,
+            _ => null
+        };
+        var isAsync = beginCall?.Member == "begin_async";
         TypedExpr database;
-        if (transaction.Begin is MemberCallExpr beginCall && beginCall.Member == "begin")
+        if (beginCall is not null && beginCall.Member is "begin" or "begin_async")
         {
             var diagnosticsBeforeReceiver = diagnostics.Count;
             database = CheckExpr(beginCall.Target, HobType.DbWrite, locals, 0);
             if (beginCall.Arguments.Count != 0)
-                Add("E_TYPE_MISMATCH", $"Intrinsic 'DbWrite.begin' expects 0 arguments, got {beginCall.Arguments.Count}", beginCall.MemberAt);
+                Add("E_TYPE_MISMATCH", $"Intrinsic 'DbWrite.{beginCall.Member}' expects 0 arguments, got {beginCall.Arguments.Count}", beginCall.MemberAt);
             foreach (var argument in beginCall.Arguments)
                 _ = CheckExpr(argument, null, locals, 0);
 
-            if (database.Type.IsDbWrite && beginCall.Arguments.Count == 0 && diagnostics.Count == diagnosticsBeforeReceiver)
-                _currentFunction?.DirectEffects.Add(new DirectEffectCall("db.write", "DbWrite.begin", beginCall.MemberAt));
+            if (isAsync && transaction.Begin is not AwaitExpr)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'DbWrite.begin_async' must be called with 'await'", beginCall.At);
+            if (isAsync && _currentFunction?.Declaration.IsAsync != true)
+                Add("E_AWAIT_CONTEXT", "The 'await' expression is only valid inside an async function", transaction.Begin.At);
+            if (isAsync && _activeTransactionLocals.Count != 0)
+                Add("E_DB_ASYNC_IN_TRANSACTION", "DbWrite.begin_async cannot open a nested transaction inside a lexical database transaction scope", transaction.Begin.At);
+
+            if (database.Type.IsDbWrite && beginCall.Arguments.Count == 0 &&
+                (!isAsync || transaction.Begin is AwaitExpr) && diagnostics.Count == diagnosticsBeforeReceiver)
+                _currentFunction?.DirectEffects.Add(new DirectEffectCall(
+                    "db.write",
+                    isAsync ? "DbWrite.begin_async" : "DbWrite.begin",
+                    beginCall.MemberAt));
         }
         else
         {
             _ = CheckExpr(transaction.Begin, null, locals, 0);
-            Add("E_TYPE_MISMATCH", "Transaction scope requires a direct DbWrite.begin() call", transaction.Begin.At);
+            Add("E_TYPE_MISMATCH", "Transaction scope requires a direct DbWrite.begin() or awaited DbWrite.begin_async() call", transaction.Begin.At);
             database = new TypedErrorExpr(transaction.Begin.At);
         }
 
@@ -3552,6 +3583,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         }
 
         _activeTransactionLocals.Add(transactionLocalId);
+        if (isAsync)
+            _asyncTransactionLocals.Add(transactionLocalId);
         var body = new List<TypedStmt>();
         bool bodyReturns;
         try
@@ -3561,12 +3594,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         finally
         {
             _activeTransactionLocals.Remove(transactionLocalId);
+            _asyncTransactionLocals.Remove(transactionLocalId);
         }
 
         typedStatements.Add(new TypedWithTransactionStmt(
             database,
             transactionLocalId,
             transaction.Name,
+            isAsync,
             ReadOnly(body),
             transaction.At));
         return bodyReturns;
@@ -4136,7 +4171,7 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
     {
         var canReachAsyncDatabaseOperation = new HashSet<int>(_functions
             .Where(function => function.DirectEffects.Any(effect =>
-                effect.IntrinsicName is "DbRead.query_one_async" or "DbWrite.execute_async"))
+                effect.IntrinsicName is "DbRead.query_one_async" or "DbWrite.execute_async" or "DbWrite.begin_async"))
             .Select(function => function.Id));
         var changed = true;
         while (changed)
@@ -4458,7 +4493,9 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         if (value is TypedCallExpr { IsAsync: true } or
             TypedIntrinsicCallExpr { Intrinsic: BuiltinIntrinsic.FsReadTextAsync or BuiltinIntrinsic.FsWriteTextAsync or
                 BuiltinIntrinsic.HttpGetTextAsync or BuiltinIntrinsic.ProcessRunTextAsync } or
-            TypedDatabaseCallExpr { Operation.Kind: CheckedDatabaseOperationKind.QueryOneAsync or CheckedDatabaseOperationKind.ExecuteAsync })
+            TypedDatabaseCallExpr { Operation.Kind: CheckedDatabaseOperationKind.QueryOneAsync or
+                CheckedDatabaseOperationKind.ExecuteAsync or CheckedDatabaseOperationKind.TransactionExecuteAsync } or
+            TypedTransactionCommitAsyncExpr)
             return new TypedAwaitExpr(value.Type, value, expression.At);
 
         if (value.Type.IsError)
@@ -6035,7 +6072,14 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
             locals.TryGetValue(transactionName.Name, out var transactionLocal) &&
             transactionLocal.Type.IsTransaction)
         {
-            return CheckTransactionMemberCall(expression, expected, locals, depth, transactionName, transactionLocal);
+            return CheckTransactionMemberCall(
+                expression,
+                expected,
+                locals,
+                depth,
+                transactionName,
+                transactionLocal,
+                isAwaitOperand);
         }
 
         if (expression.Target is NameExpr targetName && !locals.ContainsKey(targetName.Name))
@@ -6586,6 +6630,17 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                 asynchronousWrite: expression.Member == "execute_async");
         }
 
+        if (receiver.Type.IsDbWrite && expression.Member == "begin_async")
+        {
+            foreach (var argument in expression.Arguments)
+                _ = CheckExpr(argument, null, locals, depth);
+            Add(
+                "E_RESOURCE_ESCAPE",
+                "An async transaction must be opened directly in a 'with await db.begin_async() as tx' scope",
+                expression.MemberAt);
+            return new TypedErrorExpr(expression.At);
+        }
+
         if (IsDatabaseMember(expression.Member))
         {
             foreach (var argument in expression.Arguments)
@@ -6918,30 +6973,53 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         Dictionary<string, LocalSymbol> locals,
         int depth,
         NameExpr transactionName,
-        LocalSymbol transactionLocal)
+        LocalSymbol transactionLocal,
+        bool isAwaitOperand)
     {
-        if (!_activeTransactionLocals.Contains(transactionLocal.Id) ||
-            expression.Member is not ("execute" or "commit"))
+        var isAsyncScope = _asyncTransactionLocals.Contains(transactionLocal.Id);
+        var methodMatchesScope = isAsyncScope
+            ? expression.Member is "execute_async" or "commit_async"
+            : expression.Member is "execute" or "commit";
+        if (!_activeTransactionLocals.Contains(transactionLocal.Id) || !methodMatchesScope)
         {
             Add(
                 "E_RESOURCE_ESCAPE",
-                $"Transaction '{transactionName.Name}' may only be used as the direct receiver of execute() or commit() inside its with scope",
+                isAsyncScope
+                    ? $"Transaction '{transactionName.Name}' may only be used as the direct receiver of execute_async() or commit_async() inside its awaited with scope"
+                    : $"Transaction '{transactionName.Name}' may only be used as the direct receiver of execute() or commit() inside its with scope",
                 expression.MemberAt);
             foreach (var argument in expression.Arguments)
                 _ = CheckExpr(argument, null, locals, depth);
             return new TypedErrorExpr(expression.At);
         }
 
-        if (expression.Member == "execute")
+        if (expression.Member is "execute" or "execute_async")
         {
             var receiver = new TypedLocalExpr(HobType.Transaction, transactionLocal.Id, transactionName.At);
-            return CheckDatabaseCall(expression, expected, locals, depth, receiver, transactionExecute: true);
+            return CheckDatabaseCall(
+                expression,
+                expected,
+                locals,
+                depth,
+                receiver,
+                transactionExecute: !isAsyncScope,
+                isAwaitOperand: isAwaitOperand,
+                asynchronousTransactionExecute: isAsyncScope);
         }
 
         if (expression.Arguments.Count != 0)
-            Add("E_TYPE_MISMATCH", $"Intrinsic 'Transaction.commit' expects 0 arguments, got {expression.Arguments.Count}", expression.MemberAt);
+            Add(
+                "E_TYPE_MISMATCH",
+                $"Intrinsic 'Transaction.{expression.Member}' expects 0 arguments, got {expression.Arguments.Count}",
+                expression.MemberAt);
         foreach (var argument in expression.Arguments)
             _ = CheckExpr(argument, null, locals, depth);
+        if (isAsyncScope)
+        {
+            if (!isAwaitOperand)
+                Add("E_ASYNC_CALL_UNAWAITED", "Intrinsic 'Transaction.commit_async' must be called with 'await'", expression.At);
+            return new TypedTransactionCommitAsyncExpr(transactionLocal.Id, expression.At);
+        }
         return new TypedTransactionCommitExpr(transactionLocal.Id, expression.At);
     }
 
@@ -6954,19 +7032,21 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         bool transactionExecute = false,
         bool isAwaitOperand = false,
         bool asynchronousQuery = false,
-        bool asynchronousWrite = false)
+        bool asynchronousWrite = false,
+        bool asynchronousTransactionExecute = false)
     {
         var diagnosticsBeforeCall = diagnostics.Count;
         var queryOne = expression.Member is "query_one" or "query_one_async";
-        var asynchronousOperation = asynchronousQuery || asynchronousWrite;
+        var asynchronousOperation = asynchronousQuery || asynchronousWrite || asynchronousTransactionExecute;
         var operationName = asynchronousQuery
             ? "DbRead.query_one_async"
             : asynchronousWrite ? "DbWrite.execute_async"
+            : asynchronousTransactionExecute ? "Transaction.execute_async"
             : queryOne ? "DbRead.query_one" : transactionExecute ? "Transaction.execute" : "DbWrite.execute";
         var effect = queryOne ? "db.read" : "db.write";
         if (asynchronousOperation && !isAwaitOperand)
             Add("E_ASYNC_CALL_UNAWAITED", $"Intrinsic '{operationName}' must be called with 'await'", expression.At);
-        if (asynchronousOperation && _activeTransactionLocals.Count != 0)
+        if (asynchronousOperation && !asynchronousTransactionExecute && _activeTransactionLocals.Count != 0)
             Add(
                 "E_DB_ASYNC_IN_TRANSACTION",
                 $"{operationName} cannot run inside a lexical database transaction scope",
@@ -7002,11 +7082,11 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     expression.Arguments[0].At);
             }
 
-            if (transactionExecute && hasLiteralSql && !IsSingleSqliteTransactionWrite(sql))
+            if ((transactionExecute || asynchronousTransactionExecute) && hasLiteralSql && !IsSingleSqliteTransactionWrite(sql))
             {
                 Add(
                     "E_DB_TRANSACTION_STATEMENT",
-                    "Transaction.execute requires one INSERT, UPDATE, DELETE, or REPLACE statement with no semicolon; transaction-control and other SQL statements are not supported",
+                    $"{operationName} requires one INSERT, UPDATE, DELETE, or REPLACE statement with no semicolon; transaction-control and other SQL statements are not supported",
                     expression.Arguments[0].At);
             }
 
@@ -7085,6 +7165,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
                     : CheckedDatabaseOperationKind.QueryOne
                 : asynchronousWrite
                     ? CheckedDatabaseOperationKind.ExecuteAsync
+                : asynchronousTransactionExecute
+                    ? CheckedDatabaseOperationKind.TransactionExecuteAsync
                 : transactionExecute
                     ? CheckedDatabaseOperationKind.TransactionExecute
                     : CheckedDatabaseOperationKind.Execute,
@@ -7148,7 +7230,8 @@ internal sealed class SemanticChecker(List<Diagnostic> diagnostics)
         type.Kind == HobTypeKind.Option &&
         (type.Arguments[0].IsI32 || type.Arguments[0].IsBool || type.Arguments[0].IsText);
 
-    private static bool IsDatabaseMember(string member) => member is "query_one" or "query_one_async" or "execute" or "execute_async";
+    private static bool IsDatabaseMember(string member) =>
+        member is "query_one" or "query_one_async" or "execute" or "execute_async" or "begin_async";
 
     private static bool IsSingleSqliteReadSelect(string sql)
     {
