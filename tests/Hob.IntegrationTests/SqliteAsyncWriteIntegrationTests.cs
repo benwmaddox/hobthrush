@@ -6,13 +6,27 @@ internal static partial class IntegrationTests
 {
     private static async Task TestSqliteAsyncExecute(Harness harness)
     {
-        await TestSqliteAsyncEventLogReadSharing(harness);
-        await TestSqliteAsyncExecuteDiagnostics(harness);
-        await TestSqliteAsyncExecuteReports(harness);
-        await TestSqliteAsyncExecuteRuntime(harness);
-        await TestSqliteAsyncExecutePreCommitDeadline(harness);
-        await TestSqliteAsyncExecuteLateCancellation(harness, commitFailure: false);
-        await TestSqliteAsyncExecuteLateCancellation(harness, commitFailure: true);
+        var phase = "event log sharing";
+        try
+        {
+            await TestSqliteAsyncEventLogReadSharing(harness);
+            phase = "compile diagnostics";
+            await TestSqliteAsyncExecuteDiagnostics(harness);
+            phase = "report contracts";
+            await TestSqliteAsyncExecuteReports(harness);
+            phase = "runtime cancellation, rollback, and capacity";
+            await TestSqliteAsyncExecuteRuntime(harness);
+            phase = "request deadline before commit";
+            await TestSqliteAsyncExecutePreCommitDeadline(harness);
+            phase = "cancellation after successful commit";
+            await TestSqliteAsyncExecuteLateCancellation(harness, commitFailure: false);
+            phase = "cancellation after failed commit";
+            await TestSqliteAsyncExecuteLateCancellation(harness, commitFailure: true);
+        }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException($"Async SQLite execute case failed during {phase}: {error.Message}", error);
+        }
     }
 
     private static async Task TestSqliteAsyncEventLogReadSharing(Harness harness)
@@ -273,10 +287,12 @@ internal static partial class IntegrationTests
         var assertionsCompleted = false;
         var heldIds = new[] { "hold-write-a", "hold-read-a", "hold-read-b", "hold-read-c" };
         string? abortOperationId = null;
+        var phase = "web server startup";
         try
         {
             await WaitForWebServerAsync(process, client, stdoutTask, stderrTask);
 
+            phase = "registration cancellation";
             using (var registrationCancellation = new CancellationTokenSource())
             {
                 var request = client.GetAsync("/write/registration-cancel", HttpCompletionOption.ResponseHeadersRead,
@@ -303,6 +319,7 @@ internal static partial class IntegrationTests
                     "Registration cancellation must quiesce and clear native callbacks before connection teardown.");
             }
 
+            phase = "normal committed write and read";
             using (var created = await client.GetAsync("/write/normal"))
             {
                 AssertEqual(HttpStatusCode.OK, created.StatusCode, "An awaited SQLite write should return its affected-row result.");
@@ -315,6 +332,7 @@ internal static partial class IntegrationTests
                     "The async write should preserve its bound parameter value.");
             }
 
+            phase = "deferred commit failure rollback";
             using (var failedCommit = await client.GetAsync("/deferred/orphan"))
             {
                 AssertEqual(HttpStatusCode.InternalServerError, failedCommit.StatusCode,
@@ -331,6 +349,7 @@ internal static partial class IntegrationTests
                     "The failed child write must also roll back its trigger side effect.");
             }
 
+            phase = "statement failure rollback";
             using (var failedStatement = await client.GetAsync("/write/statement-failure"))
             {
                 AssertEqual(HttpStatusCode.InternalServerError, failedStatement.StatusCode,
@@ -345,6 +364,7 @@ internal static partial class IntegrationTests
                 AssertEqual("0", await statementAudit.Content.ReadAsStringAsync(),
                     "The internal transaction must roll back trigger side effects when a DML statement fails.");
 
+            phase = "precommit cancellation";
             await File.WriteAllTextAsync(Path.Combine(testDirectory, "precommit-barrier-armed"), "armed");
             using (var cancellation = new CancellationTokenSource())
             {
@@ -368,7 +388,9 @@ internal static partial class IntegrationTests
                            < SqliteAsyncEventSequence(events, "connection-closing", operationId),
                     "Cancellation teardown must quiesce callbacks, clear the progress handler, dispose the transaction, then close the connection.");
             }
+            File.Delete(Path.Combine(testDirectory, "precommit-barrier-armed"));
 
+            phase = "in-flight callback cancellation";
             await File.WriteAllTextAsync(Path.Combine(testDirectory, "callback-barrier-armed"), "armed");
             using (var cancellation = new CancellationTokenSource())
             {
@@ -394,6 +416,7 @@ internal static partial class IntegrationTests
                 abortOperationId = operationId;
             }
 
+            phase = "mixed four-request admission";
             var activeRequests = new[]
             {
                 client.GetAsync("/write/hold-write-a"),
@@ -415,6 +438,7 @@ internal static partial class IntegrationTests
             AssertTrue(heldOperationIds.All(operationId => SqliteAsyncEventSequence(activeEvents, "sql-active", operationId) > 0),
                 "Each of the four mixed operations should reach its own SQLite statement concurrently.");
 
+            phase = "queued fifth request cancellation and settlement";
             using (var queuedCancellation = new CancellationTokenSource())
             {
                 var queuedRequest = client.GetAsync("/write/queued-fifth", HttpCompletionOption.ResponseHeadersRead,
@@ -422,20 +446,27 @@ internal static partial class IntegrationTests
                 var queuedOperationId = await WaitForNonEmptyFileContentAsync(
                     Path.Combine(testDirectory, "queued.entered"), TimeSpan.FromSeconds(10));
                 queuedCancellation.Cancel();
+                phase = "client cancellation of queued request";
                 await AssertHttpRequestCanceledAsync(queuedRequest,
                     "A fifth mixed read/write operation should cancel while waiting for shared worker capacity.");
+                phase = "server settlement of queued connection wait";
+                await WaitForEventAsync(Path.Combine(testDirectory, "events.log"), "connection-wait-canceled", queuedOperationId);
 
+                phase = "held writer release and completion";
                 await File.WriteAllTextAsync(SqliteAsyncReleasePath(testDirectory, "hold-write-a"), "release");
                 using (var released = await activeRequests[0].WaitAsync(TimeSpan.FromSeconds(10)))
                     AssertEqual(HttpStatusCode.OK, released.StatusCode, "A held async write should commit after release.");
+                phase = "capacity recovery read";
                 using (var recovered = await client.GetAsync("/read/normal").WaitAsync(TimeSpan.FromSeconds(10)))
                     AssertEqual(HttpStatusCode.OK, recovered.StatusCode, "A later read should acquire capacity after a write releases its slot.");
+                phase = "canceled request never opened a connection";
                 var settledEvents = await ReadSqliteAsyncEventLogLinesAsync(Path.Combine(testDirectory, "events.log"));
                 AssertTrue(!settledEvents.Select(line => line.Split('\t'))
                         .Any(parts => parts.Length == 4 && parts[1] == "opened" && parts[2] == queuedOperationId),
                     "A canceled request queued behind writes and reads must never open a SQLite connection.");
             }
 
+            phase = "remaining mixed worker recovery";
             foreach (var id in heldIds.Where(id => id != "hold-write-a"))
                 await File.WriteAllTextAsync(SqliteAsyncReleasePath(testDirectory, id), "release");
             foreach (var request in activeRequests.Skip(1))
@@ -448,6 +479,15 @@ internal static partial class IntegrationTests
                 "Every admitted read or write must finish teardown before returning its shared worker slot.");
 
             assertionsCompleted = true;
+        }
+        catch (Exception error)
+        {
+            var eventsPath = Path.Combine(testDirectory, "events.log");
+            var eventSummary = File.Exists(eventsPath)
+                ? string.Join(" | ", await ReadSqliteAsyncEventLogLinesAsync(eventsPath))
+                : "(no event log)";
+            throw new InvalidOperationException(
+                $"Async SQLite write runtime failed during {phase}: {error.Message}. Events: {eventSummary}", error);
         }
         finally
         {

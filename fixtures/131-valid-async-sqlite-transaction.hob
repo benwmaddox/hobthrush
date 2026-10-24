@@ -1,0 +1,15 @@
+module app::main;
+
+pub struct Parameters {
+    id: i32
+}
+
+pub async fn write(id: i32, db: DbWrite) -> Result<bool, DbError> effects {db.write} {
+    with await db.begin_async()as tx {
+        let written: Result<i32, DbError> = await tx.execute_async("INSERT INTO items (id) VALUES ($id)", self::app::main::Parameters {
+            id: id
+        });
+        let committed: Result<bool, DbError> = await tx.commit_async();
+        return committed;
+    }
+}
